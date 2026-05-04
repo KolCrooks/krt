@@ -1,0 +1,1578 @@
+From 8ef5a1c44e254a3593048bba63dc780a9fc119a0 Mon Sep 17 00:00:00 2001
+From: Kol Crooks <kol.crooks@datadoghq.com>
+Date: Mon, 4 May 2026 18:11:17 -0400
+Subject: [PATCH] Phase 5: PR view with description, sidebar, activity, reply
+ box
+
+Replaces the Phase 4 placeholder PR pane body with the real PR view:
+- Description rendered via base renderMarkdown (IMarkdownString).
+- Sidebar cards: Reviewers / Checks / Labels / Stats. Reviewer state
+  pills, check status glyphs with optional click-to-open details_url.
+- Activity tabs: Discussion (issue comments) and Automation (timeline
+  events, lazy-loaded on first click).
+- Functional reply box that POSTs an issue comment via gh api and
+  appends the new comment to the discussion timeline.
+
+Provider extensions:
+- IGhClient.apiPostJson(path, body) - gh api -X POST --input - with
+  JSON-encoded stdin (form-encoded -f keys are wrong for endpoints
+  that take arbitrary string bodies).
+- IPullRequestProvider.getActivity(url) - issues/{n}/timeline mapped
+  to AutomationEvent[].
+- IPullRequestProvider.postIssueComment(url, body) - issues/{n}/
+  comments POST returning the new Comment.
+- getPullRequest now parallel-fans REST calls for issue comments,
+  reviews, and check-runs to populate reviewers/checks/comments.
+---
+ src/vs/platform/krt/common/krt.ts             |  20 +
+ .../krt/electron-main/ghClientMainService.ts  |  22 +-
+ .../pullRequestProviderMainService.ts         | 254 +++++++-
+ .../browser/pr/krtPullRequestEditorPane.css   | 570 +++++++++++++++++-
+ .../browser/pr/krtPullRequestEditorPane.ts    | 452 +++++++++++++-
+ 5 files changed, 1271 insertions(+), 47 deletions(-)
+
+diff --git a/src/vs/platform/krt/common/krt.ts b/src/vs/platform/krt/common/krt.ts
+index e7aae1cea6b..ff07355bfa8 100644
+--- a/src/vs/platform/krt/common/krt.ts
++++ b/src/vs/platform/krt/common/krt.ts
+@@ -178,6 +178,13 @@ export interface IGhClient {
+ 	detect(): Promise<GhInfo>;
+ 	/** `gh api <path>` — accumulates stdout, JSON-parses. */
+ 	apiJson<T = unknown>(path: string): Promise<T>;
++	/**
++	 * `gh api <path> -X POST --input -` with the JSON-encoded body on
++	 * stdin. Used for create-comment / approve-review / etc. — any
++	 * write endpoint where the gh CLI's `-f key=val` form encoding is
++	 * the wrong shape.
++	 */
++	apiPostJson<T = unknown>(path: string, body: object): Promise<T>;
+ }
+ 
+ export interface GhInfo {
+@@ -197,4 +204,17 @@ export interface IPullRequestProvider {
+ 	 * (see `errors.ts`).
+ 	 */
+ 	search(query: string, scope: SearchScope): Promise<readonly PullRequestSummary[]>;
++	/**
++	 * Lazy fetch of the PR's automation events (commits, label
++	 * changes, review requests, merges, force pushes …) — Phase 5
++	 * Activity feed's `Automation` tab. Discussion comments live on
++	 * `PullRequest.comments` from `getPullRequest`.
++	 */
++	getActivity(url: string): Promise<readonly AutomationEvent[]>;
++	/**
++	 * Post a top-level discussion comment on the PR (issue comment,
++	 * not a review comment anchored to a line). Returns the new
++	 * `Comment` so the pane can append it without a re-fetch.
++	 */
++	postIssueComment(url: string, body: string): Promise<Comment>;
+ }
+diff --git a/src/vs/platform/krt/electron-main/ghClientMainService.ts b/src/vs/platform/krt/electron-main/ghClientMainService.ts
+index d242bfbf8fd..f467984822b 100644
+--- a/src/vs/platform/krt/electron-main/ghClientMainService.ts
++++ b/src/vs/platform/krt/electron-main/ghClientMainService.ts
+@@ -47,6 +47,19 @@ export class GhClientMainService implements IGhClient {
+ 		}
+ 	}
+ 
++	async apiPostJson<T = unknown>(path: string, body: object): Promise<T> {
++		await this.detect();
++		const json = JSON.stringify(body);
++		const result = await this.spawnGh(['api', path, '-X', 'POST', '--input', '-'], json);
++		this.guardResult(result);
++		try {
++			return JSON.parse(result.stdout) as T;
++		} catch (e) {
++			this.logService.error('[krt] gh api POST stdout was not JSON', e);
++			throw ghInvocation(`expected JSON from gh api POST ${path}, got ${result.stdout.slice(0, 120)}`);
++		}
++	}
++
+ 	private async runDetect(): Promise<GhInfo> {
+ 		let result: SpawnResult;
+ 		try {
+@@ -86,9 +99,11 @@ export class GhClientMainService implements IGhClient {
+ 		throw ghInvocation(result.stderr || result.stdout);
+ 	}
+ 
+-	private spawnGh(args: readonly string[]): Promise<SpawnResult> {
++	private spawnGh(args: readonly string[], stdin?: string): Promise<SpawnResult> {
+ 		return new Promise<SpawnResult>((resolve, reject) => {
+-			const child = spawn('gh', args, { stdio: ['ignore', 'pipe', 'pipe'] });
++			const child = stdin === undefined
++				? spawn('gh', args, { stdio: ['ignore', 'pipe', 'pipe'] })
++				: spawn('gh', args, { stdio: ['pipe', 'pipe', 'pipe'] });
+ 			const stdout: Buffer[] = [];
+ 			const stderr: Buffer[] = [];
+ 			child.stdout.on('data', chunk => stdout.push(chunk));
+@@ -99,6 +114,9 @@ export class GhClientMainService implements IGhClient {
+ 				stdout: Buffer.concat(stdout).toString('utf8'),
+ 				stderr: Buffer.concat(stderr).toString('utf8'),
+ 			}));
++			if (stdin !== undefined) {
++				child.stdin!.end(stdin);
++			}
+ 		});
+ 	}
+ }
+diff --git a/src/vs/platform/krt/electron-main/pullRequestProviderMainService.ts b/src/vs/platform/krt/electron-main/pullRequestProviderMainService.ts
+index 7b940fad6bf..8315572f078 100644
+--- a/src/vs/platform/krt/electron-main/pullRequestProviderMainService.ts
++++ b/src/vs/platform/krt/electron-main/pullRequestProviderMainService.ts
+@@ -3,7 +3,21 @@
+  *  Licensed under the MIT License. See License.txt in the project root for license information.
+  *--------------------------------------------------------------------------------------------*/
+ 
+-import { IGhClient, IPullRequestProvider, parsePullRequestUrl, PullRequest, PullRequestState, PullRequestSummary, SearchScope } from '../common/krt.js';
++import {
++	AutomationEvent,
++	CheckConclusion,
++	CheckRun,
++	Comment,
++	IGhClient,
++	IPullRequestProvider,
++	parsePullRequestUrl,
++	PullRequest,
++	PullRequestState,
++	PullRequestSummary,
++	Reviewer,
++	ReviewerState,
++	SearchScope,
++} from '../common/krt.js';
+ import { badPullRequestUrl } from '../common/errors.js';
+ 
+ interface GhUser {
+@@ -36,6 +50,7 @@ interface GhPullRequest {
+ 	merged_at: string | null;
+ 	closed_at: string | null;
+ 	labels: ReadonlyArray<{ name: string }>;
++	requested_reviewers: ReadonlyArray<GhUser>;
+ }
+ 
+ const ISSUE_HTML_URL_RE = /^https:\/\/github\.com\/(?<owner>[^/]+)\/(?<repo>[^/]+)\/(?:pull|issues)\/(?<number>\d+)/;
+@@ -56,6 +71,51 @@ interface GhSearchItem {
+ 	pull_request?: { merged_at: string | null };
+ }
+ 
++interface GhIssueComment {
++	id: number;
++	user: GhUser;
++	body: string;
++	created_at: string;
++	updated_at: string;
++}
++
++interface GhReview {
++	id: number;
++	user: GhUser;
++	state: 'PENDING' | 'APPROVED' | 'CHANGES_REQUESTED' | 'COMMENTED' | 'DISMISSED';
++	submitted_at: string | null;
++}
++
++interface GhCheckRun {
++	name: string;
++	status: 'queued' | 'in_progress' | 'completed';
++	conclusion: string | null;
++	details_url?: string;
++	started_at?: string;
++	completed_at?: string;
++}
++
++interface GhChecksResponse {
++	check_runs: GhCheckRun[];
++}
++
++interface GhTimelineEvent {
++	id?: number;
++	node_id?: string;
++	event: string;
++	created_at?: string;
++	actor?: GhUser;
++	user?: GhUser;
++	committer?: GhUser;
++	label?: { name: string };
++	requested_reviewer?: GhUser;
++	sha?: string;
++	commit_id?: string;
++	message?: string;
++	state?: string;
++	check_suite?: { conclusion: string | null };
++}
++
+ export class PullRequestProviderMainService implements IPullRequestProvider {
+ 
+ 	declare readonly _serviceBrand: undefined;
+@@ -69,9 +129,15 @@ export class PullRequestProviderMainService implements IPullRequestProvider {
+ 		if (!parsed) {
+ 			throw badPullRequestUrl(url);
+ 		}
+-		const path = `repos/${parsed.owner}/${parsed.repo}/pulls/${parsed.number}`;
+-		const data = await this.ghClient.apiJson<GhPullRequest>(path);
+-		return mapPullRequest(parsed, data);
++		const base = `repos/${parsed.owner}/${parsed.repo}`;
++		const data = await this.ghClient.apiJson<GhPullRequest>(`${base}/pulls/${parsed.number}`);
++		const emptyChecks: GhChecksResponse = { check_runs: [] };
++		const [issueComments, reviews, checks] = await Promise.all([
++			this.ghClient.apiJson<GhIssueComment[]>(`${base}/issues/${parsed.number}/comments?per_page=100`).catch((): GhIssueComment[] => []),
++			this.ghClient.apiJson<GhReview[]>(`${base}/pulls/${parsed.number}/reviews?per_page=100`).catch((): GhReview[] => []),
++			this.ghClient.apiJson<GhChecksResponse>(`${base}/commits/${data.head.sha}/check-runs?per_page=100`).catch((): GhChecksResponse => emptyChecks),
++		]);
++		return mapPullRequest(parsed, data, issueComments, reviews, checks.check_runs ?? []);
+ 	}
+ 
+ 	async search(query: string, scope: SearchScope): Promise<readonly PullRequestSummary[]> {
+@@ -101,6 +167,33 @@ export class PullRequestProviderMainService implements IPullRequestProvider {
+ 		}
+ 		return out;
+ 	}
++
++	async getActivity(url: string): Promise<readonly AutomationEvent[]> {
++		const parsed = parsePullRequestUrl(url);
++		if (!parsed) {
++			throw badPullRequestUrl(url);
++		}
++		const path = `repos/${parsed.owner}/${parsed.repo}/issues/${parsed.number}/timeline?per_page=100`;
++		const events = await this.ghClient.apiJson<GhTimelineEvent[]>(path).catch(() => [] as GhTimelineEvent[]);
++		const out: AutomationEvent[] = [];
++		for (const ev of events) {
++			const mapped = mapTimelineEvent(ev);
++			if (mapped) {
++				out.push(mapped);
++			}
++		}
++		return out;
++	}
++
++	async postIssueComment(url: string, body: string): Promise<Comment> {
++		const parsed = parsePullRequestUrl(url);
++		if (!parsed) {
++			throw badPullRequestUrl(url);
++		}
++		const path = `repos/${parsed.owner}/${parsed.repo}/issues/${parsed.number}/comments`;
++		const created = await this.ghClient.apiPostJson<GhIssueComment>(path, { body });
++		return mapIssueComment(created);
++	}
+ }
+ 
+ function buildSearchQuery(query: string, scope: SearchScope): string {
+@@ -133,7 +226,13 @@ function deriveSummaryState(item: GhSearchItem): PullRequestState {
+ 	return 'open';
+ }
+ 
+-function mapPullRequest(parsed: { owner: string; repo: string; number: number }, data: GhPullRequest): PullRequest {
++function mapPullRequest(
++	parsed: { owner: string; repo: string; number: number },
++	data: GhPullRequest,
++	issueComments: readonly GhIssueComment[],
++	reviews: readonly GhReview[],
++	checks: readonly GhCheckRun[],
++): PullRequest {
+ 	return {
+ 		url: data.html_url,
+ 		owner: parsed.owner,
+@@ -151,13 +250,150 @@ function mapPullRequest(parsed: { owner: string; repo: string; number: number },
+ 		mergedAt: data.merged_at ?? undefined,
+ 		closedAt: data.closed_at ?? undefined,
+ 		labels: data.labels.map(l => l.name),
+-		// Phase 5 fills these in via the comments / reviews / checks endpoints.
+-		reviewers: [],
+-		checks: [],
+-		comments: [],
++		reviewers: mapReviewers(data.requested_reviewers ?? [], reviews),
++		checks: checks.map(mapCheckRun),
++		comments: issueComments.map(mapIssueComment),
++	};
++}
++
++function mapReviewers(requested: readonly GhUser[], reviews: readonly GhReview[]): Reviewer[] {
++	const byLogin = new Map<string, Reviewer>();
++	// Latest review per login wins.
++	const sortedReviews = [...reviews].sort((a, b) => {
++		const aT = a.submitted_at ?? '';
++		const bT = b.submitted_at ?? '';
++		return aT < bT ? -1 : aT > bT ? 1 : 0;
++	});
++	for (const r of sortedReviews) {
++		if (!r.user) {
++			continue;
++		}
++		byLogin.set(r.user.login, {
++			user: { login: r.user.login, avatarUrl: r.user.avatar_url },
++			state: mapReviewerState(r.state),
++			submittedAt: r.submitted_at ?? undefined,
++		});
++	}
++	for (const u of requested) {
++		if (!byLogin.has(u.login)) {
++			byLogin.set(u.login, {
++				user: { login: u.login, avatarUrl: u.avatar_url },
++				state: 'pending',
++			});
++		}
++	}
++	return [...byLogin.values()];
++}
++
++function mapReviewerState(state: GhReview['state']): ReviewerState {
++	switch (state) {
++		case 'APPROVED': return 'approved';
++		case 'CHANGES_REQUESTED': return 'changes_requested';
++		case 'COMMENTED': return 'commented';
++		case 'DISMISSED': return 'dismissed';
++		case 'PENDING':
++		default:
++			return 'pending';
++	}
++}
++
++function mapCheckRun(c: GhCheckRun): CheckRun {
++	return {
++		name: c.name,
++		conclusion: deriveCheckConclusion(c),
++		detailsUrl: c.details_url,
++		startedAt: c.started_at,
++		completedAt: c.completed_at,
++	};
++}
++
++function deriveCheckConclusion(c: GhCheckRun): CheckConclusion {
++	if (c.status !== 'completed') {
++		return 'pending';
++	}
++	const concluded = (c.conclusion ?? '') as CheckConclusion;
++	switch (concluded) {
++		case 'success':
++		case 'failure':
++		case 'neutral':
++		case 'cancelled':
++		case 'timed_out':
++		case 'action_required':
++		case 'skipped':
++		case 'stale':
++			return concluded;
++		default:
++			return 'pending';
++	}
++}
++
++function mapIssueComment(c: GhIssueComment): Comment {
++	return {
++		id: c.id,
++		author: { login: c.user.login, avatarUrl: c.user.avatar_url },
++		body: c.body,
++		createdAt: c.created_at,
++		updatedAt: c.updated_at,
++		location: { kind: 'issue' },
+ 	};
+ }
+ 
++function mapTimelineEvent(ev: GhTimelineEvent): AutomationEvent | undefined {
++	const at = ev.created_at ?? '';
++	const actor = ev.actor ?? ev.user ?? ev.committer ?? { login: 'github' };
++	const id = ev.id !== undefined ? String(ev.id) : (ev.node_id ?? `${ev.event}-${at}`);
++	const baseUser = { login: actor.login, avatarUrl: actor.avatar_url };
++	switch (ev.event) {
++		case 'committed':
++			return {
++				id,
++				kind: 'commit',
++				actor: baseUser,
++				at: at || '',
++				summary: trimMessage(ev.message ?? ev.sha ?? 'commit'),
++			};
++		case 'review_requested':
++			return {
++				id,
++				kind: 'review_requested',
++				actor: baseUser,
++				at,
++				summary: ev.requested_reviewer?.login ? `requested review from ${ev.requested_reviewer.login}` : 'requested a review',
++			};
++		case 'labeled':
++			return {
++				id,
++				kind: 'label_added',
++				actor: baseUser,
++				at,
++				summary: ev.label ? `added label "${ev.label.name}"` : 'added a label',
++			};
++		case 'unlabeled':
++			return {
++				id,
++				kind: 'label_removed',
++				actor: baseUser,
++				at,
++				summary: ev.label ? `removed label "${ev.label.name}"` : 'removed a label',
++			};
++		case 'merged':
++			return { id, kind: 'merge', actor: baseUser, at, summary: 'merged the pull request' };
++		case 'closed':
++			return { id, kind: 'close', actor: baseUser, at, summary: 'closed the pull request' };
++		case 'reopened':
++			return { id, kind: 'reopen', actor: baseUser, at, summary: 'reopened the pull request' };
++		case 'head_ref_force_pushed':
++			return { id, kind: 'force_push', actor: baseUser, at, summary: 'force-pushed the head branch' };
++		default:
++			return undefined;
++	}
++}
++
++function trimMessage(s: string): string {
++	const firstLine = s.split('\n', 1)[0] ?? s;
++	return firstLine.length > 120 ? firstLine.slice(0, 117) + '...' : firstLine;
++}
++
+ function deriveState(data: GhPullRequest): PullRequestState {
+ 	if (data.merged) {
+ 		return 'merged';
+diff --git a/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.css b/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.css
+index ae0b58abf37..0fc0bea5e4f 100644
+--- a/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.css
++++ b/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.css
+@@ -7,8 +7,8 @@
+ 	display: flex;
+ 	flex-direction: column;
+ 	box-sizing: border-box;
+-	padding: 24px 32px;
+-	gap: 20px;
++	padding: 24px 32px 48px;
++	gap: 18px;
+ 	overflow: auto;
+ 	font-family: 'Inter', system-ui, sans-serif;
+ }
+@@ -75,11 +75,8 @@
+ }
+ 
+ .krt-pr-editor-body {
+-	display: flex;
+-	flex-direction: column;
+-	gap: 12px;
+ 	font-size: 13px;
+-	line-height: 1.5;
++	line-height: 1.55;
+ }
+ 
+ .krt-pr-editor-skeleton {
+@@ -87,19 +84,6 @@
+ 	font-style: italic;
+ }
+ 
+-.krt-pr-editor-note {
+-	padding: 12px 14px;
+-	background: var(--vscode-textBlockQuote-background, rgba(127, 127, 127, 0.08));
+-	border-left: 3px solid var(--krt-accent, var(--vscode-focusBorder));
+-	border-radius: 4px;
+-}
+-
+-.krt-pr-editor-stats {
+-	font-family: 'JetBrains Mono', monospace;
+-	font-size: 12px;
+-	opacity: 0.85;
+-}
+-
+ .krt-pr-editor-error {
+ 	display: flex;
+ 	flex-direction: column;
+@@ -127,3 +111,551 @@
+ 	font-size: 12px;
+ 	opacity: 0.85;
+ }
++
++/* ---- Phase 5 PR view ---- */
++
++.krt-pr-grid {
++	display: grid;
++	grid-template-columns: minmax(0, 1fr) 280px;
++	gap: 28px;
++}
++
++.krt-pr-main {
++	min-width: 0;
++	display: flex;
++	flex-direction: column;
++	gap: 18px;
++}
++
++.krt-pr-sidebar {
++	display: flex;
++	flex-direction: column;
++	gap: 14px;
++}
++
++.krt-pr-refs {
++	display: flex;
++	align-items: center;
++	gap: 8px;
++	font-size: 12px;
++	color: var(--vscode-descriptionForeground);
++}
++
++.krt-pr-ref {
++	font-family: 'JetBrains Mono', monospace;
++	font-size: 11px;
++	padding: 2px 7px;
++	border: 1px solid var(--vscode-widget-border, rgba(127, 127, 127, 0.25));
++	border-radius: 5px;
++}
++
++.krt-pr-ref-arrow {
++	opacity: 0.6;
++	font-family: 'JetBrains Mono', monospace;
++}
++
++.krt-pr-refs-spacer {
++	flex: 1;
++}
++
++.krt-pr-refs-stats {
++	font-family: 'JetBrains Mono', monospace;
++	font-size: 11.5px;
++	opacity: 0.85;
++}
++
++.krt-pr-card {
++	border: 1px solid var(--vscode-widget-border, rgba(127, 127, 127, 0.25));
++	border-radius: 10px;
++	background: var(--vscode-editorWidget-background, transparent);
++	overflow: hidden;
++}
++
++.krt-pr-card-head {
++	display: flex;
++	align-items: center;
++	gap: 8px;
++	padding: 10px 14px;
++	border-bottom: 1px solid var(--vscode-widget-border, rgba(127, 127, 127, 0.18));
++	font-size: 12px;
++	color: var(--vscode-descriptionForeground);
++}
++
++.krt-pr-card-title {
++	font-weight: 500;
++	color: var(--vscode-foreground);
++}
++
++.krt-pr-description {
++	padding: 16px 18px;
++	font-size: 13.5px;
++	line-height: 1.65;
++}
++
++.krt-pr-description.empty {
++	font-style: italic;
++	opacity: 0.6;
++}
++
++.krt-pr-description h1,
++.krt-pr-description h2,
++.krt-pr-description h3 {
++	margin: 16px 0 8px;
++	line-height: 1.3;
++}
++
++.krt-pr-description h1 { font-size: 18px; }
++.krt-pr-description h2 { font-size: 16px; }
++.krt-pr-description h3 { font-size: 14px; }
++
++.krt-pr-description p {
++	margin: 0 0 12px;
++}
++
++.krt-pr-description code {
++	font-family: 'JetBrains Mono', monospace;
++	font-size: 0.92em;
++	padding: 1px 5px;
++	border-radius: 4px;
++	background: var(--vscode-textCodeBlock-background, rgba(127, 127, 127, 0.12));
++}
++
++.krt-pr-description pre {
++	padding: 10px 12px;
++	border-radius: 6px;
++	background: var(--vscode-textCodeBlock-background, rgba(127, 127, 127, 0.12));
++	overflow-x: auto;
++}
++
++.krt-pr-description pre code {
++	background: transparent;
++	padding: 0;
++}
++
++.krt-pr-description ul,
++.krt-pr-description ol {
++	margin: 0 0 12px;
++	padding-left: 22px;
++}
++
++.krt-pr-description li {
++	margin: 3px 0;
++}
++
++.krt-pr-description a {
++	color: var(--krt-accent, var(--vscode-textLink-foreground));
++}
++
++/* Activity */
++
++.krt-pr-activity {
++	display: flex;
++	flex-direction: column;
++	gap: 14px;
++}
++
++.krt-pr-activity-tabs {
++	display: flex;
++	align-items: baseline;
++	gap: 14px;
++	border-bottom: 1px solid var(--vscode-widget-border, rgba(127, 127, 127, 0.18));
++}
++
++.krt-pr-activity-heading {
++	font-size: 11px;
++	font-weight: 600;
++	letter-spacing: 0.06em;
++	text-transform: uppercase;
++	opacity: 0.55;
++	margin-right: 6px;
++}
++
++.krt-pr-tab {
++	border: none;
++	background: transparent;
++	color: inherit;
++	font: inherit;
++	font-size: 12.5px;
++	padding: 6px 4px;
++	margin-bottom: -1px;
++	cursor: pointer;
++	display: inline-flex;
++	align-items: center;
++	gap: 6px;
++	border-bottom: 2px solid transparent;
++	opacity: 0.75;
++}
++
++.krt-pr-tab:hover {
++	opacity: 1;
++}
++
++.krt-pr-tab.active {
++	opacity: 1;
++	font-weight: 600;
++	border-bottom-color: var(--krt-accent, var(--vscode-focusBorder));
++}
++
++.krt-pr-tab-count {
++	font-size: 10.5px;
++	padding: 1px 7px;
++	border-radius: 8px;
++	background: var(--vscode-badge-background, rgba(127, 127, 127, 0.18));
++	color: var(--vscode-badge-foreground, inherit);
++	font-weight: 500;
++	min-width: 18px;
++	text-align: center;
++}
++
++.krt-pr-tab.active .krt-pr-tab-count {
++	background: var(--krt-accent, var(--vscode-focusBorder));
++	color: var(--vscode-button-foreground, #fff);
++}
++
++.krt-pr-empty {
++	padding: 24px 6px;
++	text-align: center;
++	font-size: 12.5px;
++	opacity: 0.65;
++}
++
++.krt-pr-empty.error {
++	color: var(--vscode-errorForeground, #d33);
++	opacity: 1;
++}
++
++.krt-pr-timeline {
++	display: flex;
++	flex-direction: column;
++	gap: 14px;
++}
++
++.krt-pr-comment {
++	border: 1px solid var(--vscode-widget-border, rgba(127, 127, 127, 0.25));
++	border-radius: 10px;
++	background: var(--vscode-editorWidget-background, transparent);
++	overflow: hidden;
++}
++
++.krt-pr-comment-head {
++	display: flex;
++	align-items: center;
++	gap: 8px;
++	padding: 8px 12px;
++	background: var(--vscode-editor-inactiveSelectionBackground, rgba(127, 127, 127, 0.06));
++	border-bottom: 1px solid var(--vscode-widget-border, rgba(127, 127, 127, 0.18));
++	font-size: 11.5px;
++	color: var(--vscode-descriptionForeground);
++}
++
++.krt-pr-comment-author {
++	font-weight: 500;
++	color: var(--vscode-foreground);
++}
++
++.krt-pr-comment-sep {
++	opacity: 0.5;
++}
++
++.krt-pr-comment-body {
++	padding: 10px 12px;
++	font-size: 13px;
++	line-height: 1.55;
++}
++
++.krt-pr-comment-body.empty {
++	font-style: italic;
++	opacity: 0.55;
++}
++
++.krt-pr-automation-row {
++	display: flex;
++	align-items: center;
++	gap: 10px;
++	padding: 7px 10px;
++	border: 1px solid var(--vscode-widget-border, rgba(127, 127, 127, 0.18));
++	border-radius: 8px;
++	background: var(--vscode-editor-inactiveSelectionBackground, rgba(127, 127, 127, 0.05));
++	font-size: 12.5px;
++}
++
++.krt-pr-automation-kind {
++	font-family: 'JetBrains Mono', monospace;
++	font-size: 10.5px;
++	padding: 1px 7px;
++	border-radius: 4px;
++	background: var(--vscode-badge-background, rgba(127, 127, 127, 0.18));
++	color: var(--vscode-badge-foreground, inherit);
++	flex: 0 0 auto;
++	letter-spacing: 0.02em;
++	text-transform: lowercase;
++}
++
++.krt-pr-automation-actor {
++	font-family: 'JetBrains Mono', monospace;
++	font-size: 11px;
++	color: var(--vscode-descriptionForeground);
++	flex: 0 0 auto;
++}
++
++.krt-pr-automation-summary {
++	flex: 1;
++	min-width: 0;
++	overflow: hidden;
++	text-overflow: ellipsis;
++	white-space: nowrap;
++}
++
++.krt-pr-automation-when {
++	font-size: 11px;
++	opacity: 0.6;
++	flex: 0 0 auto;
++}
++
++/* Reply box */
++
++.krt-pr-reply {
++	margin-top: 4px;
++	padding: 14px;
++	border: 1px solid var(--vscode-widget-border, rgba(127, 127, 127, 0.25));
++	border-radius: 10px;
++	background: var(--vscode-editorWidget-background, transparent);
++}
++
++.krt-pr-reply-input {
++	width: 100%;
++	box-sizing: border-box;
++	border: 1px solid var(--vscode-input-border, rgba(127, 127, 127, 0.3));
++	background: var(--vscode-input-background);
++	color: var(--vscode-input-foreground);
++	border-radius: 6px;
++	padding: 8px 10px;
++	font: inherit;
++	font-size: 13px;
++	resize: vertical;
++	min-height: 64px;
++}
++
++.krt-pr-reply-input:focus {
++	outline: 1px solid var(--krt-accent, var(--vscode-focusBorder));
++	outline-offset: -1px;
++}
++
++.krt-pr-reply-actions {
++	display: flex;
++	gap: 8px;
++	margin-top: 10px;
++	align-items: center;
++}
++
++.krt-pr-reply-spacer {
++	flex: 1;
++}
++
++.krt-pr-reply-submit {
++	font: inherit;
++	font-size: 12px;
++	padding: 6px 14px;
++	border-radius: 6px;
++	border: 1px solid var(--vscode-button-border, transparent);
++	background: var(--krt-accent, var(--vscode-button-background, #5b5bff));
++	color: var(--vscode-button-foreground, #fff);
++	cursor: pointer;
++}
++
++.krt-pr-reply-submit:disabled {
++	opacity: 0.55;
++	cursor: progress;
++}
++
++.krt-pr-reply-error {
++	margin-top: 8px;
++	font-size: 12px;
++	color: var(--vscode-errorForeground, #d33);
++}
++
++/* Sidebar cards */
++
++.krt-pr-side-card {
++	padding: 14px;
++	border: 1px solid var(--vscode-widget-border, rgba(127, 127, 127, 0.25));
++	border-radius: 10px;
++	background: var(--vscode-editorWidget-background, transparent);
++}
++
++.krt-pr-side-card-title {
++	font-size: 11px;
++	font-weight: 600;
++	letter-spacing: 0.06em;
++	text-transform: uppercase;
++	opacity: 0.55;
++	margin-bottom: 10px;
++}
++
++.krt-pr-side-empty {
++	font-size: 12px;
++	opacity: 0.55;
++	font-style: italic;
++}
++
++.krt-pr-reviewer {
++	display: flex;
++	align-items: center;
++	gap: 8px;
++	padding: 5px 0;
++	font-size: 12px;
++}
++
++.krt-pr-reviewer-login {
++	flex: 1;
++	font-family: 'JetBrains Mono', monospace;
++	font-size: 11.5px;
++	color: var(--vscode-descriptionForeground);
++}
++
++.krt-pr-reviewer-state {
++	font-size: 10px;
++	font-weight: 500;
++	padding: 2px 7px;
++	border-radius: 999px;
++	border: 1px solid transparent;
++	flex: 0 0 auto;
++}
++
++.krt-pr-reviewer-state.approved {
++	background: rgba(46, 160, 67, 0.15);
++	border-color: rgba(46, 160, 67, 0.5);
++	color: var(--vscode-foreground);
++}
++
++.krt-pr-reviewer-state.changes_requested {
++	background: rgba(207, 34, 46, 0.15);
++	border-color: rgba(207, 34, 46, 0.5);
++	color: var(--vscode-foreground);
++}
++
++.krt-pr-reviewer-state.commented {
++	background: rgba(127, 127, 127, 0.18);
++	border-color: rgba(127, 127, 127, 0.4);
++}
++
++.krt-pr-reviewer-state.pending,
++.krt-pr-reviewer-state.dismissed {
++	background: rgba(127, 127, 127, 0.1);
++	border-color: rgba(127, 127, 127, 0.25);
++	opacity: 0.85;
++}
++
++.krt-pr-check {
++	display: flex;
++	align-items: center;
++	gap: 8px;
++	padding: 5px 6px;
++	margin: 0 -6px;
++	border-radius: 5px;
++	font-size: 11.5px;
++}
++
++.krt-pr-check.clickable {
++	cursor: pointer;
++}
++
++.krt-pr-check.clickable:hover {
++	background: var(--vscode-list-hoverBackground, rgba(127, 127, 127, 0.08));
++}
++
++.krt-pr-check-status {
++	flex: 0 0 auto;
++	font-family: 'JetBrains Mono', monospace;
++	font-size: 10px;
++	font-weight: 600;
++	width: 22px;
++	text-align: center;
++	padding: 1px 0;
++	border-radius: 4px;
++	border: 1px solid transparent;
++}
++
++.krt-pr-check-status.success {
++	color: rgba(46, 160, 67, 1);
++	background: rgba(46, 160, 67, 0.12);
++	border-color: rgba(46, 160, 67, 0.4);
++}
++
++.krt-pr-check-status.failure,
++.krt-pr-check-status.timed_out,
++.krt-pr-check-status.action_required {
++	color: rgba(207, 34, 46, 1);
++	background: rgba(207, 34, 46, 0.12);
++	border-color: rgba(207, 34, 46, 0.4);
++}
++
++.krt-pr-check-status.pending {
++	color: rgba(204, 152, 0, 1);
++	background: rgba(204, 152, 0, 0.12);
++	border-color: rgba(204, 152, 0, 0.4);
++}
++
++.krt-pr-check-status.cancelled,
++.krt-pr-check-status.stale,
++.krt-pr-check-status.neutral,
++.krt-pr-check-status.skipped {
++	color: var(--vscode-descriptionForeground);
++	background: rgba(127, 127, 127, 0.1);
++	border-color: rgba(127, 127, 127, 0.25);
++}
++
++.krt-pr-check-name {
++	flex: 1;
++	font-family: 'JetBrains Mono', monospace;
++	font-size: 11.5px;
++	color: var(--vscode-descriptionForeground);
++	overflow: hidden;
++	text-overflow: ellipsis;
++	white-space: nowrap;
++}
++
++.krt-pr-check-arrow {
++	opacity: 0.5;
++	font-size: 11px;
++	font-family: 'JetBrains Mono', monospace;
++}
++
++.krt-pr-labels {
++	display: flex;
++	flex-wrap: wrap;
++	gap: 6px;
++}
++
++.krt-pr-label-chip {
++	font-size: 11px;
++	padding: 2px 8px;
++	border-radius: 999px;
++	border: 1px solid var(--vscode-widget-border, rgba(127, 127, 127, 0.3));
++	background: var(--vscode-badge-background, rgba(127, 127, 127, 0.12));
++	color: var(--vscode-badge-foreground, inherit);
++}
++
++.krt-pr-stat {
++	display: flex;
++	justify-content: space-between;
++	font-size: 11.5px;
++	padding: 2px 0;
++}
++
++.krt-pr-stat-key {
++	color: var(--vscode-descriptionForeground);
++}
++
++.krt-pr-stat-value {
++	font-family: 'JetBrains Mono', monospace;
++	color: var(--vscode-foreground);
++}
++
++.krt-pr-stat-value.add {
++	color: rgba(46, 160, 67, 1);
++}
++
++.krt-pr-stat-value.del {
++	color: rgba(207, 34, 46, 1);
++}
+diff --git a/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.ts b/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.ts
+index 6909880b855..671e92dfe1a 100644
+--- a/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.ts
++++ b/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.ts
+@@ -5,26 +5,46 @@
+ 
+ import './krtPullRequestEditorPane.css';
+ import * as DOM from '../../../../../base/browser/dom.js';
++import { renderMarkdown } from '../../../../../base/browser/markdownRenderer.js';
+ import { CancellationToken } from '../../../../../base/common/cancellation.js';
++import { fromNow } from '../../../../../base/common/date.js';
++import { DisposableStore } from '../../../../../base/common/lifecycle.js';
++import { MarkdownString } from '../../../../../base/common/htmlContent.js';
++import { URI } from '../../../../../base/common/uri.js';
+ import { localize } from '../../../../../nls.js';
+ import { IEditorOptions } from '../../../../../platform/editor/common/editor.js';
+ import { IStorageService } from '../../../../../platform/storage/common/storage.js';
+ import { ITelemetryService } from '../../../../../platform/telemetry/common/telemetry.js';
+ import { IThemeService } from '../../../../../platform/theme/common/themeService.js';
+ import { ILogService } from '../../../../../platform/log/common/log.js';
++import { IOpenerService } from '../../../../../platform/opener/common/opener.js';
+ import { isKrtError } from '../../../../../platform/krt/common/errors.js';
+-import { IPullRequestProvider, PullRequest, PullRequestState } from '../../../../../platform/krt/common/krt.js';
++import {
++	AutomationEvent,
++	CheckConclusion,
++	CheckRun,
++	Comment,
++	IPullRequestProvider,
++	PullRequest,
++	PullRequestState,
++	Reviewer,
++	ReviewerState,
++} from '../../../../../platform/krt/common/krt.js';
+ import { EditorPane } from '../../../../browser/parts/editor/editorPane.js';
+ import { IEditorOpenContext } from '../../../../common/editor.js';
+ import { IEditorGroup } from '../../../../services/editor/common/editorGroupsService.js';
+ import { recordRecentPullRequest } from '../krtRecentPullRequests.js';
+ import { KrtPullRequestEditorInput } from './krtPullRequestEditorInput.js';
+ 
++type ActivityTab = 'discussion' | 'automation';
++
+ /**
+- * Phase 4 placeholder pane for a PR tab. Renders title, owner/repo#number,
+- * state pill, and a "Phase 5 will land the rendered description here"
+- * note. Phase 5 will replace the body with description + comments;
+- * Phase 6 will mount the diff sub-mode.
++ * Phase 5 PR view. Two-column layout: main column (header,
++ * description, activity, reply box) + sidebar (Reviewers, Checks,
++ * Labels, Stats). Markdown renders via VS Code's base
++ * `renderMarkdown`. Reply box posts via the provider and appends to
++ * the discussion timeline. Phase 6 swaps the body for the Diff
++ * sub-mode using the same input.
+  */
+ export class KrtPullRequestEditorPane extends EditorPane {
+ 
+@@ -38,8 +58,16 @@ export class KrtPullRequestEditorPane extends EditorPane {
+ 	private bodyElement!: HTMLElement;
+ 
+ 	private currentInput: KrtPullRequestEditorInput | undefined;
++	private currentPr: PullRequest | undefined;
+ 	private fetchToken = 0;
+ 
++	private readonly bodyDisposables = this._register(new DisposableStore());
++	private activityTab: ActivityTab = 'discussion';
++	private automationEvents: readonly AutomationEvent[] | undefined;
++	private automationLoading = false;
++	private automationError: string | undefined;
++	private liveComments: Comment[] = [];
++
+ 	constructor(
+ 		group: IEditorGroup,
+ 		@ITelemetryService telemetryService: ITelemetryService,
+@@ -47,6 +75,7 @@ export class KrtPullRequestEditorPane extends EditorPane {
+ 		@IStorageService private readonly krtStorageService: IStorageService,
+ 		@IPullRequestProvider private readonly pullRequestProvider: IPullRequestProvider,
+ 		@ILogService private readonly logService: ILogService,
++		@IOpenerService private readonly openerService: IOpenerService,
+ 	) {
+ 		super(KrtPullRequestEditorPane.ID, group, telemetryService, themeService, krtStorageService);
+ 	}
+@@ -64,6 +93,12 @@ export class KrtPullRequestEditorPane extends EditorPane {
+ 	override async setInput(input: KrtPullRequestEditorInput, options: IEditorOptions | undefined, context: IEditorOpenContext, token: CancellationToken): Promise<void> {
+ 		await super.setInput(input, options, context, token);
+ 		this.currentInput = input;
++		this.currentPr = undefined;
++		this.automationEvents = undefined;
++		this.automationLoading = false;
++		this.automationError = undefined;
++		this.liveComments = [];
++		this.activityTab = 'discussion';
+ 		this.renderPlaceholder(input);
+ 		this.fetchToken++;
+ 		const myToken = this.fetchToken;
+@@ -73,6 +108,8 @@ export class KrtPullRequestEditorPane extends EditorPane {
+ 				return;
+ 			}
+ 			input.setTitle(pr.title);
++			this.currentPr = pr;
++			this.liveComments = [...pr.comments];
+ 			this.renderLoaded(pr);
+ 			recordRecentPullRequest(this.krtStorageService, pr);
+ 		} catch (err) {
+@@ -91,7 +128,9 @@ export class KrtPullRequestEditorPane extends EditorPane {
+ 
+ 	override clearInput(): void {
+ 		this.currentInput = undefined;
++		this.currentPr = undefined;
+ 		this.fetchToken++;
++		this.bodyDisposables.clear();
+ 		super.clearInput();
+ 	}
+ 
+@@ -110,6 +149,7 @@ export class KrtPullRequestEditorPane extends EditorPane {
+ 		this.titleElement.textContent = localize('krt.pr.loading', "Loading…");
+ 		this.statePillElement.textContent = '';
+ 		this.statePillElement.className = 'krt-pr-editor-state-pill';
++		this.bodyDisposables.clear();
+ 		DOM.clearNode(this.bodyElement);
+ 		const skeleton = DOM.append(this.bodyElement, DOM.$('.krt-pr-editor-skeleton'));
+ 		skeleton.textContent = localize('krt.pr.fetching', "Fetching pull request from GitHub via gh CLI…");
+@@ -119,25 +159,347 @@ export class KrtPullRequestEditorPane extends EditorPane {
+ 		this.subtitleElement.textContent = `${pr.owner}/${pr.repo} #${pr.number} · ${pr.author.login}`;
+ 		this.titleElement.textContent = pr.title;
+ 		this.applyStatePill(pr.state);
++		this.bodyDisposables.clear();
+ 		DOM.clearNode(this.bodyElement);
+-		const note = DOM.append(this.bodyElement, DOM.$('.krt-pr-editor-note'));
+-		note.textContent = localize(
+-			'krt.pr.placeholderBody',
+-			"Description, comments, reviewers, and checks land in Phase 5. The Diff sub-mode follows in Phase 6.",
+-		);
+-		const stats = DOM.append(this.bodyElement, DOM.$('.krt-pr-editor-stats'));
+-		stats.textContent = localize(
+-			'krt.pr.stats',
+-			"+{0} -{1} across {2} file(s) - base {3} <- head {4}",
+-			pr.stats.additions, pr.stats.deletions, pr.stats.changedFiles,
+-			pr.base.label, pr.head.label,
+-		);
++
++		const grid = DOM.append(this.bodyElement, DOM.$('.krt-pr-grid'));
++		const main = DOM.append(grid, DOM.$('.krt-pr-main'));
++		const sidebar = DOM.append(grid, DOM.$('.krt-pr-sidebar'));
++
++		this.renderRefsLine(main, pr);
++		this.renderDescription(main, pr);
++		this.renderActivitySection(main, pr);
++		this.renderReplyBox(main, pr);
++
++		this.renderReviewersCard(sidebar, pr.reviewers);
++		this.renderChecksCard(sidebar, pr.checks);
++		this.renderLabelsCard(sidebar, pr.labels);
++		this.renderStatsCard(sidebar, pr);
++	}
++
++	private renderRefsLine(parent: HTMLElement, pr: PullRequest): void {
++		const refs = DOM.append(parent, DOM.$('.krt-pr-refs'));
++		const head = DOM.append(refs, DOM.$('span.krt-pr-ref'));
++		head.textContent = pr.head.label;
++		const arrow = DOM.append(refs, DOM.$('span.krt-pr-ref-arrow'));
++		arrow.textContent = '->';
++		const base = DOM.append(refs, DOM.$('span.krt-pr-ref'));
++		base.textContent = pr.base.label;
++		const spacer = DOM.append(refs, DOM.$('span.krt-pr-refs-spacer'));
++		spacer.textContent = '';
++		const stats = DOM.append(refs, DOM.$('span.krt-pr-refs-stats'));
++		stats.textContent = `+${pr.stats.additions} -${pr.stats.deletions} · ${pr.stats.changedFiles} file(s)`;
++	}
++
++	private renderDescription(parent: HTMLElement, pr: PullRequest): void {
++		const card = DOM.append(parent, DOM.$('.krt-pr-card'));
++		const head = DOM.append(card, DOM.$('.krt-pr-card-head'));
++		const title = DOM.append(head, DOM.$('span.krt-pr-card-title'));
++		title.textContent = localize('krt.pr.description', "Description");
++		const bodyEl = DOM.append(card, DOM.$('.krt-pr-description'));
++		const trimmed = pr.body.trim();
++		if (!trimmed) {
++			bodyEl.classList.add('empty');
++			bodyEl.textContent = localize('krt.pr.noDescription', "No description provided.");
++			return;
++		}
++		const md = new MarkdownString(pr.body, { isTrusted: false, supportThemeIcons: false, supportHtml: false });
++		const rendered = renderMarkdown(md, {
++			actionHandler: (link) => this.openExternal(link),
++		});
++		this.bodyDisposables.add(rendered);
++		bodyEl.appendChild(rendered.element);
++	}
++
++	private renderActivitySection(parent: HTMLElement, pr: PullRequest): void {
++		const section = DOM.append(parent, DOM.$('.krt-pr-activity'));
++		const tabs = DOM.append(section, DOM.$('.krt-pr-activity-tabs'));
++		const heading = DOM.append(tabs, DOM.$('span.krt-pr-activity-heading'));
++		heading.textContent = localize('krt.pr.activity', "Activity");
++
++		const discussion = this.makeTabButton(tabs, 'discussion',
++			localize('krt.pr.activity.discussion', "Discussion"),
++			this.liveComments.length);
++		const automation = this.makeTabButton(tabs, 'automation',
++			localize('krt.pr.activity.automation', "Automation"),
++			this.automationEvents?.length);
++
++		const content = DOM.append(section, DOM.$('.krt-pr-activity-content'));
++
++		const renderActiveTab = () => {
++			DOM.clearNode(content);
++			discussion.button.classList.toggle('active', this.activityTab === 'discussion');
++			automation.button.classList.toggle('active', this.activityTab === 'automation');
++			if (this.activityTab === 'discussion') {
++				this.renderDiscussion(content);
++			} else {
++				this.renderAutomation(content, pr);
++			}
++		};
++
++		this.bodyDisposables.add(DOM.addDisposableListener(discussion.button, 'click', () => {
++			this.activityTab = 'discussion';
++			renderActiveTab();
++		}));
++		this.bodyDisposables.add(DOM.addDisposableListener(automation.button, 'click', () => {
++			this.activityTab = 'automation';
++			renderActiveTab();
++			if (this.automationEvents === undefined && !this.automationLoading) {
++				this.loadAutomation(pr, () => {
++					automation.count.textContent = countLabel(this.automationEvents?.length);
++					if (this.activityTab === 'automation') {
++						renderActiveTab();
++					}
++				});
++			}
++		}));
++
++		renderActiveTab();
++	}
++
++	private makeTabButton(parent: HTMLElement, kind: ActivityTab, label: string, count: number | undefined): { button: HTMLButtonElement; count: HTMLElement } {
++		const btn = DOM.append(parent, DOM.$('button.krt-pr-tab')) as HTMLButtonElement;
++		btn.setAttribute('type', 'button');
++		btn.setAttribute('data-tab', kind);
++		const labelEl = DOM.append(btn, DOM.$('span.krt-pr-tab-label'));
++		labelEl.textContent = label;
++		const countEl = DOM.append(btn, DOM.$('span.krt-pr-tab-count'));
++		countEl.textContent = countLabel(count);
++		return { button: btn, count: countEl };
++	}
++
++	private renderDiscussion(parent: HTMLElement): void {
++		if (this.liveComments.length === 0) {
++			const empty = DOM.append(parent, DOM.$('.krt-pr-empty'));
++			empty.textContent = localize('krt.pr.noDiscussion', "No discussion yet. Be the first to comment.");
++			return;
++		}
++		const timeline = DOM.append(parent, DOM.$('.krt-pr-timeline'));
++		for (const comment of this.liveComments) {
++			this.renderCommentCard(timeline, comment);
++		}
++	}
++
++	private renderCommentCard(parent: HTMLElement, comment: Comment): void {
++		const row = DOM.append(parent, DOM.$('.krt-pr-comment'));
++		const head = DOM.append(row, DOM.$('.krt-pr-comment-head'));
++		const author = DOM.append(head, DOM.$('span.krt-pr-comment-author'));
++		author.textContent = comment.author.login;
++		const verb = DOM.append(head, DOM.$('span.krt-pr-comment-verb'));
++		verb.textContent = localize('krt.pr.commented', "commented");
++		const sep = DOM.append(head, DOM.$('span.krt-pr-comment-sep'));
++		sep.textContent = '·';
++		const when = DOM.append(head, DOM.$('span.krt-pr-comment-when'));
++		when.textContent = relativeTime(comment.createdAt);
++		const body = DOM.append(row, DOM.$('.krt-pr-comment-body'));
++		if (comment.body.trim()) {
++			const md = new MarkdownString(comment.body, { isTrusted: false });
++			const rendered = renderMarkdown(md, {
++				actionHandler: link => this.openExternal(link),
++			});
++			this.bodyDisposables.add(rendered);
++			body.appendChild(rendered.element);
++		} else {
++			body.classList.add('empty');
++			body.textContent = localize('krt.pr.commentEmpty', "(empty comment)");
++		}
++	}
++
++	private renderAutomation(parent: HTMLElement, pr: PullRequest): void {
++		if (this.automationLoading) {
++			const loading = DOM.append(parent, DOM.$('.krt-pr-empty'));
++			loading.textContent = localize('krt.pr.automationLoading', "Loading automation events…");
++			return;
++		}
++		if (this.automationError) {
++			const err = DOM.append(parent, DOM.$('.krt-pr-empty.error'));
++			err.textContent = this.automationError;
++			return;
++		}
++		if (!this.automationEvents || this.automationEvents.length === 0) {
++			const empty = DOM.append(parent, DOM.$('.krt-pr-empty'));
++			empty.textContent = localize('krt.pr.noAutomation', "No automation events.");
++			return;
++		}
++		const timeline = DOM.append(parent, DOM.$('.krt-pr-timeline'));
++		for (const ev of this.automationEvents) {
++			this.renderAutomationRow(timeline, ev);
++		}
++	}
++
++	private renderAutomationRow(parent: HTMLElement, ev: AutomationEvent): void {
++		const row = DOM.append(parent, DOM.$('.krt-pr-automation-row'));
++		const kind = DOM.append(row, DOM.$('span.krt-pr-automation-kind'));
++		kind.textContent = ev.kind;
++		const actor = DOM.append(row, DOM.$('span.krt-pr-automation-actor'));
++		actor.textContent = ev.actor.login;
++		const summary = DOM.append(row, DOM.$('span.krt-pr-automation-summary'));
++		summary.textContent = ev.summary;
++		const when = DOM.append(row, DOM.$('span.krt-pr-automation-when'));
++		when.textContent = ev.at ? relativeTime(ev.at) : '';
++	}
++
++	private async loadAutomation(pr: PullRequest, onDone: () => void): Promise<void> {
++		this.automationLoading = true;
++		try {
++			const events = await this.pullRequestProvider.getActivity(pr.url);
++			this.automationLoading = false;
++			this.automationEvents = events;
++		} catch (e) {
++			this.automationLoading = false;
++			this.automationEvents = [];
++			this.automationError = isKrtError(e) ? e.message : String(e);
++			this.logService.warn('[krt] pr-pane automation fetch failed', e);
++		}
++		onDone();
++	}
++
++	private renderReplyBox(parent: HTMLElement, pr: PullRequest): void {
++		const card = DOM.append(parent, DOM.$('.krt-pr-reply'));
++		const textarea = DOM.append(card, DOM.$('textarea.krt-pr-reply-input')) as HTMLTextAreaElement;
++		textarea.placeholder = localize('krt.pr.replyPlaceholder', "Leave a comment…");
++		textarea.rows = 3;
++		const actions = DOM.append(card, DOM.$('.krt-pr-reply-actions'));
++		const errorEl = DOM.append(card, DOM.$('.krt-pr-reply-error'));
++		errorEl.hidden = true;
++		const spacer = DOM.append(actions, DOM.$('span.krt-pr-reply-spacer'));
++		spacer.textContent = '';
++		const submit = DOM.append(actions, DOM.$('button.krt-pr-reply-submit')) as HTMLButtonElement;
++		submit.type = 'button';
++		submit.textContent = localize('krt.pr.replySubmit', "Comment");
++
++		const setBusy = (busy: boolean) => {
++			submit.disabled = busy;
++			textarea.disabled = busy;
++			submit.textContent = busy
++				? localize('krt.pr.replyPosting', "Posting…")
++				: localize('krt.pr.replySubmit', "Comment");
++		};
++
++		this.bodyDisposables.add(DOM.addDisposableListener(submit, 'click', async () => {
++			const body = textarea.value.trim();
++			if (!body) {
++				return;
++			}
++			errorEl.hidden = true;
++			errorEl.textContent = '';
++			setBusy(true);
++			try {
++				const created = await this.pullRequestProvider.postIssueComment(pr.url, body);
++				if (this.currentPr?.url !== pr.url) {
++					return;
++				}
++				this.liveComments = [...this.liveComments, created];
++				textarea.value = '';
++				this.activityTab = 'discussion';
++				this.renderLoaded(this.currentPr);
++			} catch (e) {
++				errorEl.hidden = false;
++				errorEl.textContent = isKrtError(e) ? `${e.message} — ${e.hint}` : String(e);
++				this.logService.warn('[krt] pr-pane post comment failed', e);
++			} finally {
++				setBusy(false);
++			}
++		}));
++	}
++
++	private renderReviewersCard(parent: HTMLElement, reviewers: readonly Reviewer[]): void {
++		const card = this.makeSidebarCard(parent, localize('krt.pr.reviewers', "Reviewers"));
++		if (reviewers.length === 0) {
++			this.appendCardEmpty(card, localize('krt.pr.noReviewers', "No reviewers requested."));
++			return;
++		}
++		for (const r of reviewers) {
++			const row = DOM.append(card, DOM.$('.krt-pr-reviewer'));
++			const login = DOM.append(row, DOM.$('span.krt-pr-reviewer-login'));
++			login.textContent = r.user.login;
++			const state = DOM.append(row, DOM.$('span.krt-pr-reviewer-state'));
++			state.classList.add(r.state);
++			state.textContent = reviewerStateLabel(r.state);
++		}
++	}
++
++	private renderChecksCard(parent: HTMLElement, checks: readonly CheckRun[]): void {
++		const card = this.makeSidebarCard(parent, localize('krt.pr.checks', "Checks"));
++		if (checks.length === 0) {
++			this.appendCardEmpty(card, localize('krt.pr.noChecks', "No checks reported."));
++			return;
++		}
++		for (const c of checks) {
++			const row = DOM.append(card, DOM.$('.krt-pr-check'));
++			const status = DOM.append(row, DOM.$('span.krt-pr-check-status'));
++			status.classList.add(c.conclusion);
++			status.textContent = checkConclusionGlyph(c.conclusion);
++			const name = DOM.append(row, DOM.$('span.krt-pr-check-name'));
++			name.textContent = c.name;
++			if (c.detailsUrl) {
++				row.classList.add('clickable');
++				row.setAttribute('role', 'link');
++				row.setAttribute('tabindex', '0');
++				row.title = c.detailsUrl;
++				const click = () => this.openExternal(c.detailsUrl!);
++				this.bodyDisposables.add(DOM.addDisposableListener(row, 'click', click));
++				this.bodyDisposables.add(DOM.addDisposableListener(row, 'keydown', e => {
++					if (e.key === 'Enter' || e.key === ' ') {
++						e.preventDefault();
++						click();
++					}
++				}));
++				const arrow = DOM.append(row, DOM.$('span.krt-pr-check-arrow'));
++				arrow.textContent = '>';
++			}
++		}
++	}
++
++	private renderLabelsCard(parent: HTMLElement, labels: readonly string[]): void {
++		const card = this.makeSidebarCard(parent, localize('krt.pr.labels', "Labels"));
++		if (labels.length === 0) {
++			this.appendCardEmpty(card, localize('krt.pr.noLabels', "No labels."));
++			return;
++		}
++		const wrap = DOM.append(card, DOM.$('.krt-pr-labels'));
++		for (const l of labels) {
++			const chip = DOM.append(wrap, DOM.$('span.krt-pr-label-chip'));
++			chip.textContent = l;
++		}
++	}
++
++	private renderStatsCard(parent: HTMLElement, pr: PullRequest): void {
++		const card = this.makeSidebarCard(parent, localize('krt.pr.stats', "Stats"));
++		this.appendStatRow(card, localize('krt.pr.stat.files', "Files"), String(pr.stats.changedFiles));
++		this.appendStatRow(card, localize('krt.pr.stat.added', "Lines added"), `+${pr.stats.additions}`, 'add');
++		this.appendStatRow(card, localize('krt.pr.stat.removed', "Lines removed"), `-${pr.stats.deletions}`, 'del');
++		this.appendStatRow(card, localize('krt.pr.stat.updated', "Last updated"), relativeTime(pr.updatedAt));
++	}
++
++	private makeSidebarCard(parent: HTMLElement, title: string): HTMLElement {
++		const card = DOM.append(parent, DOM.$('.krt-pr-side-card'));
++		const head = DOM.append(card, DOM.$('.krt-pr-side-card-title'));
++		head.textContent = title;
++		return card;
++	}
++
++	private appendCardEmpty(card: HTMLElement, text: string): void {
++		const empty = DOM.append(card, DOM.$('.krt-pr-side-empty'));
++		empty.textContent = text;
++	}
++
++	private appendStatRow(card: HTMLElement, key: string, value: string, tone?: 'add' | 'del'): void {
++		const row = DOM.append(card, DOM.$('.krt-pr-stat'));
++		const k = DOM.append(row, DOM.$('span.krt-pr-stat-key'));
++		k.textContent = key;
++		const v = DOM.append(row, DOM.$('span.krt-pr-stat-value'));
++		if (tone) {
++			v.classList.add(tone);
++		}
++		v.textContent = value;
+ 	}
+ 
+ 	private renderError(kind: string, message: string, hint: string): void {
+ 		this.titleElement.textContent = localize('krt.pr.errorTitle', "Couldn't load this PR");
+ 		this.statePillElement.textContent = '';
+ 		this.statePillElement.className = 'krt-pr-editor-state-pill';
++		this.bodyDisposables.clear();
+ 		DOM.clearNode(this.bodyElement);
+ 		const errEl = DOM.append(this.bodyElement, DOM.$('.krt-pr-editor-error'));
+ 		const kindEl = DOM.append(errEl, DOM.$('.krt-pr-editor-error-kind'));
+@@ -153,6 +515,14 @@ export class KrtPullRequestEditorPane extends EditorPane {
+ 		this.statePillElement.classList.add(state);
+ 		this.statePillElement.textContent = stateLabel(state);
+ 	}
++
++	private openExternal(link: string): void {
++		try {
++			this.openerService.open(URI.parse(link), { openExternal: true });
++		} catch (e) {
++			this.logService.warn('[krt] pr-pane external open failed', e);
++		}
++	}
+ }
+ 
+ function stateLabel(state: PullRequestState): string {
+@@ -163,3 +533,51 @@ function stateLabel(state: PullRequestState): string {
+ 		case 'draft': return localize('krt.pr.state.draft', "Draft");
+ 	}
+ }
++
++function reviewerStateLabel(state: ReviewerState): string {
++	switch (state) {
++		case 'approved': return localize('krt.pr.reviewer.approved', "Approved");
++		case 'changes_requested': return localize('krt.pr.reviewer.changesRequested', "Changes requested");
++		case 'commented': return localize('krt.pr.reviewer.commented', "Commented");
++		case 'dismissed': return localize('krt.pr.reviewer.dismissed', "Dismissed");
++		case 'pending':
++		default: return localize('krt.pr.reviewer.pending', "Pending");
++	}
++}
++
++function checkConclusionGlyph(c: CheckConclusion): string {
++	switch (c) {
++		case 'success': return 'OK';
++		case 'failure':
++		case 'timed_out':
++		case 'action_required':
++			return 'X';
++		case 'cancelled':
++		case 'stale':
++			return '-';
++		case 'neutral':
++		case 'skipped':
++			return '~';
++		case 'pending':
++		default: return '...';
++	}
++}
++
++function countLabel(n: number | undefined): string {
++	if (n === undefined) {
++		return '…';
++	}
++	return String(n);
++}
++
++function relativeTime(iso: string): string {
++	if (!iso) {
++		return '';
++	}
++	const t = Date.parse(iso);
++	if (Number.isNaN(t)) {
++		return iso;
++	}
++	return fromNow(t, true);
++}
++
+-- 
+2.52.0
+
