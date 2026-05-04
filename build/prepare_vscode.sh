@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
-# prepare_vscode.sh — overlay KRT branding + patches onto the vscode/ submodule.
+# prepare_vscode.sh — clone microsoft/vscode into vscode/ if missing,
+# reset to the pinned upstream tag, apply KRT patches on top.
 #
 # Run from the repo root: `bash build/prepare_vscode.sh`.
+# Idempotent: running twice yields the same tree.
 #
-# This is a Phase 0 stub. The full implementation lands as part of
-# docs/phases/phase-00-scaffold.md. See PLAN.md §4 Phase 0 for the demo gate.
+# vscode/ is gitignored — it's a working clone, not vendored. See
+# docs/upstream-vscode.md for the bump workflow.
 
 set -euo pipefail
 
@@ -12,22 +14,55 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 VSCODE_DIR="$REPO_ROOT/vscode"
 BUILD_DIR="$REPO_ROOT/build"
 PATCHES_DIR="$BUILD_DIR/patches/krt"
+PIN_FILE="$BUILD_DIR/upstream-pin"
+UPSTREAM_URL="https://github.com/microsoft/vscode.git"
 
-if [[ ! -d "$VSCODE_DIR" ]]; then
-  echo "error: $VSCODE_DIR does not exist. Add the upstream submodule first:" >&2
-  echo "  git submodule add https://github.com/microsoft/vscode.git vscode" >&2
+if [[ ! -f "$PIN_FILE" ]]; then
+  echo "error: $PIN_FILE missing — can't determine upstream tag" >&2
   exit 1
 fi
 
-echo "[prepare_vscode] repo root: $REPO_ROOT"
-echo "[prepare_vscode] vscode submodule: $VSCODE_DIR"
-echo "[prepare_vscode] patches dir: $PATCHES_DIR"
+PIN="$(tr -d '[:space:]' < "$PIN_FILE")"
+echo "[prepare_vscode] pinned upstream tag: $PIN"
 
-# TODO(phase-0): Reset vscode/ to the pinned tag before applying anything.
-# TODO(phase-1): Overlay build/product.json onto vscode/product.json.
-# TODO(phase-0): Apply patches in $PATCHES_DIR in lexical order via `git am`
-#                or `git apply`. The first patch lands the trivial KRT
-#                status-bar contribution under
-#                vscode/src/vs/workbench/contrib/krt/.
+# Clone if vscode/ isn't a checkout yet.
+if [[ ! -d "$VSCODE_DIR/.git" ]]; then
+  echo "[prepare_vscode] vscode/ not present — cloning $UPSTREAM_URL"
+  git clone --filter=blob:none "$UPSTREAM_URL" "$VSCODE_DIR"
+fi
 
-echo "[prepare_vscode] stub complete — nothing to do yet"
+cd "$VSCODE_DIR"
+
+# Bail any in-progress `git am` from a previous failed run.
+if [[ -d .git/rebase-apply ]]; then
+  echo "[prepare_vscode] aborting in-progress git am from previous run"
+  git am --abort || true
+fi
+
+# Make sure the pinned tag is locally available.
+if ! git rev-parse "refs/tags/$PIN" >/dev/null 2>&1; then
+  echo "[prepare_vscode] tag $PIN not found locally, fetching..."
+  git fetch origin "refs/tags/$PIN:refs/tags/$PIN" --no-tags
+fi
+
+# Reset to the pinned tag, scrubbing any local edits.
+echo "[prepare_vscode] resetting vscode/ to $PIN"
+git reset --hard "refs/tags/$PIN" >/dev/null
+
+# Apply patches in lexical order, if any.
+shopt -s nullglob
+patches=("$PATCHES_DIR"/*.patch)
+shopt -u nullglob
+
+if (( ${#patches[@]} == 0 )); then
+  echo "[prepare_vscode] no patches in $PATCHES_DIR — nothing to apply"
+else
+  echo "[prepare_vscode] applying ${#patches[@]} patch(es) from $PATCHES_DIR"
+  for p in "${patches[@]}"; do
+    echo "  - $(basename "$p")"
+  done
+  git am --keep-cr "${patches[@]}"
+fi
+
+cd "$REPO_ROOT"
+echo "[prepare_vscode] done"

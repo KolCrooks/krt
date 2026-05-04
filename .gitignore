@@ -29,3 +29,7 @@ node_modules/
 out/
 dist/
 *.vsix
+
+# Upstream vscode/ is cloned by build/prepare_vscode.sh, not vendored.
+# See docs/upstream-vscode.md.
+vscode/

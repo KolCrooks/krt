@@ -18,42 +18,52 @@ is the working checklist.
 - [x] Create this checklist file
 - [x] Stand up `build/` directory skeleton (`product.json`, `prepare_vscode.sh` stub, `patches/krt/`)
 - [x] Add minimal repo `README.md`
-- [ ] First commit on jj
-- [ ] GitHub remote configured + initial push
+- [x] First commit on jj
+- [x] GitHub remote configured + initial push (`KolCrooks/krt`, private)
 
 ### Phase 0 proper
 
-#### Submodule the upstream
+#### Pin the upstream (gitignored clone, not a submodule — see decisions)
 
-- [ ] Pick a known-good upstream tag. Open question — see below.
-- [ ] `git submodule add https://github.com/microsoft/vscode.git vscode`
-- [ ] Pin to the chosen tag (`cd vscode && git checkout <tag>`)
-- [ ] Verify `vscode/.gitignore` is sensible (it is — upstream's own)
-- [ ] Document the upstream tag and the date pinned in `docs/upstream-vscode.md`
+- [x] Pick a known-good upstream tag → `1.118.1`
+- [x] Record the pin in `build/upstream-pin`
+- [x] Add `vscode/` to `.gitignore`
+- [x] Have `build/prepare_vscode.sh` clone-and-pin idempotently
+- [x] Document upstream tag, date pinned, bump workflow in `docs/upstream-vscode.md`
 
 #### Build scripts in build/
 
-- [ ] Flesh out `build/prepare_vscode.sh`:
+- [x] Flesh out `build/prepare_vscode.sh`:
   - [ ] Copy/symlink `build/product.json` over `vscode/product.json`
-  - [ ] Apply patches from `build/patches/krt/` in lexical order
-  - [ ] Reproducible (running twice yields the same tree)
-- [ ] Add `build/build.sh` wrapper that calls `prepare_vscode.sh` then `yarn`
-  in `vscode/` (or `npm` — whichever the pinned upstream tag uses)
-- [ ] Add `build/clean.sh` that resets `vscode/` to the pinned tag and removes
-  generated files
-- [ ] Verify `bash build/build.sh` produces a launchable Electron app
+        (deferred to Phase 1 with the rest of the branding work)
+  - [x] Apply patches from `build/patches/krt/` in lexical order
+  - [x] Reproducible (running twice yields the same tree)
+  - [x] Aborts an in-progress `git am` from a previous failed run
+- [x] Add `build/build.sh` wrapper that calls `prepare_vscode.sh` then `npm`
+  in `vscode/`
+- [x] Add `build/clean.sh` that resets `vscode/` to the pinned tag and
+  runs `git clean -xdf` inside the clone
+- [x] Verify `npm install` succeeds against the pinned tag
+- [x] Verify `npm run compile-check-ts-native` passes against the patched
+  source (ran type-check; full compile + Electron launch deferred to
+  the demo gate)
 
 #### Trivial KRT contribution
 
-- [ ] Create `vscode/src/vs/workbench/contrib/krt/` (added by patch, not
-  directly committed in `vscode/`):
-  - [ ] `browser/krt.contribution.ts` — registers a status-bar item via
-    `IStatusbarService` reading "KRT"
-  - [ ] `browser/krtStatusBar.ts` — the contribution class
-  - [ ] Wire it into `vscode/src/vs/workbench/workbench.common.main.ts`
-- [ ] Generate a patch from the change and store under `build/patches/krt/0001-status-bar.patch`
-- [ ] Re-run `build/build.sh` from a clean state and confirm patch applies
-  cleanly
+- [x] Create `vscode/src/vs/workbench/contrib/krt/browser/krt.contribution.ts`
+  — single file with the contribution class and registration. Combined
+  with `krtStatusBar.ts` from the original plan since the contribution is
+  trivial.
+- [x] Wire it into `vscode/src/vs/workbench/workbench.common.main.ts`
+  (side-effect import)
+- [x] Register `vs/workbench/contrib/krt` in `build/lib/i18n.resources.json`
+  (silences the i18n-extraction hygiene reminder)
+- [x] Use the upstream Microsoft copyright header verbatim — required by
+  `build/hygiene.ts` and the eslint `header/header` rule. Phase 11 of
+  PLAN.md handles public-release licensing/branding.
+- [x] Generate the patch: `build/patches/krt/0001-Add-KRT-status-bar-contribution.patch`
+- [x] Confirm `prepare_vscode.sh` applies the patch cleanly from a fresh
+  reset to the pinned tag
 
 #### Demo gate
 
@@ -62,25 +72,37 @@ is the working checklist.
 - [ ] Screenshot or short clip captured for the working log
 - [ ] Tag the commit `phase-00-complete`
 
+The full compile (gulp + Electron) is heavy (~5–15 min on a fresh checkout)
+and ends in launching a GUI window. Best run interactively. After
+`bash build/build.sh && ./vscode/scripts/code.sh`, the status bar should
+read "KRT" on the left.
+
 ## Open questions
 
-- **Which upstream tag?** Need to pick one with a stable Electron and node
-  bundling story. Likely a recent `1.NN.0` release tag (not a Recovery /
-  Insiders tag). Decide by reading `microsoft/vscode/CHANGELOG.md` and the
-  VSCodium build matrix. **Don't pick `main` HEAD** — too churn-y for a
-  scaffold phase.
-- **yarn vs npm?** Upstream switched build tooling at some point. Use
-  whatever the pinned tag's `README.md` / `CONTRIBUTING.md` says.
-- **Submodule vs subtree?** PLAN.md §2 says submodule. Sticking with that
-  unless rebasing weekly proves too painful, in which case revisit in Phase 2
-  notes.
-- **Patch storage format?** Standard `git format-patch` output (`*.patch`)
-  vs. a single combined diff. Going with `git format-patch` style — VSCodium
-  uses this and it survives upstream rebases better.
+(none open at the moment — see Decisions below)
 
 ## Decisions made during execution
 
-(Filled in as we go.)
+- **Upstream tag = `1.118.1`** (latest stable, released 2026-04-30).
+  Picked over `main` HEAD because PLAN.md §6 calls upstream churn the top
+  risk and a scaffolding phase shouldn't fight that.
+- **npm, not yarn.** Upstream's `package.json` at `1.118.1` uses
+  `npm-run-all2` and `node build/npm/preinstall.ts`. Yarn isn't referenced
+  in the build scripts at this tag.
+- **Node 22.22.1 required, not just 22.x.** Started Phase 0 on Node 22.17.1;
+  `preinstall.ts` failed because it's a `.ts` file and 22.17 doesn't have
+  built-in TypeScript stripping (added in 22.18+). `nvm install 22.22.1`
+  fixed it. **Build scripts assume `npm` and `node` resolve to ≥22.22.1
+  in PATH** — they don't shell-load nvm themselves.
+- **Patch storage format = `git format-patch`** output (`*.patch`).
+  VSCodium uses this and it survives upstream rebases better than a single
+  combined diff.
+- **Deviation from PLAN.md §2: clone, not submodule.** vscode/ is a
+  gitignored clone, set up by `build/prepare_vscode.sh`. Two reasons:
+  (1) `jj` 0.40 doesn't capture submodule gitlink entries in commits —
+  empirically verified during this phase. (2) VSCodium itself, the build
+  reference PLAN.md cites, uses clone-via-script. The functional goal of
+  PLAN.md §2 (a kept-rebasable upstream) is preserved.
 
 ## Follow-ups deferred to later phases
 
