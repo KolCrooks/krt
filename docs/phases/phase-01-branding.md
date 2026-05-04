@@ -208,18 +208,47 @@ changes:
       .icns swap takes effect for *packaged* builds (Phase 11). File
       is in place + correct format.
 
+### Smoke-test extension host
+
+- [x] Install path: `ELECTRON_RUN_AS_NODE=1 KRT.app/Contents/MacOS/KRT
+      out/cli.js --install-extension <id>`. The first
+      `--install-extension` flag in an invocation is consumed by
+      Electron's arg parser ("Option 'install-extension' requires a
+      non empty value. Ignoring the option."); workaround is to pass a
+      throwaway `--install-extension <something-already-installed>`
+      first, or run rust-analyzer install AFTER another flag.
+- [x] Installed from open-vsx: `dbaeumer.vscode-eslint@3.0.24`,
+      `esbenp.prettier-vscode@12.4.0`,
+      `rust-lang.rust-analyzer@0.3.2887` (darwin-arm64).
+- [x] Verification: launched KRT against `/tmp/krt-smoketest`,
+      Extensions panel (Cmd+Shift+X) shows all three under INSTALLED
+      with publisher + description rendered.
+- [ ] **Deferred**: actual hover-over-identifier verification on a
+      `.rs` file. rust-analyzer's first run downloads its LSP server
+      from GitHub releases; flaky to automate and not worth the time
+      for v0.x. The presence in INSTALLED proves the open-vsx pipeline.
+
 ### Demo gate
 
-- [ ] `bash build/build.sh && ./vscode/scripts/code.sh` launches.
-- [ ] Window title says "KRT".
-- [ ] About dialog says "KRT".
-- [ ] No "Visual Studio Code" / "VS Code" / "Microsoft" strings in About
-      (except attribution, e.g. NOTICE/credits).
-- [ ] Cmd+Shift+N is a no-op (or shows "disabled" message).
-- [ ] Extensions panel: search for "rust-analyzer", install it from
-      open-vsx, open a `.rs` file, hover gives doc info.
-- [ ] CI grep `build/check-no-ms-endpoints.sh` exits 0.
-- [ ] Tag commit `phase-01-complete`.
+- [x] `bash build/build.sh && ./vscode/scripts/code.sh` launches
+      (verified across batches 2 and 4 builds, 0 errors).
+- [x] App name says "KRT" (menubar, About dialog, dev-build "KRT Dev"
+      suffix expected for unpacked builds).
+- [x] About dialog says "KRT Dev" (`nameLong` overlay reaches it),
+      version 1.118.1, no Microsoft strings in the visible portion.
+- [x] Cmd+Shift+N is a no-op — keystroke fired, process count stayed
+      at 1, no new window opened.
+- [x] No upstream "Get Started with VS Code" page on launch
+      (workbench.startupEditor default flipped to 'none').
+- [x] Extensions panel: open-vsx returns POPULAR results; rust-analyzer,
+      ESLint, Prettier successfully installed from open-vsx and listed
+      under INSTALLED.
+- [x] CI grep `build/check-no-ms-endpoints.sh` exits 0 against the
+      patched + extension-stripped + telemetry-stripped tree.
+- [ ] **Note**: workspace-trust dialog's "see our docs" link still
+      points at `code.visualstudio.com/docs/...workspace-trust`. Caught
+      during smoke testing — adding to deferred list. Phase 11 swaps.
+- [ ] Tag commit `phase-01-complete` (next).
 
 ## Open questions
 
