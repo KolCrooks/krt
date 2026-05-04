@@ -1,0 +1,110 @@
+From 1eb2d4af4df4c474d820c1b462ff7eca37bb2d0c Mon Sep 17 00:00:00 2001
+From: KRT <krt@local>
+Date: Mon, 4 May 2026 16:52:50 -0400
+Subject: [PATCH] Phase 2 scaffold: KRT accent CSS vars, hide menubar, unbind
+ palette chord
+
+---
+ .../browser/chrome/krtChrome.contribution.ts  | 29 +++++++++++++++
+ .../contrib/krt/browser/krt.contribution.ts   |  5 +++
+ .../browser/theme/krtAccent.contribution.ts   | 36 +++++++++++++++++++
+ 3 files changed, 70 insertions(+)
+ create mode 100644 src/vs/workbench/contrib/krt/browser/chrome/krtChrome.contribution.ts
+ create mode 100644 src/vs/workbench/contrib/krt/browser/theme/krtAccent.contribution.ts
+
+diff --git a/src/vs/workbench/contrib/krt/browser/chrome/krtChrome.contribution.ts b/src/vs/workbench/contrib/krt/browser/chrome/krtChrome.contribution.ts
+new file mode 100644
+index 00000000000..f42c09f3357
+--- /dev/null
++++ b/src/vs/workbench/contrib/krt/browser/chrome/krtChrome.contribution.ts
+@@ -0,0 +1,29 @@
++/*---------------------------------------------------------------------------------------------
++ *  Copyright (c) Microsoft Corporation. All rights reserved.
++ *  Licensed under the MIT License. See License.txt in the project root for license information.
++ *--------------------------------------------------------------------------------------------*/
++
++import { KeyCode, KeyMod } from '../../../../../base/common/keyCodes.js';
++import { Extensions as ConfigurationExtensions, IConfigurationRegistry } from '../../../../../platform/configuration/common/configurationRegistry.js';
++import { KeybindingsRegistry, KeybindingWeight } from '../../../../../platform/keybinding/common/keybindingsRegistry.js';
++import { Registry } from '../../../../../platform/registry/common/platform.js';
++
++// Hide the menu bar by default. macOS menu lives in OS chrome regardless, but
++// on Windows/Linux this prevents the upstream menu from claiming the title bar.
++// Users who want it can flip the setting back manually.
++Registry.as<IConfigurationRegistry>(ConfigurationExtensions.Configuration).registerDefaultConfigurations([{
++	overrides: {
++		'window.menuBarVisibility': 'hidden',
++	},
++}]);
++
++// Unbind the upstream `Cmd+Shift+P` / `Ctrl+Shift+P` chord for the command
++// palette. The action stays registered and F1 stays bound — power users
++// keep a fallback during dogfooding. Phase 4 will rebind ⌘K to PR search;
++// ⌘⇧P stays unclaimed in the meantime.
++KeybindingsRegistry.registerKeybindingRule({
++	id: '-workbench.action.showCommands',
++	weight: KeybindingWeight.WorkbenchContrib + 1,
++	when: undefined,
++	primary: KeyMod.CtrlCmd | KeyMod.Shift | KeyCode.KeyP,
++});
+diff --git a/src/vs/workbench/contrib/krt/browser/krt.contribution.ts b/src/vs/workbench/contrib/krt/browser/krt.contribution.ts
+index c64338b8f35..8fbd861f573 100644
+--- a/src/vs/workbench/contrib/krt/browser/krt.contribution.ts
++++ b/src/vs/workbench/contrib/krt/browser/krt.contribution.ts
+@@ -10,6 +10,11 @@ import { Extensions as WorkbenchExtensions, IWorkbenchContribution, IWorkbenchCo
+ import { LifecyclePhase } from '../../../services/lifecycle/common/lifecycle.js';
+ import { IStatusbarService, StatusbarAlignment } from '../../../services/statusbar/browser/statusbar.js';
+ 
++// KRT contribution sub-modules — each registers its own workbench contribution
++// on import. Keep this list flat so each piece is easy to find.
++import './theme/krtAccent.contribution.js';
++import './chrome/krtChrome.contribution.js';
++
+ class KrtStatusBarContribution extends Disposable implements IWorkbenchContribution {
+ 
+ 	static readonly ID = 'workbench.contrib.krt.statusBar';
+diff --git a/src/vs/workbench/contrib/krt/browser/theme/krtAccent.contribution.ts b/src/vs/workbench/contrib/krt/browser/theme/krtAccent.contribution.ts
+new file mode 100644
+index 00000000000..ed56e049874
+--- /dev/null
++++ b/src/vs/workbench/contrib/krt/browser/theme/krtAccent.contribution.ts
+@@ -0,0 +1,36 @@
++/*---------------------------------------------------------------------------------------------
++ *  Copyright (c) Microsoft Corporation. All rights reserved.
++ *  Licensed under the MIT License. See License.txt in the project root for license information.
++ *--------------------------------------------------------------------------------------------*/
++
++import { mainWindow } from '../../../../../base/browser/window.js';
++import { Disposable } from '../../../../../base/common/lifecycle.js';
++import { Registry } from '../../../../../platform/registry/common/platform.js';
++import { Extensions as WorkbenchExtensions, IWorkbenchContribution, IWorkbenchContributionsRegistry } from '../../../../common/contributions.js';
++import { LifecyclePhase } from '../../../../services/lifecycle/common/lifecycle.js';
++
++// KRT accent palette — Indigo (default). Mirrors design/.../app.jsx ACCENTS.indigo.
++// Phase 10 adds Tweaks-driven hot-swap; for now this is a fixed palette so the
++// rail / title bar / tabs can consume the variables.
++const KRT_ACCENT_VARS: ReadonlyArray<readonly [string, string]> = [
++	['--krt-accent', 'oklch(0.5 0.18 280)'],
++	['--krt-accent-2', 'oklch(0.62 0.16 280)'],
++	['--krt-accent-soft', 'oklch(0.96 0.03 280)'],
++	['--krt-accent-line', 'oklch(0.85 0.07 280)'],
++];
++
++class KrtAccentContribution extends Disposable implements IWorkbenchContribution {
++
++	static readonly ID = 'workbench.contrib.krt.accent';
++
++	constructor() {
++		super();
++		const root = mainWindow.document.documentElement;
++		for (const [name, value] of KRT_ACCENT_VARS) {
++			root.style.setProperty(name, value);
++		}
++	}
++}
++
++Registry.as<IWorkbenchContributionsRegistry>(WorkbenchExtensions.Workbench)
++	.registerWorkbenchContribution(KrtAccentContribution, LifecyclePhase.Restored);
+-- 
+2.52.0
+

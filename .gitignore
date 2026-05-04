@@ -1,6 +1,9 @@
 # jj colocation — .jj is not tracked by git
 .jj/
 
+# Claude Code session state
+.claude/
+
 # OS
 .DS_Store
 Thumbs.db
