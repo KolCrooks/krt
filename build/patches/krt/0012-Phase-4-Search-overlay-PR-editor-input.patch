@@ -1,0 +1,1695 @@
+From c4c089bb00a2389219eeb8de205dbdb80897f418 Mon Sep 17 00:00:00 2001
+From: KRT <krt@local>
+Date: Mon, 4 May 2026 17:54:05 -0400
+Subject: [PATCH] Phase 4: Search overlay + PR editor input
+
+---
+ src/vs/platform/krt/common/krt.ts             |  48 ++
+ .../pullRequestProviderMainService.ts         |  87 +++-
+ .../contrib/krt/browser/krt.contribution.ts   |   2 +
+ .../krt/browser/krtRecentPullRequests.ts      |  42 ++
+ .../pr/krtPullRequestEditor.contribution.ts   |  61 +++
+ .../browser/pr/krtPullRequestEditorInput.ts   |  85 ++++
+ .../browser/pr/krtPullRequestEditorPane.css   | 129 +++++
+ .../browser/pr/krtPullRequestEditorPane.ts    | 165 ++++++
+ .../browser/search/krtSearch.contribution.ts  |  45 ++
+ .../krt/browser/search/krtSearchOverlay.css   | 293 +++++++++++
+ .../krt/browser/search/krtSearchOverlay.ts    | 472 ++++++++++++++++++
+ .../krt/browser/search/krtSearchService.ts    |  21 +
+ .../krtOpenPullRequest.contribution.ts        |  67 +--
+ 13 files changed, 1459 insertions(+), 58 deletions(-)
+ create mode 100644 src/vs/workbench/contrib/krt/browser/krtRecentPullRequests.ts
+ create mode 100644 src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditor.contribution.ts
+ create mode 100644 src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorInput.ts
+ create mode 100644 src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.css
+ create mode 100644 src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.ts
+ create mode 100644 src/vs/workbench/contrib/krt/browser/search/krtSearch.contribution.ts
+ create mode 100644 src/vs/workbench/contrib/krt/browser/search/krtSearchOverlay.css
+ create mode 100644 src/vs/workbench/contrib/krt/browser/search/krtSearchOverlay.ts
+ create mode 100644 src/vs/workbench/contrib/krt/browser/search/krtSearchService.ts
+
+diff --git a/src/vs/platform/krt/common/krt.ts b/src/vs/platform/krt/common/krt.ts
+index e9a416cbbe2..e7aae1cea6b 100644
+--- a/src/vs/platform/krt/common/krt.ts
++++ b/src/vs/platform/krt/common/krt.ts
+@@ -122,6 +122,47 @@ export interface RecentPullRequest {
+ 	readonly openedAt: string;
+ }
+ 
++/**
++ * Lighter-than-`PullRequest` shape the Search overlay renders one
++ * row per. Only the fields the row actually needs.
++ */
++export interface PullRequestSummary {
++	readonly url: string;
++	readonly owner: string;
++	readonly repo: string;
++	readonly number: number;
++	readonly title: string;
++	readonly state: PullRequestState;
++	readonly author: PullRequestUser;
++	readonly updatedAt: string;
++}
++
++/**
++ * Search scope tabs in the overlay. Server-side query qualifiers
++ * are appended in the provider implementation.
++ */
++export type SearchScope = 'all-open' | 'reviewed' | 'awaiting-review';
++
++const PULL_REQUEST_URL_RE = /^https:\/\/github\.com\/(?<owner>[^/]+)\/(?<repo>[^/]+)\/pull\/(?<number>\d+)/;
++
++/**
++ * Pure client-side parse of a GitHub PR URL. Returns `undefined`
++ * for malformed input — callers decide whether to throw a typed
++ * `KrtError` or surface the error inline. Lives in `common/` so
++ * renderer + main share the regex.
++ */
++export function parsePullRequestUrl(url: string): { readonly owner: string; readonly repo: string; readonly number: number } | undefined {
++	const match = PULL_REQUEST_URL_RE.exec(url);
++	if (!match?.groups) {
++		return undefined;
++	}
++	return {
++		owner: match.groups.owner,
++		repo: match.groups.repo,
++		number: Number(match.groups.number),
++	};
++}
++
+ // ---------- Service decorators ----------
+ 
+ export const IGhClient = createDecorator<IGhClient>('krtGhClient');
+@@ -149,4 +190,11 @@ export const IPullRequestProvider = createDecorator<IPullRequestProvider>('krtPu
+ export interface IPullRequestProvider {
+ 	readonly _serviceBrand: undefined;
+ 	getPullRequest(url: string): Promise<PullRequest>;
++	/**
++	 * Server-side PR search via the GitHub `search/issues` endpoint
++	 * (filtered to PRs by `is:pr`). Up to 25 results, sorted by
++	 * `updated` desc. Throws `KrtError` on auth/rate-limit failures
++	 * (see `errors.ts`).
++	 */
++	search(query: string, scope: SearchScope): Promise<readonly PullRequestSummary[]>;
+ }
+diff --git a/src/vs/platform/krt/electron-main/pullRequestProviderMainService.ts b/src/vs/platform/krt/electron-main/pullRequestProviderMainService.ts
+index f7064d8ec12..7b940fad6bf 100644
+--- a/src/vs/platform/krt/electron-main/pullRequestProviderMainService.ts
++++ b/src/vs/platform/krt/electron-main/pullRequestProviderMainService.ts
+@@ -3,7 +3,7 @@
+  *  Licensed under the MIT License. See License.txt in the project root for license information.
+  *--------------------------------------------------------------------------------------------*/
+ 
+-import { IGhClient, IPullRequestProvider, PullRequest, PullRequestState } from '../common/krt.js';
++import { IGhClient, IPullRequestProvider, parsePullRequestUrl, PullRequest, PullRequestState, PullRequestSummary, SearchScope } from '../common/krt.js';
+ import { badPullRequestUrl } from '../common/errors.js';
+ 
+ interface GhUser {
+@@ -38,7 +38,23 @@ interface GhPullRequest {
+ 	labels: ReadonlyArray<{ name: string }>;
+ }
+ 
+-const PULL_URL_RE = /^https:\/\/github\.com\/(?<owner>[^/]+)\/(?<repo>[^/]+)\/pull\/(?<number>\d+)/;
++const ISSUE_HTML_URL_RE = /^https:\/\/github\.com\/(?<owner>[^/]+)\/(?<repo>[^/]+)\/(?:pull|issues)\/(?<number>\d+)/;
++const SEARCH_PER_PAGE = 25;
++
++interface GhSearchResponse {
++	items: GhSearchItem[];
++}
++
++interface GhSearchItem {
++	html_url: string;
++	number: number;
++	title: string;
++	state: 'open' | 'closed';
++	draft?: boolean;
++	updated_at: string;
++	user: GhUser;
++	pull_request?: { merged_at: string | null };
++}
+ 
+ export class PullRequestProviderMainService implements IPullRequestProvider {
+ 
+@@ -50,22 +66,71 @@ export class PullRequestProviderMainService implements IPullRequestProvider {
+ 
+ 	async getPullRequest(url: string): Promise<PullRequest> {
+ 		const parsed = parsePullRequestUrl(url);
++		if (!parsed) {
++			throw badPullRequestUrl(url);
++		}
+ 		const path = `repos/${parsed.owner}/${parsed.repo}/pulls/${parsed.number}`;
+ 		const data = await this.ghClient.apiJson<GhPullRequest>(path);
+ 		return mapPullRequest(parsed, data);
+ 	}
++
++	async search(query: string, scope: SearchScope): Promise<readonly PullRequestSummary[]> {
++		const q = buildSearchQuery(query, scope);
++		const path = `search/issues?per_page=${SEARCH_PER_PAGE}&sort=updated&order=desc&q=${encodeURIComponent(q)}`;
++		const data = await this.ghClient.apiJson<GhSearchResponse>(path);
++		const items = Array.isArray(data?.items) ? data.items : [];
++		const out: PullRequestSummary[] = [];
++		for (const item of items) {
++			if (!item.pull_request) {
++				continue;
++			}
++			const parsed = ISSUE_HTML_URL_RE.exec(item.html_url);
++			if (!parsed?.groups) {
++				continue;
++			}
++			out.push({
++				url: item.html_url,
++				owner: parsed.groups.owner,
++				repo: parsed.groups.repo,
++				number: item.number,
++				title: item.title,
++				state: deriveSummaryState(item),
++				author: { login: item.user.login, avatarUrl: item.user.avatar_url },
++				updatedAt: item.updated_at,
++			});
++		}
++		return out;
++	}
+ }
+ 
+-function parsePullRequestUrl(url: string): { owner: string; repo: string; number: number } {
+-	const match = PULL_URL_RE.exec(url);
+-	if (!match?.groups) {
+-		throw badPullRequestUrl(url);
++function buildSearchQuery(query: string, scope: SearchScope): string {
++	const trimmed = query.trim();
++	const qualifiers: string[] = ['is:pr', 'archived:false'];
++	switch (scope) {
++		case 'all-open':
++			qualifiers.push('is:open');
++			break;
++		case 'reviewed':
++			qualifiers.push('reviewed-by:@me');
++			break;
++		case 'awaiting-review':
++			qualifiers.push('review-requested:@me');
++			break;
+ 	}
+-	return {
+-		owner: match.groups.owner,
+-		repo: match.groups.repo,
+-		number: Number(match.groups.number),
+-	};
++	return trimmed ? `${trimmed} ${qualifiers.join(' ')}` : qualifiers.join(' ');
++}
++
++function deriveSummaryState(item: GhSearchItem): PullRequestState {
++	if (item.pull_request?.merged_at) {
++		return 'merged';
++	}
++	if (item.state === 'closed') {
++		return 'closed';
++	}
++	if (item.draft) {
++		return 'draft';
++	}
++	return 'open';
+ }
+ 
+ function mapPullRequest(parsed: { owner: string; repo: string; number: number }, data: GhPullRequest): PullRequest {
+diff --git a/src/vs/workbench/contrib/krt/browser/krt.contribution.ts b/src/vs/workbench/contrib/krt/browser/krt.contribution.ts
+index 658f31786d4..59ace12e70c 100644
+--- a/src/vs/workbench/contrib/krt/browser/krt.contribution.ts
++++ b/src/vs/workbench/contrib/krt/browser/krt.contribution.ts
+@@ -15,6 +15,8 @@ import { IStatusbarService, StatusbarAlignment } from '../../../services/statusb
+ import './theme/krtAccent.contribution.js';
+ import './chrome/krtChrome.contribution.js';
+ import './tabs/krtTabs.contribution.js';
++import './pr/krtPullRequestEditor.contribution.js';
++import './search/krtSearch.contribution.js';
+ 
+ class KrtStatusBarContribution extends Disposable implements IWorkbenchContribution {
+ 
+diff --git a/src/vs/workbench/contrib/krt/browser/krtRecentPullRequests.ts b/src/vs/workbench/contrib/krt/browser/krtRecentPullRequests.ts
+new file mode 100644
+index 00000000000..aa912d12169
+--- /dev/null
++++ b/src/vs/workbench/contrib/krt/browser/krtRecentPullRequests.ts
+@@ -0,0 +1,42 @@
++/*---------------------------------------------------------------------------------------------
++ *  Copyright (c) Microsoft Corporation. All rights reserved.
++ *  Licensed under the MIT License. See License.txt in the project root for license information.
++ *--------------------------------------------------------------------------------------------*/
++
++import { PullRequest, RecentPullRequest } from '../../../../platform/krt/common/krt.js';
++import { IStorageService, StorageScope, StorageTarget } from '../../../../platform/storage/common/storage.js';
++
++/**
++ * Recent-PRs persistence. APPLICATION/MACHINE scope: KRT is single-
++ * window single-user, profiles aren't a meaningful axis here. Cap at
++ * 20 entries — the Search overlay's recent grid never wants more.
++ */
++export const KRT_RECENT_PRS_KEY = 'krt.recentPRs';
++export const KRT_RECENT_PRS_CAP = 20;
++
++export function readRecentPullRequests(storageService: IStorageService): readonly RecentPullRequest[] {
++	const raw = storageService.get(KRT_RECENT_PRS_KEY, StorageScope.APPLICATION);
++	if (!raw) {
++		return [];
++	}
++	try {
++		const parsed = JSON.parse(raw);
++		return Array.isArray(parsed) ? parsed : [];
++	} catch {
++		return [];
++	}
++}
++
++export function recordRecentPullRequest(storageService: IStorageService, pr: PullRequest): void {
++	const entry: RecentPullRequest = {
++		url: pr.url,
++		owner: pr.owner,
++		repo: pr.repo,
++		number: pr.number,
++		title: pr.title,
++		openedAt: new Date().toISOString(),
++	};
++	const existing = readRecentPullRequests(storageService).filter(r => r.url !== entry.url);
++	const next = [entry, ...existing].slice(0, KRT_RECENT_PRS_CAP);
++	storageService.store(KRT_RECENT_PRS_KEY, JSON.stringify(next), StorageScope.APPLICATION, StorageTarget.MACHINE);
++}
+diff --git a/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditor.contribution.ts b/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditor.contribution.ts
+new file mode 100644
+index 00000000000..22921703154
+--- /dev/null
++++ b/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditor.contribution.ts
+@@ -0,0 +1,61 @@
++/*---------------------------------------------------------------------------------------------
++ *  Copyright (c) Microsoft Corporation. All rights reserved.
++ *  Licensed under the MIT License. See License.txt in the project root for license information.
++ *--------------------------------------------------------------------------------------------*/
++
++import { localize } from '../../../../../nls.js';
++import { SyncDescriptor } from '../../../../../platform/instantiation/common/descriptors.js';
++import { IInstantiationService } from '../../../../../platform/instantiation/common/instantiation.js';
++import { Registry } from '../../../../../platform/registry/common/platform.js';
++import { EditorPaneDescriptor, IEditorPaneRegistry } from '../../../../browser/editor.js';
++import { EditorExtensions, IEditorFactoryRegistry, IEditorSerializer } from '../../../../common/editor.js';
++import { KrtPullRequestEditorInput } from './krtPullRequestEditorInput.js';
++import { KrtPullRequestEditorPane } from './krtPullRequestEditorPane.js';
++
++interface SerializedKrtPullRequestEditorInput {
++	readonly url: string;
++	readonly owner: string;
++	readonly repo: string;
++	readonly number: number;
++	readonly title?: string;
++}
++
++class KrtPullRequestEditorInputSerializer implements IEditorSerializer {
++
++	canSerialize(_input: KrtPullRequestEditorInput): boolean {
++		return true;
++	}
++
++	serialize(input: KrtPullRequestEditorInput): string {
++		const data: SerializedKrtPullRequestEditorInput = {
++			url: input.url,
++			owner: input.owner,
++			repo: input.repo,
++			number: input.number,
++			title: input.getTitle().includes('—') ? input.getTitle().split('—').slice(1).join('—').trim() : undefined,
++		};
++		return JSON.stringify(data);
++	}
++
++	deserialize(_instantiationService: IInstantiationService, raw: string): KrtPullRequestEditorInput | undefined {
++		try {
++			const data = JSON.parse(raw) as SerializedKrtPullRequestEditorInput;
++			return new KrtPullRequestEditorInput(data.url, data.owner, data.repo, data.number, data.title);
++		} catch {
++			return undefined;
++		}
++	}
++}
++
++Registry.as<IEditorFactoryRegistry>(EditorExtensions.EditorFactory)
++	.registerEditorSerializer(KrtPullRequestEditorInput.ID, KrtPullRequestEditorInputSerializer);
++
++Registry.as<IEditorPaneRegistry>(EditorExtensions.EditorPane)
++	.registerEditorPane(
++		EditorPaneDescriptor.create(
++			KrtPullRequestEditorPane,
++			KrtPullRequestEditorPane.ID,
++			localize('krt.pullRequestEditor.name', "KRT Pull Request"),
++		),
++		[new SyncDescriptor(KrtPullRequestEditorInput)],
++	);
+diff --git a/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorInput.ts b/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorInput.ts
+new file mode 100644
+index 00000000000..16ea3c5edef
+--- /dev/null
++++ b/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorInput.ts
+@@ -0,0 +1,85 @@
++/*---------------------------------------------------------------------------------------------
++ *  Copyright (c) Microsoft Corporation. All rights reserved.
++ *  Licensed under the MIT License. See License.txt in the project root for license information.
++ *--------------------------------------------------------------------------------------------*/
++
++import { URI } from '../../../../../base/common/uri.js';
++import { localize } from '../../../../../nls.js';
++import { EditorInput } from '../../../../common/editor/editorInput.js';
++import { IUntypedEditorInput } from '../../../../common/editor.js';
++
++export const KRT_PR_SCHEME = 'krt-pr';
++export const krtPullRequestEditorInputTypeId = 'workbench.editors.krtPullRequestInput';
++
++/**
++ * One open PR is one editor input. The input carries enough metadata
++ * to render a tab and address the PR (`url` is authoritative);
++ * everything else (description, comments, reviews) is fetched lazily
++ * by the pane via `IPullRequestProvider.getPullRequest(url)`.
++ */
++export class KrtPullRequestEditorInput extends EditorInput {
++
++	static readonly ID = krtPullRequestEditorInputTypeId;
++
++	private readonly _resource: URI;
++
++	override get typeId(): string {
++		return KrtPullRequestEditorInput.ID;
++	}
++
++	override get editorId(): string | undefined {
++		return this.typeId;
++	}
++
++	override get resource(): URI {
++		return this._resource;
++	}
++
++	constructor(
++		readonly url: string,
++		readonly owner: string,
++		readonly repo: string,
++		readonly number: number,
++		private _title: string | undefined,
++	) {
++		super();
++		this._resource = URI.from({ scheme: KRT_PR_SCHEME, authority: owner, path: `/${repo}/${number}` });
++	}
++
++	override getName(): string {
++		return `${this.owner}/${this.repo}#${this.number}`;
++	}
++
++	override getTitle(): string {
++		return this._title ? `${this.getName()} — ${this._title}` : this.getName();
++	}
++
++	setTitle(title: string): void {
++		if (title === this._title) {
++			return;
++		}
++		this._title = title;
++		this._onDidChangeLabel.fire();
++	}
++
++	override toUntyped(): IUntypedEditorInput {
++		return {
++			resource: this._resource,
++			options: { override: KrtPullRequestEditorInput.ID },
++		};
++	}
++
++	override matches(other: EditorInput | IUntypedEditorInput): boolean {
++		if (super.matches(other)) {
++			return true;
++		}
++		if (other instanceof KrtPullRequestEditorInput) {
++			return other.url === this.url;
++		}
++		return false;
++	}
++
++	override getDescription(): string {
++		return localize('krt.pullRequestInput.description', "Pull Request");
++	}
++}
+diff --git a/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.css b/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.css
+new file mode 100644
+index 00000000000..ae0b58abf37
+--- /dev/null
++++ b/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.css
+@@ -0,0 +1,129 @@
++/*---------------------------------------------------------------------------------------------
++ *  Copyright (c) Microsoft Corporation. All rights reserved.
++ *  Licensed under the MIT License. See License.txt in the project root for license information.
++ *--------------------------------------------------------------------------------------------*/
++
++.krt-pr-editor {
++	display: flex;
++	flex-direction: column;
++	box-sizing: border-box;
++	padding: 24px 32px;
++	gap: 20px;
++	overflow: auto;
++	font-family: 'Inter', system-ui, sans-serif;
++}
++
++.krt-pr-editor-header {
++	display: flex;
++	align-items: flex-start;
++	justify-content: space-between;
++	gap: 16px;
++}
++
++.krt-pr-editor-header-text {
++	display: flex;
++	flex-direction: column;
++	gap: 4px;
++	min-width: 0;
++}
++
++.krt-pr-editor-subtitle {
++	font-size: 12px;
++	opacity: 0.7;
++	letter-spacing: 0.02em;
++}
++
++.krt-pr-editor-title {
++	font-size: 22px;
++	font-weight: 600;
++	margin: 0;
++	line-height: 1.3;
++	overflow: hidden;
++	text-overflow: ellipsis;
++}
++
++.krt-pr-editor-state-pill {
++	flex: 0 0 auto;
++	font-size: 11px;
++	font-weight: 600;
++	letter-spacing: 0.04em;
++	text-transform: uppercase;
++	padding: 4px 10px;
++	border-radius: 999px;
++	border: 1px solid transparent;
++	color: var(--vscode-foreground);
++}
++
++.krt-pr-editor-state-pill.open {
++	background: rgba(46, 160, 67, 0.15);
++	border-color: rgba(46, 160, 67, 0.55);
++}
++
++.krt-pr-editor-state-pill.closed {
++	background: rgba(207, 34, 46, 0.15);
++	border-color: rgba(207, 34, 46, 0.55);
++}
++
++.krt-pr-editor-state-pill.merged {
++	background: rgba(130, 80, 223, 0.15);
++	border-color: rgba(130, 80, 223, 0.55);
++}
++
++.krt-pr-editor-state-pill.draft {
++	background: rgba(110, 118, 129, 0.15);
++	border-color: rgba(110, 118, 129, 0.55);
++}
++
++.krt-pr-editor-body {
++	display: flex;
++	flex-direction: column;
++	gap: 12px;
++	font-size: 13px;
++	line-height: 1.5;
++}
++
++.krt-pr-editor-skeleton {
++	opacity: 0.6;
++	font-style: italic;
++}
++
++.krt-pr-editor-note {
++	padding: 12px 14px;
++	background: var(--vscode-textBlockQuote-background, rgba(127, 127, 127, 0.08));
++	border-left: 3px solid var(--krt-accent, var(--vscode-focusBorder));
++	border-radius: 4px;
++}
++
++.krt-pr-editor-stats {
++	font-family: 'JetBrains Mono', monospace;
++	font-size: 12px;
++	opacity: 0.85;
++}
++
++.krt-pr-editor-error {
++	display: flex;
++	flex-direction: column;
++	gap: 6px;
++	padding: 14px 16px;
++	border: 1px solid var(--vscode-inputValidation-errorBorder, rgba(207, 34, 46, 0.5));
++	background: var(--vscode-inputValidation-errorBackground, rgba(207, 34, 46, 0.08));
++	border-radius: 4px;
++}
++
++.krt-pr-editor-error-kind {
++	font-size: 11px;
++	font-weight: 600;
++	letter-spacing: 0.06em;
++	text-transform: uppercase;
++	opacity: 0.8;
++}
++
++.krt-pr-editor-error-message {
++	font-size: 13px;
++	font-weight: 500;
++}
++
++.krt-pr-editor-error-hint {
++	font-size: 12px;
++	opacity: 0.85;
++}
+diff --git a/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.ts b/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.ts
+new file mode 100644
+index 00000000000..6909880b855
+--- /dev/null
++++ b/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.ts
+@@ -0,0 +1,165 @@
++/*---------------------------------------------------------------------------------------------
++ *  Copyright (c) Microsoft Corporation. All rights reserved.
++ *  Licensed under the MIT License. See License.txt in the project root for license information.
++ *--------------------------------------------------------------------------------------------*/
++
++import './krtPullRequestEditorPane.css';
++import * as DOM from '../../../../../base/browser/dom.js';
++import { CancellationToken } from '../../../../../base/common/cancellation.js';
++import { localize } from '../../../../../nls.js';
++import { IEditorOptions } from '../../../../../platform/editor/common/editor.js';
++import { IStorageService } from '../../../../../platform/storage/common/storage.js';
++import { ITelemetryService } from '../../../../../platform/telemetry/common/telemetry.js';
++import { IThemeService } from '../../../../../platform/theme/common/themeService.js';
++import { ILogService } from '../../../../../platform/log/common/log.js';
++import { isKrtError } from '../../../../../platform/krt/common/errors.js';
++import { IPullRequestProvider, PullRequest, PullRequestState } from '../../../../../platform/krt/common/krt.js';
++import { EditorPane } from '../../../../browser/parts/editor/editorPane.js';
++import { IEditorOpenContext } from '../../../../common/editor.js';
++import { IEditorGroup } from '../../../../services/editor/common/editorGroupsService.js';
++import { recordRecentPullRequest } from '../krtRecentPullRequests.js';
++import { KrtPullRequestEditorInput } from './krtPullRequestEditorInput.js';
++
++/**
++ * Phase 4 placeholder pane for a PR tab. Renders title, owner/repo#number,
++ * state pill, and a "Phase 5 will land the rendered description here"
++ * note. Phase 5 will replace the body with description + comments;
++ * Phase 6 will mount the diff sub-mode.
++ */
++export class KrtPullRequestEditorPane extends EditorPane {
++
++	static readonly ID = 'workbench.editor.krtPullRequest';
++
++	private root!: HTMLElement;
++	private headerElement!: HTMLElement;
++	private titleElement!: HTMLElement;
++	private subtitleElement!: HTMLElement;
++	private statePillElement!: HTMLElement;
++	private bodyElement!: HTMLElement;
++
++	private currentInput: KrtPullRequestEditorInput | undefined;
++	private fetchToken = 0;
++
++	constructor(
++		group: IEditorGroup,
++		@ITelemetryService telemetryService: ITelemetryService,
++		@IThemeService themeService: IThemeService,
++		@IStorageService private readonly krtStorageService: IStorageService,
++		@IPullRequestProvider private readonly pullRequestProvider: IPullRequestProvider,
++		@ILogService private readonly logService: ILogService,
++	) {
++		super(KrtPullRequestEditorPane.ID, group, telemetryService, themeService, krtStorageService);
++	}
++
++	protected createEditor(parent: HTMLElement): void {
++		this.root = DOM.append(parent, DOM.$('.krt-pr-editor'));
++		this.headerElement = DOM.append(this.root, DOM.$('.krt-pr-editor-header'));
++		const headerText = DOM.append(this.headerElement, DOM.$('.krt-pr-editor-header-text'));
++		this.subtitleElement = DOM.append(headerText, DOM.$('.krt-pr-editor-subtitle'));
++		this.titleElement = DOM.append(headerText, DOM.$('h1.krt-pr-editor-title'));
++		this.statePillElement = DOM.append(this.headerElement, DOM.$('.krt-pr-editor-state-pill'));
++		this.bodyElement = DOM.append(this.root, DOM.$('.krt-pr-editor-body'));
++	}
++
++	override async setInput(input: KrtPullRequestEditorInput, options: IEditorOptions | undefined, context: IEditorOpenContext, token: CancellationToken): Promise<void> {
++		await super.setInput(input, options, context, token);
++		this.currentInput = input;
++		this.renderPlaceholder(input);
++		this.fetchToken++;
++		const myToken = this.fetchToken;
++		try {
++			const pr = await this.pullRequestProvider.getPullRequest(input.url);
++			if (token.isCancellationRequested || this.currentInput !== input || this.fetchToken !== myToken) {
++				return;
++			}
++			input.setTitle(pr.title);
++			this.renderLoaded(pr);
++			recordRecentPullRequest(this.krtStorageService, pr);
++		} catch (err) {
++			if (this.currentInput !== input || this.fetchToken !== myToken) {
++				return;
++			}
++			if (isKrtError(err)) {
++				this.logService.warn(`[krt] pr-pane load failed (${err.kind}): ${err.message}`);
++				this.renderError(err.kind, err.message, err.hint);
++				return;
++			}
++			this.logService.error('[krt] pr-pane load failed', err);
++			this.renderError('unknown', String(err), localize('krt.pr.unknownErrorHint', "See the developer tools console for details."));
++		}
++	}
++
++	override clearInput(): void {
++		this.currentInput = undefined;
++		this.fetchToken++;
++		super.clearInput();
++	}
++
++	override layout(dimension: DOM.Dimension): void {
++		this.root.style.height = `${dimension.height}px`;
++		this.root.style.width = `${dimension.width}px`;
++	}
++
++	override focus(): void {
++		super.focus();
++		this.root.focus();
++	}
++
++	private renderPlaceholder(input: KrtPullRequestEditorInput): void {
++		this.subtitleElement.textContent = `${input.owner}/${input.repo} #${input.number}`;
++		this.titleElement.textContent = localize('krt.pr.loading', "Loading…");
++		this.statePillElement.textContent = '';
++		this.statePillElement.className = 'krt-pr-editor-state-pill';
++		DOM.clearNode(this.bodyElement);
++		const skeleton = DOM.append(this.bodyElement, DOM.$('.krt-pr-editor-skeleton'));
++		skeleton.textContent = localize('krt.pr.fetching', "Fetching pull request from GitHub via gh CLI…");
++	}
++
++	private renderLoaded(pr: PullRequest): void {
++		this.subtitleElement.textContent = `${pr.owner}/${pr.repo} #${pr.number} · ${pr.author.login}`;
++		this.titleElement.textContent = pr.title;
++		this.applyStatePill(pr.state);
++		DOM.clearNode(this.bodyElement);
++		const note = DOM.append(this.bodyElement, DOM.$('.krt-pr-editor-note'));
++		note.textContent = localize(
++			'krt.pr.placeholderBody',
++			"Description, comments, reviewers, and checks land in Phase 5. The Diff sub-mode follows in Phase 6.",
++		);
++		const stats = DOM.append(this.bodyElement, DOM.$('.krt-pr-editor-stats'));
++		stats.textContent = localize(
++			'krt.pr.stats',
++			"+{0} -{1} across {2} file(s) - base {3} <- head {4}",
++			pr.stats.additions, pr.stats.deletions, pr.stats.changedFiles,
++			pr.base.label, pr.head.label,
++		);
++	}
++
++	private renderError(kind: string, message: string, hint: string): void {
++		this.titleElement.textContent = localize('krt.pr.errorTitle', "Couldn't load this PR");
++		this.statePillElement.textContent = '';
++		this.statePillElement.className = 'krt-pr-editor-state-pill';
++		DOM.clearNode(this.bodyElement);
++		const errEl = DOM.append(this.bodyElement, DOM.$('.krt-pr-editor-error'));
++		const kindEl = DOM.append(errEl, DOM.$('.krt-pr-editor-error-kind'));
++		kindEl.textContent = kind;
++		const msgEl = DOM.append(errEl, DOM.$('.krt-pr-editor-error-message'));
++		msgEl.textContent = message;
++		const hintEl = DOM.append(errEl, DOM.$('.krt-pr-editor-error-hint'));
++		hintEl.textContent = hint;
++	}
++
++	private applyStatePill(state: PullRequestState): void {
++		this.statePillElement.classList.remove('open', 'closed', 'merged', 'draft');
++		this.statePillElement.classList.add(state);
++		this.statePillElement.textContent = stateLabel(state);
++	}
++}
++
++function stateLabel(state: PullRequestState): string {
++	switch (state) {
++		case 'open': return localize('krt.pr.state.open', "Open");
++		case 'closed': return localize('krt.pr.state.closed', "Closed");
++		case 'merged': return localize('krt.pr.state.merged', "Merged");
++		case 'draft': return localize('krt.pr.state.draft', "Draft");
++	}
++}
+diff --git a/src/vs/workbench/contrib/krt/browser/search/krtSearch.contribution.ts b/src/vs/workbench/contrib/krt/browser/search/krtSearch.contribution.ts
+new file mode 100644
+index 00000000000..3744a1faf5b
+--- /dev/null
++++ b/src/vs/workbench/contrib/krt/browser/search/krtSearch.contribution.ts
+@@ -0,0 +1,45 @@
++/*---------------------------------------------------------------------------------------------
++ *  Copyright (c) Microsoft Corporation. All rights reserved.
++ *  Licensed under the MIT License. See License.txt in the project root for license information.
++ *--------------------------------------------------------------------------------------------*/
++
++import { KeyCode, KeyMod } from '../../../../../base/common/keyCodes.js';
++import { localize2 } from '../../../../../nls.js';
++import { Action2, registerAction2 } from '../../../../../platform/actions/common/actions.js';
++import { InstantiationType, registerSingleton } from '../../../../../platform/instantiation/common/extensions.js';
++import { ServicesAccessor } from '../../../../../platform/instantiation/common/instantiation.js';
++import { KeybindingWeight } from '../../../../../platform/keybinding/common/keybindingsRegistry.js';
++import { IKrtSearchService } from './krtSearchService.js';
++import { KrtSearchService } from './krtSearchOverlay.js';
++
++const KRT_CATEGORY = localize2('krt.category', "KRT");
++
++registerSingleton(IKrtSearchService, KrtSearchService, InstantiationType.Delayed);
++
++class KrtSearchAction extends Action2 {
++
++	static readonly ID = 'krt.search';
++
++	constructor() {
++		super({
++			id: KrtSearchAction.ID,
++			title: localize2('krt.search.title', "Search PRs"),
++			category: KRT_CATEGORY,
++			f1: true,
++			keybinding: {
++				// Bumped above WorkbenchContrib so the resolver's "last match
++				// wins" logic in `_findCommand` picks this single-key binding
++				// over the upstream `cmd+K cmd+*` chord prefixes that would
++				// otherwise force the dispatcher to wait for a second key.
++				weight: KeybindingWeight.ExternalExtension + 1000,
++				primary: KeyMod.CtrlCmd | KeyCode.KeyK,
++			},
++		});
++	}
++
++	override async run(accessor: ServicesAccessor): Promise<void> {
++		accessor.get(IKrtSearchService).toggle();
++	}
++}
++
++registerAction2(KrtSearchAction);
+diff --git a/src/vs/workbench/contrib/krt/browser/search/krtSearchOverlay.css b/src/vs/workbench/contrib/krt/browser/search/krtSearchOverlay.css
+new file mode 100644
+index 00000000000..c0512f2be2b
+--- /dev/null
++++ b/src/vs/workbench/contrib/krt/browser/search/krtSearchOverlay.css
+@@ -0,0 +1,293 @@
++/*---------------------------------------------------------------------------------------------
++ *  Copyright (c) Microsoft Corporation. All rights reserved.
++ *  Licensed under the MIT License. See License.txt in the project root for license information.
++ *--------------------------------------------------------------------------------------------*/
++
++.krt-search-overlay {
++	position: fixed;
++	inset: 0;
++	z-index: 1500;
++	display: flex;
++	justify-content: center;
++	align-items: flex-start;
++	padding-top: 88px;
++	background: rgba(0, 0, 0, 0.32);
++	backdrop-filter: blur(2px);
++	font-family: 'Inter', system-ui, sans-serif;
++}
++
++.krt-search-overlay[hidden] {
++	display: none;
++}
++
++.krt-search-card {
++	width: min(880px, calc(100vw - 48px));
++	max-height: calc(100vh - 160px);
++	display: flex;
++	flex-direction: column;
++	background: var(--vscode-editor-background, #fff);
++	color: var(--vscode-foreground);
++	border: 1px solid var(--vscode-widget-border, rgba(127, 127, 127, 0.25));
++	border-radius: 12px;
++	box-shadow: 0 20px 60px -20px rgba(0, 0, 0, 0.45);
++	overflow: hidden;
++}
++
++.krt-search-input-row {
++	display: flex;
++	align-items: center;
++	gap: 10px;
++	padding: 14px 18px;
++	border-bottom: 1px solid var(--vscode-widget-border, rgba(127, 127, 127, 0.18));
++}
++
++.krt-search-input-row .krt-search-icon {
++	flex: 0 0 auto;
++	width: 16px;
++	height: 16px;
++	opacity: 0.55;
++}
++
++.krt-search-input {
++	flex: 1;
++	border: none;
++	outline: none;
++	background: transparent;
++	font: inherit;
++	font-size: 15px;
++	color: inherit;
++}
++
++.krt-search-input::placeholder {
++	opacity: 0.55;
++}
++
++.krt-search-shortcut {
++	font-size: 11px;
++	letter-spacing: 0.04em;
++	padding: 2px 6px;
++	border-radius: 4px;
++	border: 1px solid var(--vscode-widget-border, rgba(127, 127, 127, 0.3));
++	opacity: 0.7;
++	font-family: 'JetBrains Mono', monospace;
++}
++
++.krt-search-tabs {
++	display: flex;
++	gap: 2px;
++	padding: 6px 12px;
++	border-bottom: 1px solid var(--vscode-widget-border, rgba(127, 127, 127, 0.12));
++}
++
++.krt-search-tab {
++	border: none;
++	background: transparent;
++	color: inherit;
++	font: inherit;
++	font-size: 12px;
++	padding: 6px 10px;
++	border-radius: 6px;
++	cursor: pointer;
++	opacity: 0.7;
++}
++
++.krt-search-tab:hover {
++	background: var(--vscode-list-hoverBackground, rgba(127, 127, 127, 0.08));
++	opacity: 0.9;
++}
++
++.krt-search-tab.active {
++	opacity: 1;
++	background: var(--vscode-list-activeSelectionBackground, rgba(120, 120, 240, 0.15));
++	color: var(--vscode-list-activeSelectionForeground, inherit);
++}
++
++.krt-search-results {
++	overflow-y: auto;
++	max-height: 480px;
++	padding: 4px 0;
++}
++
++.krt-search-row {
++	display: grid;
++	grid-template-columns: 1fr auto;
++	gap: 14px;
++	padding: 10px 18px;
++	cursor: pointer;
++	border-left: 2px solid transparent;
++}
++
++.krt-search-row:hover,
++.krt-search-row.selected {
++	background: var(--vscode-list-hoverBackground, rgba(127, 127, 127, 0.08));
++}
++
++.krt-search-row.selected {
++	border-left-color: var(--krt-accent, var(--vscode-focusBorder));
++	background: var(--vscode-list-activeSelectionBackground, rgba(120, 120, 240, 0.15));
++}
++
++.krt-search-row-main {
++	display: flex;
++	flex-direction: column;
++	gap: 4px;
++	min-width: 0;
++}
++
++.krt-search-row-title-line {
++	display: flex;
++	align-items: center;
++	gap: 8px;
++	min-width: 0;
++}
++
++.krt-search-row-number {
++	font-family: 'JetBrains Mono', monospace;
++	font-size: 12px;
++	opacity: 0.6;
++	flex: 0 0 auto;
++}
++
++.krt-search-row-title {
++	font-size: 13px;
++	font-weight: 500;
++	white-space: nowrap;
++	overflow: hidden;
++	text-overflow: ellipsis;
++	min-width: 0;
++}
++
++.krt-search-row-meta {
++	display: flex;
++	gap: 8px;
++	font-size: 11px;
++	opacity: 0.65;
++}
++
++.krt-search-row-meta .sep {
++	opacity: 0.5;
++}
++
++.krt-search-state {
++	font-size: 10px;
++	font-weight: 600;
++	letter-spacing: 0.04em;
++	text-transform: uppercase;
++	padding: 3px 8px;
++	border-radius: 999px;
++	border: 1px solid transparent;
++	flex: 0 0 auto;
++	align-self: center;
++}
++
++.krt-search-state.open { background: rgba(46, 160, 67, 0.15); border-color: rgba(46, 160, 67, 0.5); }
++.krt-search-state.closed { background: rgba(207, 34, 46, 0.15); border-color: rgba(207, 34, 46, 0.5); }
++.krt-search-state.merged { background: rgba(130, 80, 223, 0.15); border-color: rgba(130, 80, 223, 0.5); }
++.krt-search-state.draft { background: rgba(110, 118, 129, 0.15); border-color: rgba(110, 118, 129, 0.5); }
++
++.krt-search-empty,
++.krt-search-onboarding,
++.krt-search-loading,
++.krt-search-error {
++	padding: 36px 20px;
++	text-align: center;
++	font-size: 13px;
++	opacity: 0.75;
++}
++
++.krt-search-loading {
++	font-style: italic;
++}
++
++.krt-search-onboarding {
++	text-align: left;
++	padding: 24px 24px 16px;
++}
++
++.krt-search-onboarding h2 {
++	margin: 0 0 8px 0;
++	font-size: 16px;
++	font-weight: 600;
++}
++
++.krt-search-onboarding p {
++	margin: 6px 0;
++	font-size: 13px;
++	line-height: 1.5;
++	opacity: 0.85;
++}
++
++.krt-search-onboarding code,
++.krt-search-onboarding .cmd {
++	display: block;
++	margin: 8px 0;
++	padding: 8px 10px;
++	font-family: 'JetBrains Mono', monospace;
++	font-size: 12px;
++	background: var(--vscode-textCodeBlock-background, rgba(127, 127, 127, 0.12));
++	border-radius: 6px;
++}
++
++.krt-search-onboarding-actions {
++	display: flex;
++	gap: 8px;
++	margin-top: 14px;
++}
++
++.krt-search-onboarding-actions button {
++	font: inherit;
++	padding: 6px 14px;
++	border-radius: 6px;
++	border: 1px solid var(--vscode-button-border, transparent);
++	background: var(--vscode-button-background, var(--krt-accent, #5b5bff));
++	color: var(--vscode-button-foreground, #fff);
++	cursor: pointer;
++}
++
++.krt-search-recents {
++	border-top: 1px solid var(--vscode-widget-border, rgba(127, 127, 127, 0.12));
++	padding: 14px 18px 18px;
++}
++
++.krt-search-recents-header {
++	font-size: 10px;
++	font-weight: 600;
++	letter-spacing: 0.06em;
++	text-transform: uppercase;
++	opacity: 0.55;
++	margin-bottom: 10px;
++}
++
++.krt-search-recents-grid {
++	display: grid;
++	grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
++	gap: 8px;
++}
++
++.krt-search-recent-card {
++	padding: 10px 12px;
++	border: 1px solid var(--vscode-widget-border, rgba(127, 127, 127, 0.18));
++	border-radius: 8px;
++	cursor: pointer;
++	display: flex;
++	flex-direction: column;
++	gap: 4px;
++}
++
++.krt-search-recent-card:hover {
++	background: var(--vscode-list-hoverBackground, rgba(127, 127, 127, 0.08));
++}
++
++.krt-search-recent-card-name {
++	font-family: 'JetBrains Mono', monospace;
++	font-size: 12px;
++	font-weight: 600;
++}
++
++.krt-search-recent-card-title {
++	font-size: 12px;
++	opacity: 0.75;
++	white-space: nowrap;
++	overflow: hidden;
++	text-overflow: ellipsis;
++}
+diff --git a/src/vs/workbench/contrib/krt/browser/search/krtSearchOverlay.ts b/src/vs/workbench/contrib/krt/browser/search/krtSearchOverlay.ts
+new file mode 100644
+index 00000000000..0bcec2a661f
+--- /dev/null
++++ b/src/vs/workbench/contrib/krt/browser/search/krtSearchOverlay.ts
+@@ -0,0 +1,472 @@
++/*---------------------------------------------------------------------------------------------
++ *  Copyright (c) Microsoft Corporation. All rights reserved.
++ *  Licensed under the MIT License. See License.txt in the project root for license information.
++ *--------------------------------------------------------------------------------------------*/
++
++import './krtSearchOverlay.css';
++import * as DOM from '../../../../../base/browser/dom.js';
++import { StandardKeyboardEvent } from '../../../../../base/browser/keyboardEvent.js';
++import { CancellationTokenSource } from '../../../../../base/common/cancellation.js';
++import { Disposable, DisposableStore } from '../../../../../base/common/lifecycle.js';
++import { KeyCode } from '../../../../../base/common/keyCodes.js';
++import { localize } from '../../../../../nls.js';
++import { isKrtError } from '../../../../../platform/krt/common/errors.js';
++import { IGhClient, IPullRequestProvider, parsePullRequestUrl, PullRequestSummary, RecentPullRequest, SearchScope } from '../../../../../platform/krt/common/krt.js';
++import { ILayoutService } from '../../../../../platform/layout/browser/layoutService.js';
++import { ILogService } from '../../../../../platform/log/common/log.js';
++import { IStorageService } from '../../../../../platform/storage/common/storage.js';
++import { IEditorService } from '../../../../services/editor/common/editorService.js';
++import { readRecentPullRequests } from '../krtRecentPullRequests.js';
++import { KrtPullRequestEditorInput } from '../pr/krtPullRequestEditorInput.js';
++import { IKrtSearchService } from './krtSearchService.js';
++
++const SEARCH_DEBOUNCE_MS = 250;
++const RECENTS_GRID_LIMIT = 6;
++
++interface ScopeTab {
++	readonly scope: SearchScope;
++	readonly label: string;
++}
++
++const SCOPE_TABS: readonly ScopeTab[] = [
++	{ scope: 'all-open', label: localize('krt.search.scope.allOpen', "All open") },
++	{ scope: 'reviewed', label: localize('krt.search.scope.reviewed', "You've reviewed") },
++	{ scope: 'awaiting-review', label: localize('krt.search.scope.awaiting', "Awaiting your review") },
++];
++
++export class KrtSearchService extends Disposable implements IKrtSearchService {
++
++	declare readonly _serviceBrand: undefined;
++
++	private overlay: KrtSearchOverlay | undefined;
++
++	constructor(
++		@ILayoutService private readonly layoutService: ILayoutService,
++		@IPullRequestProvider private readonly pullRequestProvider: IPullRequestProvider,
++		@IGhClient private readonly ghClient: IGhClient,
++		@IEditorService private readonly editorService: IEditorService,
++		@IStorageService private readonly storageService: IStorageService,
++		@ILogService private readonly logService: ILogService,
++	) {
++		super();
++	}
++
++	open(): void {
++		this.ensureOverlay().open();
++	}
++
++	close(): void {
++		this.overlay?.close();
++	}
++
++	toggle(): void {
++		this.ensureOverlay().toggle();
++	}
++
++	private ensureOverlay(): KrtSearchOverlay {
++		if (!this.overlay) {
++			this.overlay = this._register(new KrtSearchOverlay(
++				this.layoutService.mainContainer,
++				this.pullRequestProvider,
++				this.ghClient,
++				this.editorService,
++				this.storageService,
++				this.logService,
++			));
++		}
++		return this.overlay;
++	}
++}
++
++class KrtSearchOverlay extends Disposable {
++
++	private readonly root: HTMLElement;
++	private readonly inputElement: HTMLInputElement;
++	private readonly tabsElement: HTMLElement;
++	private readonly resultsElement: HTMLElement;
++	private readonly recentsContainer: HTMLElement;
++	private readonly recentsGrid: HTMLElement;
++
++	private isOpen = false;
++	private scope: SearchScope = 'all-open';
++	private query = '';
++	private debounceHandle: ReturnType<typeof setTimeout> | undefined;
++	private inflight: CancellationTokenSource | undefined;
++	private results: readonly PullRequestSummary[] = [];
++	private resultRowElements: HTMLElement[] = [];
++	private selectedIndex = 0;
++	private gh: { ok: true } | { ok: false; kind: string; message: string; hint: string } | undefined;
++
++	private readonly listeners = this._register(new DisposableStore());
++
++	constructor(
++		host: HTMLElement,
++		private readonly pullRequestProvider: IPullRequestProvider,
++		private readonly ghClient: IGhClient,
++		private readonly editorService: IEditorService,
++		private readonly storageService: IStorageService,
++		private readonly logService: ILogService,
++	) {
++		super();
++		this.root = DOM.append(host, DOM.$('.krt-search-overlay'));
++		this.root.hidden = true;
++		this.root.setAttribute('role', 'dialog');
++		this.root.setAttribute('aria-label', localize('krt.search.dialogLabel', "KRT Search"));
++
++		const card = DOM.append(this.root, DOM.$('.krt-search-card'));
++		const inputRow = DOM.append(card, DOM.$('.krt-search-input-row'));
++		const icon = DOM.append(inputRow, DOM.$('span.krt-search-icon')) as HTMLSpanElement;
++		// allow-any-unicode-next-line
++		icon.textContent = '⌕';
++		this.inputElement = DOM.append(inputRow, DOM.$('input.krt-search-input')) as HTMLInputElement;
++		this.inputElement.type = 'text';
++		this.inputElement.placeholder = localize('krt.search.placeholder', "Search PRs by #number, repo, author, or title…");
++		this.inputElement.spellcheck = false;
++		const shortcut = DOM.append(inputRow, DOM.$('span.krt-search-shortcut'));
++		shortcut.textContent = 'Esc';
++
++		this.tabsElement = DOM.append(card, DOM.$('.krt-search-tabs'));
++		this.renderTabs();
++
++		this.resultsElement = DOM.append(card, DOM.$('.krt-search-results'));
++		this.recentsContainer = DOM.append(card, DOM.$('.krt-search-recents'));
++		const recentsHeader = DOM.append(this.recentsContainer, DOM.$('.krt-search-recents-header'));
++		recentsHeader.textContent = localize('krt.search.recents', "Recent PRs");
++		this.recentsGrid = DOM.append(this.recentsContainer, DOM.$('.krt-search-recents-grid'));
++
++		this.attachEventListeners();
++		this.renderResults();
++	}
++
++	open(): void {
++		if (this.isOpen) {
++			this.inputElement.focus();
++			this.inputElement.select();
++			return;
++		}
++		this.isOpen = true;
++		this.root.hidden = false;
++		this.refreshGh();
++		this.refreshRecents();
++		this.renderResults();
++		this.inputElement.focus();
++		this.inputElement.select();
++	}
++
++	close(): void {
++		if (!this.isOpen) {
++			return;
++		}
++		this.isOpen = false;
++		this.root.hidden = true;
++		this.cancelInflight();
++	}
++
++	toggle(): void {
++		if (this.isOpen) {
++			this.close();
++		} else {
++			this.open();
++		}
++	}
++
++	private attachEventListeners(): void {
++		this.listeners.add(DOM.addDisposableListener(this.inputElement, 'input', () => {
++			this.query = this.inputElement.value;
++			this.scheduleSearch();
++		}));
++		this.listeners.add(DOM.addDisposableListener(this.inputElement, 'keydown', (raw) => {
++			const e = new StandardKeyboardEvent(raw);
++			if (e.keyCode === KeyCode.Escape) {
++				e.preventDefault();
++				this.close();
++				return;
++			}
++			if (e.keyCode === KeyCode.Enter) {
++				e.preventDefault();
++				this.openSelected();
++				return;
++			}
++			if (e.keyCode === KeyCode.UpArrow) {
++				e.preventDefault();
++				this.moveSelection(-1);
++				return;
++			}
++			if (e.keyCode === KeyCode.DownArrow) {
++				e.preventDefault();
++				this.moveSelection(1);
++				return;
++			}
++		}));
++		this.listeners.add(DOM.addDisposableListener(this.root, 'click', e => {
++			if (e.target === this.root) {
++				this.close();
++			}
++		}));
++	}
++
++	private renderTabs(): void {
++		DOM.clearNode(this.tabsElement);
++		for (const tab of SCOPE_TABS) {
++			const btn = DOM.append(this.tabsElement, DOM.$('button.krt-search-tab')) as HTMLButtonElement;
++			btn.textContent = tab.label;
++			if (this.scope === tab.scope) {
++				btn.classList.add('active');
++			}
++			this.listeners.add(DOM.addDisposableListener(btn, 'click', () => {
++				if (this.scope === tab.scope) {
++					return;
++				}
++				this.scope = tab.scope;
++				this.renderTabs();
++				this.scheduleSearch(0);
++				this.inputElement.focus();
++			}));
++		}
++	}
++
++	private scheduleSearch(delay = SEARCH_DEBOUNCE_MS): void {
++		if (this.debounceHandle !== undefined) {
++			clearTimeout(this.debounceHandle);
++		}
++		this.debounceHandle = setTimeout(() => {
++			this.debounceHandle = undefined;
++			void this.runSearch();
++		}, delay);
++	}
++
++	private async runSearch(): Promise<void> {
++		if (this.gh && !this.gh.ok) {
++			this.renderResults();
++			return;
++		}
++		this.cancelInflight();
++		const cts = new CancellationTokenSource();
++		this.inflight = cts;
++		this.renderResults({ loading: true });
++		try {
++			const items = await this.pullRequestProvider.search(this.query, this.scope);
++			if (cts.token.isCancellationRequested) {
++				return;
++			}
++			this.results = items;
++			this.selectedIndex = items.length > 0 ? 0 : -1;
++			this.renderResults();
++		} catch (err) {
++			if (cts.token.isCancellationRequested) {
++				return;
++			}
++			if (isKrtError(err)) {
++				this.logService.warn(`[krt] search failed (${err.kind}): ${err.message}`);
++				this.gh = { ok: false, kind: err.kind, message: err.message, hint: err.hint };
++				this.renderResults();
++				return;
++			}
++			this.logService.error('[krt] search failed', err);
++			this.results = [];
++			this.renderResults({ error: String(err) });
++		} finally {
++			if (this.inflight === cts) {
++				this.inflight = undefined;
++			}
++		}
++	}
++
++	private cancelInflight(): void {
++		this.inflight?.cancel();
++		this.inflight?.dispose();
++		this.inflight = undefined;
++	}
++
++	private renderResults(opts: { loading?: boolean; error?: string } = {}): void {
++		DOM.clearNode(this.resultsElement);
++		if (this.gh && !this.gh.ok) {
++			this.renderOnboarding(this.gh.kind, this.gh.message, this.gh.hint);
++			return;
++		}
++		if (opts.loading) {
++			const el = DOM.append(this.resultsElement, DOM.$('.krt-search-loading'));
++			el.textContent = localize('krt.search.loading', "Searching GitHub via gh CLI…");
++			return;
++		}
++		if (opts.error) {
++			const el = DOM.append(this.resultsElement, DOM.$('.krt-search-error'));
++			el.textContent = opts.error;
++			return;
++		}
++		if (this.results.length === 0) {
++			const el = DOM.append(this.resultsElement, DOM.$('.krt-search-empty'));
++			el.textContent = this.query
++				? localize('krt.search.noMatches', "No PRs match.")
++				: localize('krt.search.startTyping', "Type to search PRs across GitHub.");
++			return;
++		}
++		this.resultRowElements = [];
++		this.results.forEach((pr, index) => {
++			const row = DOM.append(this.resultsElement, DOM.$('.krt-search-row')) as HTMLElement;
++			row.setAttribute('role', 'option');
++			row.dataset.index = String(index);
++			this.resultRowElements.push(row);
++			if (index === this.selectedIndex) {
++				row.classList.add('selected');
++			}
++			const main = DOM.append(row, DOM.$('.krt-search-row-main'));
++			const titleLine = DOM.append(main, DOM.$('.krt-search-row-title-line'));
++			const num = DOM.append(titleLine, DOM.$('span.krt-search-row-number'));
++			num.textContent = `${pr.owner}/${pr.repo}#${pr.number}`;
++			const title = DOM.append(titleLine, DOM.$('span.krt-search-row-title'));
++			title.textContent = pr.title;
++			const meta = DOM.append(main, DOM.$('.krt-search-row-meta'));
++			const by = DOM.append(meta, DOM.$('span'));
++			by.textContent = localize('krt.search.byAuthor', "by {0}", pr.author.login);
++			const sep = DOM.append(meta, DOM.$('span.sep'));
++			sep.textContent = '·';
++			const updated = DOM.append(meta, DOM.$('span'));
++			updated.textContent = relativeTime(pr.updatedAt);
++			const state = DOM.append(row, DOM.$('span.krt-search-state'));
++			state.classList.add(pr.state);
++			state.textContent = pr.state;
++			this.listeners.add(DOM.addDisposableListener(row, 'click', () => {
++				this.selectedIndex = index;
++				this.openSelected();
++			}));
++		});
++	}
++
++	private renderOnboarding(kind: string, message: string, hint: string): void {
++		const el = DOM.append(this.resultsElement, DOM.$('.krt-search-onboarding')) as HTMLElement;
++		const heading = DOM.append(el, DOM.$('h2'));
++		heading.textContent = kind === 'gh-missing'
++			? localize('krt.search.onboarding.missingHeading', "Install the GitHub CLI")
++			: localize('krt.search.onboarding.authHeading', "Sign in with the GitHub CLI");
++		const explain = DOM.append(el, DOM.$('p'));
++		explain.textContent = message;
++		const hintP = DOM.append(el, DOM.$('p'));
++		hintP.textContent = hint;
++		if (kind === 'gh-missing') {
++			const installCmd = DOM.append(el, DOM.$('code'));
++			installCmd.textContent = 'brew install gh';
++			const loginCmd = DOM.append(el, DOM.$('code'));
++			loginCmd.textContent = 'gh auth login';
++		} else {
++			const loginCmd = DOM.append(el, DOM.$('code'));
++			loginCmd.textContent = 'gh auth login';
++		}
++		const actions = DOM.append(el, DOM.$('.krt-search-onboarding-actions'));
++		const retry = DOM.append(actions, DOM.$('button')) as HTMLButtonElement;
++		retry.textContent = localize('krt.search.retryGh', "Retry");
++		this.listeners.add(DOM.addDisposableListener(retry, 'click', () => {
++			this.gh = undefined;
++			this.refreshGh();
++		}));
++	}
++
++	private refreshRecents(): void {
++		DOM.clearNode(this.recentsGrid);
++		const recents = readRecentPullRequests(this.storageService).slice(0, RECENTS_GRID_LIMIT);
++		if (recents.length === 0) {
++			this.recentsContainer.hidden = true;
++			return;
++		}
++		this.recentsContainer.hidden = false;
++		for (const r of recents) {
++			const card = DOM.append(this.recentsGrid, DOM.$('.krt-search-recent-card')) as HTMLElement;
++			const name = DOM.append(card, DOM.$('.krt-search-recent-card-name'));
++			name.textContent = `${r.owner}/${r.repo}#${r.number}`;
++			const title = DOM.append(card, DOM.$('.krt-search-recent-card-title'));
++			title.textContent = r.title;
++			this.listeners.add(DOM.addDisposableListener(card, 'click', () => {
++				this.openRecent(r);
++			}));
++		}
++	}
++
++	private moveSelection(delta: number): void {
++		if (this.results.length === 0) {
++			return;
++		}
++		const next = Math.max(0, Math.min(this.results.length - 1, this.selectedIndex + delta));
++		if (next === this.selectedIndex) {
++			return;
++		}
++		this.selectedIndex = next;
++		this.renderResults();
++		this.resultRowElements[next]?.scrollIntoView({ block: 'nearest' });
++	}
++
++	private openSelected(): void {
++		const pr = this.results[this.selectedIndex];
++		if (!pr) {
++			return;
++		}
++		const input = new KrtPullRequestEditorInput(pr.url, pr.owner, pr.repo, pr.number, pr.title);
++		this.close();
++		void this.editorService.openEditor(input, { pinned: true });
++	}
++
++	private openRecent(r: RecentPullRequest): void {
++		const parsed = parsePullRequestUrl(r.url);
++		if (!parsed) {
++			return;
++		}
++		const input = new KrtPullRequestEditorInput(r.url, r.owner, r.repo, r.number, r.title);
++		this.close();
++		void this.editorService.openEditor(input, { pinned: true });
++	}
++
++	private async refreshGh(): Promise<void> {
++		try {
++			const info = await this.ghClient.detect();
++			this.logService.info(`[krt] gh detected: ${info.version}`);
++			this.gh = { ok: true };
++			this.scheduleSearch(0);
++		} catch (err) {
++			if (isKrtError(err)) {
++				this.gh = { ok: false, kind: err.kind, message: err.message, hint: err.hint };
++				this.renderResults();
++				return;
++			}
++			this.logService.error('[krt] gh detect failed', err);
++			this.gh = { ok: false, kind: 'unknown', message: String(err), hint: localize('krt.search.unknownErrorHint', "Open the developer tools console for details.") };
++			this.renderResults();
++		}
++	}
++
++	override dispose(): void {
++		this.cancelInflight();
++		if (this.debounceHandle !== undefined) {
++			clearTimeout(this.debounceHandle);
++		}
++		this.root.remove();
++		super.dispose();
++	}
++}
++
++function relativeTime(iso: string): string {
++	const then = Date.parse(iso);
++	if (Number.isNaN(then)) {
++		return iso;
++	}
++	const seconds = Math.max(1, Math.floor((Date.now() - then) / 1000));
++	if (seconds < 60) {
++		return localize('krt.search.timeSeconds', "{0}s ago", seconds);
++	}
++	const minutes = Math.floor(seconds / 60);
++	if (minutes < 60) {
++		return localize('krt.search.timeMinutes', "{0}m ago", minutes);
++	}
++	const hours = Math.floor(minutes / 60);
++	if (hours < 24) {
++		return localize('krt.search.timeHours', "{0}h ago", hours);
++	}
++	const days = Math.floor(hours / 24);
++	if (days < 30) {
++		return localize('krt.search.timeDays', "{0}d ago", days);
++	}
++	const months = Math.floor(days / 30);
++	if (months < 12) {
++		return localize('krt.search.timeMonths', "{0}mo ago", months);
++	}
++	const years = Math.floor(days / 365);
++	return localize('krt.search.timeYears', "{0}y ago", years);
++}
+diff --git a/src/vs/workbench/contrib/krt/browser/search/krtSearchService.ts b/src/vs/workbench/contrib/krt/browser/search/krtSearchService.ts
+new file mode 100644
+index 00000000000..e6f88f63d37
+--- /dev/null
++++ b/src/vs/workbench/contrib/krt/browser/search/krtSearchService.ts
+@@ -0,0 +1,21 @@
++/*---------------------------------------------------------------------------------------------
++ *  Copyright (c) Microsoft Corporation. All rights reserved.
++ *  Licensed under the MIT License. See License.txt in the project root for license information.
++ *--------------------------------------------------------------------------------------------*/
++
++import { createDecorator } from '../../../../../platform/instantiation/common/instantiation.js';
++
++export const IKrtSearchService = createDecorator<IKrtSearchService>('krtSearchService');
++
++/**
++ * Workbench-level service that owns the Search overlay. The overlay
++ * is a singleton fixed-position modal lazily mounted into the
++ * workbench root the first time `open()` is called. `close()` is a
++ * no-op when the overlay is not shown.
++ */
++export interface IKrtSearchService {
++	readonly _serviceBrand: undefined;
++	open(): void;
++	close(): void;
++	toggle(): void;
++}
+diff --git a/src/vs/workbench/contrib/krt/electron-browser/krtOpenPullRequest.contribution.ts b/src/vs/workbench/contrib/krt/electron-browser/krtOpenPullRequest.contribution.ts
+index efecfed3371..188d9d20355 100644
+--- a/src/vs/workbench/contrib/krt/electron-browser/krtOpenPullRequest.contribution.ts
++++ b/src/vs/workbench/contrib/krt/electron-browser/krtOpenPullRequest.contribution.ts
+@@ -7,13 +7,13 @@ import { localize, localize2 } from '../../../../nls.js';
+ import { Action2, registerAction2 } from '../../../../platform/actions/common/actions.js';
+ import { ServicesAccessor } from '../../../../platform/instantiation/common/instantiation.js';
+ import { ILogService } from '../../../../platform/log/common/log.js';
+-import { IPullRequestProvider, PullRequest, RecentPullRequest } from '../../../../platform/krt/common/krt.js';
+-import { isKrtError } from '../../../../platform/krt/common/errors.js';
++import { parsePullRequestUrl, RecentPullRequest } from '../../../../platform/krt/common/krt.js';
+ import { IQuickInputService, IQuickPickItem } from '../../../../platform/quickinput/common/quickInput.js';
+-import { IStorageService, StorageScope, StorageTarget } from '../../../../platform/storage/common/storage.js';
++import { IStorageService } from '../../../../platform/storage/common/storage.js';
++import { IEditorService } from '../../../services/editor/common/editorService.js';
++import { KrtPullRequestEditorInput } from '../browser/pr/krtPullRequestEditorInput.js';
++import { readRecentPullRequests } from '../browser/krtRecentPullRequests.js';
+ 
+-const KRT_RECENT_PRS_KEY = 'krt.recentPRs';
+-const KRT_RECENT_PRS_CAP = 20;
+ const KRT_CATEGORY = localize2('krt.category', "KRT");
+ 
+ interface RecentPickItem extends IQuickPickItem {
+@@ -36,28 +36,28 @@ class KrtOpenPullRequestAction extends Action2 {
+ 	override async run(accessor: ServicesAccessor): Promise<void> {
+ 		const quickInputService = accessor.get(IQuickInputService);
+ 		const storageService = accessor.get(IStorageService);
+-		const provider = accessor.get(IPullRequestProvider);
++		const editorService = accessor.get(IEditorService);
+ 		const logService = accessor.get(ILogService);
+ 
+-		const url = await pickUrl(quickInputService, readRecent(storageService));
++		const url = await pickUrl(quickInputService, readRecentPullRequests(storageService));
+ 		if (!url) {
+ 			return;
+ 		}
+ 
+-		try {
+-			const pr = await provider.getPullRequest(url);
+-			console.log('[KRT] Open PR →', pr);
+-			logService.info(`[krt] opened PR ${pr.owner}/${pr.repo}#${pr.number}: ${pr.title}`);
+-			persistRecent(storageService, pr);
+-		} catch (err) {
+-			if (isKrtError(err)) {
+-				console.warn(`[KRT] ${err.kind}: ${err.message}\n  hint: ${err.hint}`);
+-				logService.warn(`[krt] open-pr failed (${err.kind}): ${err.message}`);
+-				return;
+-			}
+-			console.error('[KRT] open-pr failed', err);
+-			logService.error('[krt] open-pr failed', err);
++		const parsed = parsePullRequestUrl(url);
++		if (!parsed) {
++			logService.warn(`[krt] open-pr: not a recognised GitHub PR URL: ${url}`);
++			await quickInputService.input({
++				prompt: localize('krt.openPullRequest.badUrl', "Not a recognised GitHub PR URL. Expected https://github.com/owner/repo/pull/123"),
++				value: url,
++				ignoreFocusLost: true,
++			});
++			return;
+ 		}
++
++		const existingTitle = readRecentPullRequests(storageService).find(r => r.url === url)?.title;
++		const input = new KrtPullRequestEditorInput(url, parsed.owner, parsed.repo, parsed.number, existingTitle);
++		await editorService.openEditor(input, { pinned: true });
+ 	}
+ }
+ 
+@@ -98,31 +98,4 @@ function isRecentPick(item: IQuickPickItem): item is RecentPickItem {
+ 	return (item as RecentPickItem).recent !== undefined;
+ }
+ 
+-function readRecent(storageService: IStorageService): readonly RecentPullRequest[] {
+-	const raw = storageService.get(KRT_RECENT_PRS_KEY, StorageScope.APPLICATION);
+-	if (!raw) {
+-		return [];
+-	}
+-	try {
+-		const parsed = JSON.parse(raw);
+-		return Array.isArray(parsed) ? parsed : [];
+-	} catch {
+-		return [];
+-	}
+-}
+-
+-function persistRecent(storageService: IStorageService, pr: PullRequest): void {
+-	const entry: RecentPullRequest = {
+-		url: pr.url,
+-		owner: pr.owner,
+-		repo: pr.repo,
+-		number: pr.number,
+-		title: pr.title,
+-		openedAt: new Date().toISOString(),
+-	};
+-	const existing = readRecent(storageService).filter(r => r.url !== entry.url);
+-	const next = [entry, ...existing].slice(0, KRT_RECENT_PRS_CAP);
+-	storageService.store(KRT_RECENT_PRS_KEY, JSON.stringify(next), StorageScope.APPLICATION, StorageTarget.MACHINE);
+-}
+-
+ registerAction2(KrtOpenPullRequestAction);
+-- 
+2.52.0
+
