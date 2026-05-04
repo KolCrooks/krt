@@ -134,15 +134,26 @@ changes:
 
 ### Walkthrough / Get Started / Live Share
 
-- [ ] Find the registration sites (likely
-      `workbench.common.main.ts` side-effect imports +
-      `src/vs/workbench/contrib/welcomeGettingStarted/`,
-      `src/vs/workbench/contrib/welcomeOnboarding/`).
-- [ ] Patch the import out (preferred over disabling at runtime — leaves
-      a smaller binary and can't be re-enabled by config).
+- [x] Welcome page on startup neutered via config defaults (patch
+      `0005-Skip-welcome-page-and-copilot-hygiene.patch`):
+      - `workbench.startupEditor` default: `'welcomePage'` → `'none'`
+      - `workbench.welcomePage.experimentalOnboarding` default:
+        `true` → `false`
+      Strategy chosen over removing the side-effect import in
+      `workbench.common.main.ts` because `IWalkthroughsService` is a
+      heavy consumer in `vs/workbench/contrib/remote/browser/remote.ts`
+      (constructor injection + HelpModel). Stripping the contribution
+      breaks remote/. Phase 11 polish can revisit a deeper strip when
+      the workbench shell is ours (Phase 2+).
+- [x] Same patch fixes a hygiene check (`checkCopilotEnginesVersion`)
+      that read `extensions/copilot/package.json` and was crashing
+      hygiene after batch 2's extension removal.
+- [ ] **Deferred**: `welcomeWalkthrough` (Editor Playground) and
+      `welcomeAgentSessions` contributions stay registered. The
+      walkthrough framework is reachable only via Help menu and isn't
+      auto-shown; AgentSessions is chat-related (Phase 5 strip).
 - [ ] Live Share isn't bundled in 1.118.1 OSS build (no `liveshare`
-      extension in `extensions/`). Nothing to do here unless upstream
-      adds it back.
+      extension in `extensions/`). Nothing to do here.
 
 ### Icons
 
