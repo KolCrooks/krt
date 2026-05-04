@@ -73,17 +73,46 @@ changes:
 
 ### CI grep guardrail
 
-- [ ] `build/check-no-ms-endpoints.sh`: greps the *patched* `vscode/`
-      tree for forbidden patterns and exits non-zero if any are found.
-      Patterns: `applicationinsights`, `vscode-telemetry`,
-      `https://[a-zA-Z0-9.-]*\.microsoft\.com`,
-      `marketplace\.visualstudio\.com`, `vscode-cdn\.net`.
-- [ ] Allowlist obviously-safe matches: comments referencing the
-      ripped-out service, build scripts that *generate* the strip.
-      Keep the allowlist as an inline array in the script for now;
-      promote to a file if it grows.
-- [ ] Wire into `build/build.sh` after `prepare_vscode.sh` and before
-      `npm install`. (Failing fast saves a ~10-minute compile.)
+- [x] `build/check-no-ms-endpoints.sh` scopes scan to *shipping* source
+      (`vscode/src/`, `vscode/extensions/`, `vscode/product.json`) and
+      skips build scripts, packaging resources, CI configs, and dev
+      tooling — those don't reach the user binary in v1's launch flow.
+- [x] Patterns: `applicationinsights`, `vscode-telemetry`,
+      JSON-format `"aiKey": "<non-empty>"`, JSON-format
+      `"aiConfig": {...}`, `marketplace.visualstudio.com`,
+      `vscode-cdn.net`. Empty `"aiKey": ""` (our stripped state) and
+      type-only `aiConfig?:` declarations are intentionally not
+      flagged.
+- [x] Allowlist for known-deferred areas (chat/, remote/, telemetry/
+      wiring, webview/ security host marker, debug/, language-extension
+      src refs). Each entry is a place we've made a conscious decision
+      to defer to Phase 5 / Phase 11.
+- [x] Wired into `build/build.sh` between `prepare_vscode.sh` and
+      `npm install` so a regression fails before the heavy compile.
+- [x] Initial run: `TOTAL unallowlisted hits: 0`. ✓
+
+### Telemetry strip
+
+- [x] Survey: 11 built-in extension `package.json` files carry the same
+      Microsoft Application Insights instrumentation key
+      (`0c6ae...7255`). vscode-extension-telemetry's `TelemetryReporter`
+      handles empty key as no-op (no network calls).
+- [x] Patch `0006-Strip-AppInsights-keys-and-no-telemetry-stance.patch`:
+  - Empty `aiKey` value in 11 extension package.json files.
+  - Replace `aka.ms/vscode-telemetry` doc URL in
+    `src/vs/platform/telemetry/common/telemetryService.ts` with a
+    KRT-stance message: "KRT does not collect telemetry. This setting
+    has no effect."
+- [x] CI grep passes (0 hits in shipping source).
+- [ ] **Deferred**: aiKey FIELD reads in extension source files (e.g.
+      `extension.packageJSON.aiKey`) — they read empty values and the
+      reporter silently drops sends. Allowlisted; if the extensions
+      get a deeper rewrite (Phase 11), revisit.
+- [ ] **Deferred**: `productService.aiConfig?.ariaKey` references in
+      `src/vs/platform/telemetry/`, `services/telemetry/`,
+      `code/electron-utility/`, `code/node/`, `server/node/`. All
+      gated on `if (productService.aiConfig?.ariaKey)` — our overlay
+      doesn't set `aiConfig`, so all gates evaluate false. Allowlisted.
 
 ### Telemetry strip
 

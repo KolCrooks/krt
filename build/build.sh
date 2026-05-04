@@ -13,6 +13,10 @@ VSCODE_DIR="$REPO_ROOT/vscode"
 
 bash "$REPO_ROOT/build/prepare_vscode.sh"
 
+# Fail fast on Microsoft endpoints in shipping source — runs before the
+# 5-minute compile so we don't waste a build on a stripped-feature regression.
+bash "$REPO_ROOT/build/check-no-ms-endpoints.sh"
+
 cd "$VSCODE_DIR"
 
 echo "[build] npm install"
