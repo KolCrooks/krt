@@ -65,4 +65,15 @@ else
 fi
 
 cd "$REPO_ROOT"
+
+# Overlay our product.json overrides (KRT branding, open-vsx gallery, MS strips)
+# onto upstream's product.json. Done after `git am` so patches apply against
+# pristine upstream. Result lands as a working-tree modification, not a commit —
+# clean.sh / a fresh reset wipes it cleanly.
+echo "[prepare_vscode] overlaying $BUILD_DIR/product.json onto vscode/product.json"
+node "$BUILD_DIR/merge-product.mjs" \
+  "$VSCODE_DIR/product.json" \
+  "$BUILD_DIR/product.json" \
+  "$VSCODE_DIR/product.json"
+
 echo "[prepare_vscode] done"
