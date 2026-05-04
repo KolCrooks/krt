@@ -67,10 +67,21 @@ is the working checklist.
 
 #### Demo gate
 
-- [ ] Launch the build (`./vscode/scripts/code.sh` or equivalent on macOS)
-- [ ] Confirm: a stock-looking VSCode window opens, status bar shows "KRT"
-- [ ] Screenshot or short clip captured for the working log
-- [ ] Tag the commit `phase-00-complete`
+- [x] Launch the build (`./vscode/scripts/code.sh`)
+- [x] Confirm: a stock-looking VSCode window opens, status bar shows "KRT"
+      (verified visually 2026-05-04 — see "Demo gate gotcha" below)
+- [ ] Screenshot or short clip captured for the working log (skipped —
+      can be added retroactively if needed)
+- [x] Tag the commit `phase-00-complete`
+
+##### Demo gate gotcha
+
+Initial registration used `priority: 0` and the entry rendered at the
+extreme right of the LEFT side, where it was easy to miss / hidden by
+overflow. Bumped to `priority: 1000` so the KRT entry sits to the left
+of the standard upstream entries. Worth knowing for future status-bar
+contributions: priority is the *only* lever for left-to-right ordering
+within an alignment side, and 0 is effectively last.
 
 The full compile (gulp + Electron) is heavy (~5–15 min on a fresh checkout)
 and ends in launching a GUI window. Best run interactively. After
