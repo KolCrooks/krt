@@ -1,0 +1,1775 @@
+From fc572831b298fbb7c968148be6a9c3af57ca8239 Mon Sep 17 00:00:00 2001
+From: Kol Crooks <kol.crooks@datadoghq.com>
+Date: Mon, 4 May 2026 19:05:10 -0400
+Subject: [PATCH] Phase 7: Tour sub-mode (AI chapters with BYOK Anthropic key)
+
+Adds a third sub-mode to the PR pane that generates an AI-narrated
+review tour by calling api.anthropic.com directly with the user's
+own API key. Key is encrypted via IEncryptionService (OS keychain)
+before landing in IStorageService. Generated chapters cache by
+{prId, headSha} so reopening doesn't re-bill.
+
+Two presentation variants:
+  - Chapters: rail of cards (title, summary, plus/minus counts,
+    sensitive badge, mark-reviewed checkmark) with focused
+    mini-diff detail.
+  - Reading: prose layout with mini-diffs inline per chapter.
+
+Settings live in the Command Palette for v1 (Configure key, Select
+model, Toggle prompt caching). Tour empty state runs the configure
+command directly via ICommandService.
+---
+ .../krt/browser/ai/krtAi.contribution.ts      | 138 ++++++
+ .../contrib/krt/browser/ai/krtAiSettings.ts   |  84 ++++
+ .../contrib/krt/browser/ai/krtTourCache.ts    |  90 ++++
+ .../krt/browser/ai/krtTourGenerator.ts        | 341 +++++++++++++
+ .../contrib/krt/browser/ai/krtTourReviewed.ts |  60 +++
+ .../contrib/krt/browser/ai/krtTourTypes.ts    |  35 ++
+ .../contrib/krt/browser/krt.contribution.ts   |   1 +
+ .../browser/pr/krtPullRequestEditorPane.css   | 406 ++++++++++++++++
+ .../browser/pr/krtPullRequestEditorPane.ts    | 448 +++++++++++++++++-
+ 9 files changed, 1602 insertions(+), 1 deletion(-)
+ create mode 100644 src/vs/workbench/contrib/krt/browser/ai/krtAi.contribution.ts
+ create mode 100644 src/vs/workbench/contrib/krt/browser/ai/krtAiSettings.ts
+ create mode 100644 src/vs/workbench/contrib/krt/browser/ai/krtTourCache.ts
+ create mode 100644 src/vs/workbench/contrib/krt/browser/ai/krtTourGenerator.ts
+ create mode 100644 src/vs/workbench/contrib/krt/browser/ai/krtTourReviewed.ts
+ create mode 100644 src/vs/workbench/contrib/krt/browser/ai/krtTourTypes.ts
+
+diff --git a/src/vs/workbench/contrib/krt/browser/ai/krtAi.contribution.ts b/src/vs/workbench/contrib/krt/browser/ai/krtAi.contribution.ts
+new file mode 100644
+index 00000000000..c7bd3d413fc
+--- /dev/null
++++ b/src/vs/workbench/contrib/krt/browser/ai/krtAi.contribution.ts
+@@ -0,0 +1,138 @@
++/*---------------------------------------------------------------------------------------------
++ *  Copyright (c) Microsoft Corporation. All rights reserved.
++ *  Licensed under the MIT License. See License.txt in the project root for license information.
++ *--------------------------------------------------------------------------------------------*/
++
++import { localize, localize2 } from '../../../../../nls.js';
++import { Action2, registerAction2 } from '../../../../../platform/actions/common/actions.js';
++import { IEncryptionService } from '../../../../../platform/encryption/common/encryptionService.js';
++import { ServicesAccessor } from '../../../../../platform/instantiation/common/instantiation.js';
++import { InstantiationType, registerSingleton } from '../../../../../platform/instantiation/common/extensions.js';
++import { ILogService } from '../../../../../platform/log/common/log.js';
++import { INotificationService } from '../../../../../platform/notification/common/notification.js';
++import { IQuickInputService, IQuickPickItem } from '../../../../../platform/quickinput/common/quickInput.js';
++import { IStorageService } from '../../../../../platform/storage/common/storage.js';
++import {
++	clearAnthropicKey,
++	readModel,
++	readPromptCaching,
++	SUPPORTED_MODELS,
++	writeAnthropicKey,
++	writeModel,
++	writePromptCaching,
++} from './krtAiSettings.js';
++import { ITourGenerator, TourGenerator } from './krtTourGenerator.js';
++
++const KRT_CATEGORY = localize2('krt.category', "KRT");
++
++registerSingleton(ITourGenerator, TourGenerator, InstantiationType.Delayed);
++
++class KrtConfigureAnthropicKeyAction extends Action2 {
++	static readonly ID = 'krt.configureAnthropicKey';
++
++	constructor() {
++		super({
++			id: KrtConfigureAnthropicKeyAction.ID,
++			title: localize2('krt.ai.configureKey.title', "Configure Anthropic API Key…"),
++			category: KRT_CATEGORY,
++			f1: true,
++		});
++	}
++
++	override async run(accessor: ServicesAccessor): Promise<void> {
++		const quickInputService = accessor.get(IQuickInputService);
++		const storageService = accessor.get(IStorageService);
++		const encryptionService = accessor.get(IEncryptionService);
++		const notificationService = accessor.get(INotificationService);
++		const logService = accessor.get(ILogService);
++
++		const value = await quickInputService.input({
++			title: localize('krt.ai.configureKey.inputTitle', "Anthropic API Key"),
++			prompt: localize('krt.ai.configureKey.inputPrompt', "Paste your Anthropic API key. Stored encrypted in the OS keychain. Leave blank to clear."),
++			placeHolder: 'sk-ant-…',
++			password: true,
++			ignoreFocusLost: true,
++		});
++		if (value === undefined) {
++			return;
++		}
++		try {
++			if (value.trim() === '') {
++				clearAnthropicKey(storageService);
++				notificationService.info(localize('krt.ai.keyCleared', "Anthropic API key cleared."));
++				return;
++			}
++			await writeAnthropicKey(storageService, encryptionService, value);
++			notificationService.info(localize('krt.ai.keySaved', "Anthropic API key saved."));
++		} catch (e) {
++			logService.error('[krt] failed to store Anthropic key', e);
++			notificationService.error(localize('krt.ai.keySaveFailed', "Couldn't save the Anthropic API key. The OS keychain may be unavailable."));
++		}
++	}
++}
++
++class KrtSelectAnthropicModelAction extends Action2 {
++	static readonly ID = 'krt.selectAnthropicModel';
++
++	constructor() {
++		super({
++			id: KrtSelectAnthropicModelAction.ID,
++			title: localize2('krt.ai.selectModel.title', "Select Anthropic Model…"),
++			category: KRT_CATEGORY,
++			f1: true,
++		});
++	}
++
++	override async run(accessor: ServicesAccessor): Promise<void> {
++		const quickInputService = accessor.get(IQuickInputService);
++		const storageService = accessor.get(IStorageService);
++		const notificationService = accessor.get(INotificationService);
++
++		const current = readModel(storageService);
++		interface ModelItem extends IQuickPickItem {
++			readonly id: string;
++		}
++		const items: ModelItem[] = SUPPORTED_MODELS.map(m => ({
++			id: m.id,
++			label: m.id === current ? `${m.label} ✓` : m.label,
++			description: m.id,
++			detail: m.description,
++		}));
++		const picked = await quickInputService.pick<ModelItem>(items, {
++			title: localize('krt.ai.selectModel.pickTitle', "Anthropic Model"),
++			placeHolder: localize('krt.ai.selectModel.pickPlaceholder', "Choose the model used for AI Tour generation"),
++		});
++		if (!picked) {
++			return;
++		}
++		writeModel(storageService, picked.id);
++		notificationService.info(localize('krt.ai.modelSet', "Model set to {0}.", picked.id));
++	}
++}
++
++class KrtTogglePromptCachingAction extends Action2 {
++	static readonly ID = 'krt.togglePromptCaching';
++
++	constructor() {
++		super({
++			id: KrtTogglePromptCachingAction.ID,
++			title: localize2('krt.ai.togglePromptCache.title', "Toggle Anthropic Prompt Caching"),
++			category: KRT_CATEGORY,
++			f1: true,
++		});
++	}
++
++	override async run(accessor: ServicesAccessor): Promise<void> {
++		const storageService = accessor.get(IStorageService);
++		const notificationService = accessor.get(INotificationService);
++		const next = !readPromptCaching(storageService);
++		writePromptCaching(storageService, next);
++		notificationService.info(next
++			? localize('krt.ai.promptCacheOn', "Prompt caching enabled.")
++			: localize('krt.ai.promptCacheOff', "Prompt caching disabled."));
++	}
++}
++
++registerAction2(KrtConfigureAnthropicKeyAction);
++registerAction2(KrtSelectAnthropicModelAction);
++registerAction2(KrtTogglePromptCachingAction);
+diff --git a/src/vs/workbench/contrib/krt/browser/ai/krtAiSettings.ts b/src/vs/workbench/contrib/krt/browser/ai/krtAiSettings.ts
+new file mode 100644
+index 00000000000..5413ee5a354
+--- /dev/null
++++ b/src/vs/workbench/contrib/krt/browser/ai/krtAiSettings.ts
+@@ -0,0 +1,84 @@
++/*---------------------------------------------------------------------------------------------
++ *  Copyright (c) Microsoft Corporation. All rights reserved.
++ *  Licensed under the MIT License. See License.txt in the project root for license information.
++ *--------------------------------------------------------------------------------------------*/
++
++import { IEncryptionService } from '../../../../../platform/encryption/common/encryptionService.js';
++import { IStorageService, StorageScope, StorageTarget } from '../../../../../platform/storage/common/storage.js';
++
++/**
++ * BYOK Anthropic settings persisted across runs. The API key is
++ * encrypted via `IEncryptionService` (safeStorage; macOS Keychain
++ * on Mac, DPAPI on Windows, libsecret/kwallet on Linux) before
++ * landing in `IStorageService`. Model + prompt-caching toggle are
++ * plain — they don't carry a secret.
++ *
++ * APPLICATION/MACHINE scope to match the recent-PRs and reviewed
++ * stores: KRT is single-window/single-user, profiles aren't a
++ * meaningful axis here.
++ */
++export const ANTHROPIC_KEY_STORAGE = 'krt.ai.anthropicKey';
++export const ANTHROPIC_MODEL_STORAGE = 'krt.ai.model';
++export const ANTHROPIC_PROMPT_CACHE_STORAGE = 'krt.ai.promptCache';
++
++export const DEFAULT_MODEL = 'claude-sonnet-4-6';
++
++export const SUPPORTED_MODELS: readonly { id: string; label: string; description: string }[] = [
++	{ id: 'claude-sonnet-4-6', label: 'Sonnet 4.6', description: 'Default. Fast + high quality for most PRs.' },
++	{ id: 'claude-opus-4-7', label: 'Opus 4.7', description: 'Deeper reasoning for large or complex PRs.' },
++	{ id: 'claude-haiku-4-5-20251001', label: 'Haiku 4.5', description: 'Cheapest. For very small PRs.' },
++];
++
++export async function readAnthropicKey(
++	storageService: IStorageService,
++	encryptionService: IEncryptionService,
++): Promise<string | undefined> {
++	const blob = storageService.get(ANTHROPIC_KEY_STORAGE, StorageScope.APPLICATION);
++	if (!blob) {
++		return undefined;
++	}
++	try {
++		return await encryptionService.decrypt(blob);
++	} catch {
++		// If decryption fails (e.g. keychain unavailable), treat as not configured.
++		return undefined;
++	}
++}
++
++export async function writeAnthropicKey(
++	storageService: IStorageService,
++	encryptionService: IEncryptionService,
++	key: string,
++): Promise<void> {
++	const trimmed = key.trim();
++	if (!trimmed) {
++		storageService.remove(ANTHROPIC_KEY_STORAGE, StorageScope.APPLICATION);
++		return;
++	}
++	const encrypted = await encryptionService.encrypt(trimmed);
++	storageService.store(ANTHROPIC_KEY_STORAGE, encrypted, StorageScope.APPLICATION, StorageTarget.MACHINE);
++}
++
++export function clearAnthropicKey(storageService: IStorageService): void {
++	storageService.remove(ANTHROPIC_KEY_STORAGE, StorageScope.APPLICATION);
++}
++
++export function readModel(storageService: IStorageService): string {
++	return storageService.get(ANTHROPIC_MODEL_STORAGE, StorageScope.APPLICATION) ?? DEFAULT_MODEL;
++}
++
++export function writeModel(storageService: IStorageService, model: string): void {
++	storageService.store(ANTHROPIC_MODEL_STORAGE, model, StorageScope.APPLICATION, StorageTarget.MACHINE);
++}
++
++export function readPromptCaching(storageService: IStorageService): boolean {
++	const raw = storageService.get(ANTHROPIC_PROMPT_CACHE_STORAGE, StorageScope.APPLICATION);
++	if (raw === undefined) {
++		return true;
++	}
++	return raw === 'true';
++}
++
++export function writePromptCaching(storageService: IStorageService, on: boolean): void {
++	storageService.store(ANTHROPIC_PROMPT_CACHE_STORAGE, on ? 'true' : 'false', StorageScope.APPLICATION, StorageTarget.MACHINE);
++}
+diff --git a/src/vs/workbench/contrib/krt/browser/ai/krtTourCache.ts b/src/vs/workbench/contrib/krt/browser/ai/krtTourCache.ts
+new file mode 100644
+index 00000000000..7cb368f5801
+--- /dev/null
++++ b/src/vs/workbench/contrib/krt/browser/ai/krtTourCache.ts
+@@ -0,0 +1,90 @@
++/*---------------------------------------------------------------------------------------------
++ *  Copyright (c) Microsoft Corporation. All rights reserved.
++ *  Licensed under the MIT License. See License.txt in the project root for license information.
++ *--------------------------------------------------------------------------------------------*/
++
++import { IStorageService, StorageScope, StorageTarget } from '../../../../../platform/storage/common/storage.js';
++import { Chapter } from './krtTourTypes.js';
++
++/**
++ * Per-PR Tour chapter cache. Keyed by `{owner, repo, number, headSha}`
++ * so a force-push or new commit invalidates the cache automatically
++ * (a new `headSha` produces a new key). Storage payload carries a
++ * version tag so we can re-shape `Chapter` later without false
++ * cache hits.
++ *
++ * APPLICATION/MACHINE scope — same axis as the rest of KRT
++ * persistence; Tour output is user-specific and not portable.
++ */
++
++const CACHE_VERSION = 1;
++
++interface CacheEnvelope {
++	readonly v: number;
++	readonly chapters: readonly Chapter[];
++	readonly model: string;
++	readonly generatedAt: string;
++}
++
++export function chaptersKey(owner: string, repo: string, number: number, headSha: string): string {
++	return `krt.tour.${owner}/${repo}#${number}.${headSha}`;
++}
++
++export function readCachedChapters(
++	storageService: IStorageService,
++	owner: string,
++	repo: string,
++	number: number,
++	headSha: string,
++): { chapters: readonly Chapter[]; model: string; generatedAt: string } | undefined {
++	const raw = storageService.get(chaptersKey(owner, repo, number, headSha), StorageScope.APPLICATION);
++	if (!raw) {
++		return undefined;
++	}
++	try {
++		const parsed = JSON.parse(raw) as Partial<CacheEnvelope>;
++		if (parsed.v !== CACHE_VERSION || !Array.isArray(parsed.chapters)) {
++			return undefined;
++		}
++		return {
++			chapters: parsed.chapters,
++			model: typeof parsed.model === 'string' ? parsed.model : 'unknown',
++			generatedAt: typeof parsed.generatedAt === 'string' ? parsed.generatedAt : '',
++		};
++	} catch {
++		return undefined;
++	}
++}
++
++export function writeCachedChapters(
++	storageService: IStorageService,
++	owner: string,
++	repo: string,
++	number: number,
++	headSha: string,
++	chapters: readonly Chapter[],
++	model: string,
++): void {
++	const envelope: CacheEnvelope = {
++		v: CACHE_VERSION,
++		chapters,
++		model,
++		generatedAt: new Date().toISOString(),
++	};
++	storageService.store(
++		chaptersKey(owner, repo, number, headSha),
++		JSON.stringify(envelope),
++		StorageScope.APPLICATION,
++		StorageTarget.MACHINE,
++	);
++}
++
++export function clearCachedChapters(
++	storageService: IStorageService,
++	owner: string,
++	repo: string,
++	number: number,
++	headSha: string,
++): void {
++	storageService.remove(chaptersKey(owner, repo, number, headSha), StorageScope.APPLICATION);
++}
+diff --git a/src/vs/workbench/contrib/krt/browser/ai/krtTourGenerator.ts b/src/vs/workbench/contrib/krt/browser/ai/krtTourGenerator.ts
+new file mode 100644
+index 00000000000..8c4036ef137
+--- /dev/null
++++ b/src/vs/workbench/contrib/krt/browser/ai/krtTourGenerator.ts
+@@ -0,0 +1,341 @@
++/*---------------------------------------------------------------------------------------------
++ *  Copyright (c) Microsoft Corporation. All rights reserved.
++ *  Licensed under the MIT License. See License.txt in the project root for license information.
++ *--------------------------------------------------------------------------------------------*/
++
++import { localize } from '../../../../../nls.js';
++import { IEncryptionService } from '../../../../../platform/encryption/common/encryptionService.js';
++import { createDecorator } from '../../../../../platform/instantiation/common/instantiation.js';
++import { ILogService } from '../../../../../platform/log/common/log.js';
++import { IStorageService } from '../../../../../platform/storage/common/storage.js';
++import { PullRequest, PullRequestFile } from '../../../../../platform/krt/common/krt.js';
++import {
++	readAnthropicKey,
++	readModel,
++	readPromptCaching,
++} from './krtAiSettings.js';
++import { Chapter } from './krtTourTypes.js';
++import { readCachedChapters, writeCachedChapters } from './krtTourCache.js';
++
++/**
++ * Phase 7 AI tour generator. Calls the Anthropic Messages API
++ * directly with the user's BYOK (renderer-side fetch). The
++ * `anthropic-dangerous-direct-browser-access` header is required
++ * because the request originates from a renderer process; without
++ * it Anthropic refuses browser-origin traffic.
++ *
++ * Result is cached by `{prId, headSha}` so reopening a PR doesn't
++ * re-bill. Caller invalidates by passing `forceRefresh: true`.
++ */
++export const ITourGenerator = createDecorator<ITourGenerator>('krtTourGenerator');
++
++export interface TourGenerationResult {
++	readonly chapters: readonly Chapter[];
++	readonly model: string;
++	readonly fromCache: boolean;
++}
++
++export type TourGenerationStatus =
++	| { readonly kind: 'ok'; readonly result: TourGenerationResult }
++	| { readonly kind: 'no-key' }
++	| { readonly kind: 'error'; readonly message: string };
++
++export interface ITourGenerator {
++	readonly _serviceBrand: undefined;
++	hasApiKey(): Promise<boolean>;
++	/** Returns cached chapters if available, otherwise null (so the caller can show a quick state). */
++	readCached(pr: PullRequest): TourGenerationResult | undefined;
++	generate(pr: PullRequest, files: readonly PullRequestFile[], options?: { forceRefresh?: boolean }): Promise<TourGenerationStatus>;
++}
++
++const ANTHROPIC_ENDPOINT = 'https://api.anthropic.com/v1/messages';
++const ANTHROPIC_VERSION = '2023-06-01';
++
++const MAX_FILES_INLINED = 60;
++const MAX_PATCH_CHARS_PER_FILE = 8_000;
++const MAX_TOTAL_PATCH_CHARS = 180_000;
++
++export class TourGenerator implements ITourGenerator {
++	declare readonly _serviceBrand: undefined;
++
++	constructor(
++		@IStorageService private readonly storageService: IStorageService,
++		@IEncryptionService private readonly encryptionService: IEncryptionService,
++		@ILogService private readonly logService: ILogService,
++	) { }
++
++	async hasApiKey(): Promise<boolean> {
++		const k = await readAnthropicKey(this.storageService, this.encryptionService);
++		return Boolean(k);
++	}
++
++	readCached(pr: PullRequest): TourGenerationResult | undefined {
++		const cached = readCachedChapters(this.storageService, pr.owner, pr.repo, pr.number, pr.head.sha);
++		if (!cached) {
++			return undefined;
++		}
++		return { chapters: cached.chapters, model: cached.model, fromCache: true };
++	}
++
++	async generate(pr: PullRequest, files: readonly PullRequestFile[], options?: { forceRefresh?: boolean }): Promise<TourGenerationStatus> {
++		if (!options?.forceRefresh) {
++			const cached = this.readCached(pr);
++			if (cached) {
++				return { kind: 'ok', result: cached };
++			}
++		}
++
++		const apiKey = await readAnthropicKey(this.storageService, this.encryptionService);
++		if (!apiKey) {
++			return { kind: 'no-key' };
++		}
++		const model = readModel(this.storageService);
++		const promptCachingOn = readPromptCaching(this.storageService);
++
++		const userPayload = buildUserPrompt(pr, files);
++
++		try {
++			const response = await fetch(ANTHROPIC_ENDPOINT, {
++				method: 'POST',
++				headers: {
++					'content-type': 'application/json',
++					'x-api-key': apiKey,
++					'anthropic-version': ANTHROPIC_VERSION,
++					'anthropic-dangerous-direct-browser-access': 'true',
++				},
++				body: JSON.stringify({
++					model,
++					max_tokens: 4096,
++					system: promptCachingOn
++						? [{ type: 'text', text: SYSTEM_PROMPT, cache_control: { type: 'ephemeral' } }]
++						: SYSTEM_PROMPT,
++					messages: [
++						{
++							role: 'user',
++							content: [
++								{ type: 'text', text: userPayload },
++							],
++						},
++					],
++				}),
++			});
++			if (!response.ok) {
++				const text = await safeText(response);
++				this.logService.warn(`[krt] tour-generator HTTP ${response.status}: ${text}`);
++				return { kind: 'error', message: localize('krt.tour.httpError', "Anthropic API error {0}: {1}", response.status, truncate(text, 240)) };
++			}
++			const json = await response.json();
++			const text = extractText(json);
++			if (!text) {
++				return { kind: 'error', message: localize('krt.tour.emptyResponse', "Empty response from Anthropic API.") };
++			}
++			const chapters = parseChaptersJson(text, files);
++			if (!chapters || chapters.length === 0) {
++				this.logService.warn('[krt] tour-generator could not parse chapters from response', text.slice(0, 600));
++				return { kind: 'error', message: localize('krt.tour.parseError', "Couldn't parse chapters from the model response.") };
++			}
++			writeCachedChapters(this.storageService, pr.owner, pr.repo, pr.number, pr.head.sha, chapters, model);
++			return { kind: 'ok', result: { chapters, model, fromCache: false } };
++		} catch (e) {
++			this.logService.error('[krt] tour-generator request failed', e);
++			return { kind: 'error', message: e instanceof Error ? e.message : String(e) };
++		}
++	}
++}
++
++const SYSTEM_PROMPT = [
++	'You are KRT, a code-review companion that summarises pull requests as a sequence of narrative chapters.',
++	'Each chapter groups related changes a reviewer should read together. Chapters should be ordered the way a human would naturally read the PR (entry points and types first; tests, fixtures, generated files last).',
++	'',
++	'Output format: respond with a single fenced code block containing JSON that matches this TypeScript shape exactly. Do not write any prose outside the fence.',
++	'',
++	'```json',
++	'{',
++	'  "chapters": [',
++	'    {',
++	'      "id": "kebab-case-id",            // unique within this PR',
++	'      "title": "Short, human title",     // <= 70 chars',
++	'      "summary": "One-paragraph overview", // 1-3 sentences',
++	'      "bullets": ["Concrete change one", "Concrete change two"], // 0-6 entries, each <= 140 chars',
++	'      "files": ["path/from/repo/root.ts"], // subset of the PR files; preserve repo paths exactly',
++	'      "plus": 0, "minus": 0,             // additions / deletions across this chapter\'s files',
++	'      "sensitive": false,                 // true for migrations, auth, secrets, money, deletions of safety code',
++	'      "sensitiveReason": "",              // required when sensitive=true; otherwise empty string',
++	'      "diffFile": "path/to/main.ts",     // the most representative file (must be in `files`)',
++	'      "dependsOn": []                     // ids of other chapters this one logically follows',
++	'    }',
++	'  ]',
++	'}',
++	'```',
++	'',
++	'Rules:',
++	'- Cover every changed file at least once across the chapters; do not invent files that are not in the input.',
++	'- Aim for 3-8 chapters for a typical PR. Very small PRs may have 1-2 chapters; very large PRs should not exceed 12.',
++	'- Be specific: prefer "Adds the `--retry` flag to `cli.ts`" over "Updates the CLI".',
++	'- `sensitive` should be true sparingly — only for changes a reviewer must look at carefully (security, data migrations, money flows, destructive operations, removal of validation).',
++].join('\n');
++
++function buildUserPrompt(pr: PullRequest, files: readonly PullRequestFile[]): string {
++	const trimmedFiles = files.slice(0, MAX_FILES_INLINED);
++	const lines: string[] = [];
++	lines.push(`# PR ${pr.owner}/${pr.repo} #${pr.number}`);
++	lines.push(`Title: ${pr.title}`);
++	lines.push(`Author: ${pr.author.login}`);
++	lines.push(`Base: ${pr.base.label}  Head: ${pr.head.label}`);
++	lines.push(`Stats: +${pr.stats.additions} -${pr.stats.deletions}, ${pr.stats.changedFiles} file(s)`);
++	if (pr.body.trim()) {
++		lines.push('');
++		lines.push('## Description');
++		lines.push(pr.body.trim());
++	}
++	lines.push('');
++	lines.push('## Files and patches');
++
++	let totalChars = 0;
++	for (const f of trimmedFiles) {
++		const head = `### ${f.path}  (status: ${f.status}, +${f.additions} -${f.deletions})`;
++		lines.push('');
++		lines.push(head);
++		if (!f.patch) {
++			lines.push('_(no patch — binary or too large)_');
++			continue;
++		}
++		let patch = f.patch;
++		if (patch.length > MAX_PATCH_CHARS_PER_FILE) {
++			patch = patch.slice(0, MAX_PATCH_CHARS_PER_FILE) + `\n… (truncated ${patch.length - MAX_PATCH_CHARS_PER_FILE} chars)`;
++		}
++		if (totalChars + patch.length > MAX_TOTAL_PATCH_CHARS) {
++			lines.push('_(patch elided — total budget exceeded)_');
++			continue;
++		}
++		totalChars += patch.length;
++		lines.push('```diff');
++		lines.push(patch);
++		lines.push('```');
++	}
++	if (files.length > trimmedFiles.length) {
++		lines.push('');
++		lines.push(`_(${files.length - trimmedFiles.length} additional file(s) omitted from this prompt)_`);
++	}
++	lines.push('');
++	lines.push('Produce the chapters JSON now.');
++	return lines.join('\n');
++}
++
++function extractText(json: unknown): string | undefined {
++	if (!json || typeof json !== 'object') {
++		return undefined;
++	}
++	const content = (json as { content?: unknown }).content;
++	if (!Array.isArray(content)) {
++		return undefined;
++	}
++	const parts: string[] = [];
++	for (const block of content) {
++		if (block && typeof block === 'object' && (block as { type?: unknown }).type === 'text') {
++			const text = (block as { text?: unknown }).text;
++			if (typeof text === 'string') {
++				parts.push(text);
++			}
++		}
++	}
++	return parts.length > 0 ? parts.join('\n') : undefined;
++}
++
++const FENCE_RE = /```(?:json)?\s*([\s\S]*?)```/;
++
++function parseChaptersJson(text: string, files: readonly PullRequestFile[]): readonly Chapter[] | undefined {
++	const knownPaths = new Set(files.map(f => f.path));
++	const fence = FENCE_RE.exec(text);
++	const raw = fence ? fence[1] : text;
++	const trimmed = raw.trim();
++	let parsed: unknown;
++	try {
++		parsed = JSON.parse(trimmed);
++	} catch {
++		// Try to extract the first {...} block.
++		const start = trimmed.indexOf('{');
++		const end = trimmed.lastIndexOf('}');
++		if (start < 0 || end <= start) {
++			return undefined;
++		}
++		try {
++			parsed = JSON.parse(trimmed.slice(start, end + 1));
++		} catch {
++			return undefined;
++		}
++	}
++	if (!parsed || typeof parsed !== 'object') {
++		return undefined;
++	}
++	const chaptersIn = (parsed as { chapters?: unknown }).chapters;
++	if (!Array.isArray(chaptersIn)) {
++		return undefined;
++	}
++	const out: Chapter[] = [];
++	const seenIds = new Set<string>();
++	for (let i = 0; i < chaptersIn.length; i++) {
++		const c = chaptersIn[i];
++		if (!c || typeof c !== 'object') {
++			continue;
++		}
++		const obj = c as Record<string, unknown>;
++		const title = typeof obj.title === 'string' ? obj.title.trim() : '';
++		const summary = typeof obj.summary === 'string' ? obj.summary.trim() : '';
++		if (!title) {
++			continue;
++		}
++		const filesArr = Array.isArray(obj.files)
++			? obj.files.filter((p): p is string => typeof p === 'string').filter(p => knownPaths.has(p))
++			: [];
++		if (filesArr.length === 0) {
++			continue;
++		}
++		const bullets = Array.isArray(obj.bullets)
++			? obj.bullets.filter((b): b is string => typeof b === 'string').slice(0, 6)
++			: [];
++		let id = typeof obj.id === 'string' && obj.id.trim() ? obj.id.trim() : `chapter-${i + 1}`;
++		while (seenIds.has(id)) {
++			id = `${id}-${i + 1}`;
++		}
++		seenIds.add(id);
++		const sensitive = obj.sensitive === true;
++		const sensitiveReason = typeof obj.sensitiveReason === 'string' && obj.sensitiveReason.trim()
++			? obj.sensitiveReason.trim()
++			: undefined;
++		const diffFile = typeof obj.diffFile === 'string' && knownPaths.has(obj.diffFile)
++			? obj.diffFile
++			: filesArr[0];
++		const plus = typeof obj.plus === 'number' && Number.isFinite(obj.plus) ? Math.max(0, Math.trunc(obj.plus)) : 0;
++		const minus = typeof obj.minus === 'number' && Number.isFinite(obj.minus) ? Math.max(0, Math.trunc(obj.minus)) : 0;
++		const dependsOn = Array.isArray(obj.dependsOn)
++			? obj.dependsOn.filter((d): d is string => typeof d === 'string')
++			: [];
++		out.push({
++			id,
++			title,
++			summary,
++			bullets,
++			files: filesArr,
++			plus,
++			minus,
++			sensitive,
++			sensitiveReason: sensitive ? sensitiveReason : undefined,
++			diffFile,
++			dependsOn,
++		});
++	}
++	return out;
++}
++
++async function safeText(response: Response): Promise<string> {
++	try {
++		return await response.text();
++	} catch {
++		return '<unreadable response body>';
++	}
++}
++
++function truncate(s: string, n: number): string {
++	return s.length <= n ? s : s.slice(0, n) + '…';
++}
+diff --git a/src/vs/workbench/contrib/krt/browser/ai/krtTourReviewed.ts b/src/vs/workbench/contrib/krt/browser/ai/krtTourReviewed.ts
+new file mode 100644
+index 00000000000..2eb750a43d9
+--- /dev/null
++++ b/src/vs/workbench/contrib/krt/browser/ai/krtTourReviewed.ts
+@@ -0,0 +1,60 @@
++/*---------------------------------------------------------------------------------------------
++ *  Copyright (c) Microsoft Corporation. All rights reserved.
++ *  Licensed under the MIT License. See License.txt in the project root for license information.
++ *--------------------------------------------------------------------------------------------*/
++
++import { IStorageService, StorageScope, StorageTarget } from '../../../../../platform/storage/common/storage.js';
++import { TourVariant } from './krtTourTypes.js';
++
++/**
++ * Per-PR Tour state: which chapters the reviewer has marked
++ * reviewed, and which variant (Chapters / Reading) they prefer.
++ *
++ * Reviewed-chapter ids are kept per-PR (they don't outlive a
++ * `headSha` change in spirit, but ids are unique per generation
++ * so a stale entry does no harm — the variant just won't render
++ * a checkmark for it). Variant is per-PR too because a reader
++ * may prefer Reading on long PRs and Chapters on small ones.
++ */
++
++export function reviewedChaptersKey(owner: string, repo: string, number: number): string {
++	return `krt.tour.reviewed.${owner}/${repo}#${number}`;
++}
++
++export function variantKey(owner: string, repo: string, number: number): string {
++	return `krt.tour.variant.${owner}/${repo}#${number}`;
++}
++
++export function readReviewedChapters(storageService: IStorageService, owner: string, repo: string, number: number): ReadonlySet<string> {
++	const raw = storageService.get(reviewedChaptersKey(owner, repo, number), StorageScope.APPLICATION);
++	if (!raw) {
++		return new Set();
++	}
++	try {
++		const parsed = JSON.parse(raw);
++		if (Array.isArray(parsed)) {
++			return new Set(parsed.filter((s): s is string => typeof s === 'string'));
++		}
++	} catch {
++		// fall through
++	}
++	return new Set();
++}
++
++export function writeReviewedChapters(storageService: IStorageService, owner: string, repo: string, number: number, ids: ReadonlySet<string>): void {
++	storageService.store(
++		reviewedChaptersKey(owner, repo, number),
++		JSON.stringify([...ids]),
++		StorageScope.APPLICATION,
++		StorageTarget.MACHINE,
++	);
++}
++
++export function readVariant(storageService: IStorageService, owner: string, repo: string, number: number): TourVariant {
++	const raw = storageService.get(variantKey(owner, repo, number), StorageScope.APPLICATION);
++	return raw === 'reading' ? 'reading' : 'chapters';
++}
++
++export function writeVariant(storageService: IStorageService, owner: string, repo: string, number: number, variant: TourVariant): void {
++	storageService.store(variantKey(owner, repo, number), variant, StorageScope.APPLICATION, StorageTarget.MACHINE);
++}
+diff --git a/src/vs/workbench/contrib/krt/browser/ai/krtTourTypes.ts b/src/vs/workbench/contrib/krt/browser/ai/krtTourTypes.ts
+new file mode 100644
+index 00000000000..3e05bb07f75
+--- /dev/null
++++ b/src/vs/workbench/contrib/krt/browser/ai/krtTourTypes.ts
+@@ -0,0 +1,35 @@
++/*---------------------------------------------------------------------------------------------
++ *  Copyright (c) Microsoft Corporation. All rights reserved.
++ *  Licensed under the MIT License. See License.txt in the project root for license information.
++ *--------------------------------------------------------------------------------------------*/
++
++/**
++ * AI-generated narrative chapter for the Tour view. Shape matches
++ * PLAN.md Phase 7. Each chapter groups one or more files into
++ * a unit the reviewer can absorb at a glance.
++ *
++ * `dependsOn` is a list of chapter ids — the Storyboard view in
++ * Phase 8 walks this graph to lay out tier-by-tier columns.
++ */
++export interface Chapter {
++	readonly id: string;
++	readonly title: string;
++	readonly summary: string;
++	readonly bullets: readonly string[];
++	/** File paths covered by this chapter, in display order. */
++	readonly files: readonly string[];
++	readonly plus: number;
++	readonly minus: number;
++	readonly sensitive: boolean;
++	/** Why the chapter is sensitive — short, reviewer-facing. */
++	readonly sensitiveReason?: string;
++	/**
++	 * Path to the "main" file the Chapters variant focuses on when
++	 * the chapter is selected. Falls back to `files[0]` if absent
++	 * or unknown.
++	 */
++	readonly diffFile?: string;
++	readonly dependsOn: readonly string[];
++}
++
++export type TourVariant = 'chapters' | 'reading';
+diff --git a/src/vs/workbench/contrib/krt/browser/krt.contribution.ts b/src/vs/workbench/contrib/krt/browser/krt.contribution.ts
+index 59ace12e70c..1d3eb07338e 100644
+--- a/src/vs/workbench/contrib/krt/browser/krt.contribution.ts
++++ b/src/vs/workbench/contrib/krt/browser/krt.contribution.ts
+@@ -17,6 +17,7 @@ import './chrome/krtChrome.contribution.js';
+ import './tabs/krtTabs.contribution.js';
+ import './pr/krtPullRequestEditor.contribution.js';
+ import './search/krtSearch.contribution.js';
++import './ai/krtAi.contribution.js';
+ 
+ class KrtStatusBarContribution extends Disposable implements IWorkbenchContribution {
+ 
+diff --git a/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.css b/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.css
+index 3ec09db4531..9c4eee9eafb 100644
+--- a/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.css
++++ b/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.css
+@@ -1028,3 +1028,409 @@
+ .krt-pr-reply-cancel:hover:not(:disabled) {
+ 	background: var(--vscode-toolbar-hoverBackground, rgba(127, 127, 127, 0.1));
+ }
++
++/* ---------- Tour sub-mode ---------- */
++
++.krt-pr-editor-body.tour {
++	display: flex;
++	flex-direction: column;
++	gap: 12px;
++	padding: 16px 24px 32px;
++}
++
++.krt-pr-tour-header {
++	display: flex;
++	align-items: center;
++	gap: 12px;
++	flex-wrap: wrap;
++	padding-bottom: 8px;
++	border-bottom: 1px solid var(--vscode-widget-border, rgba(127, 127, 127, 0.2));
++}
++
++.krt-pr-tour-heading {
++	font-size: 15px;
++	font-weight: 600;
++	color: var(--vscode-foreground);
++}
++
++.krt-pr-tour-subheading {
++	font-size: 12px;
++	color: var(--vscode-descriptionForeground);
++	flex: 1;
++}
++
++.krt-pr-tour-variant {
++	display: inline-flex;
++	border: 1px solid var(--vscode-widget-border, rgba(127, 127, 127, 0.3));
++	border-radius: 4px;
++	overflow: hidden;
++}
++
++.krt-pr-tour-variant-btn {
++	background: transparent;
++	color: var(--vscode-foreground);
++	border: none;
++	padding: 4px 10px;
++	font-size: 12px;
++	cursor: pointer;
++}
++
++.krt-pr-tour-variant-btn:hover:not(.active) {
++	background: var(--vscode-toolbar-hoverBackground, rgba(127, 127, 127, 0.1));
++}
++
++.krt-pr-tour-variant-btn.active {
++	background: var(--vscode-button-background);
++	color: var(--vscode-button-foreground);
++}
++
++.krt-pr-tour-body {
++	display: flex;
++	flex-direction: column;
++	gap: 12px;
++}
++
++.krt-pr-tour-empty {
++	display: flex;
++	flex-direction: column;
++	gap: 12px;
++	padding: 32px;
++	border: 1px dashed var(--vscode-widget-border, rgba(127, 127, 127, 0.3));
++	border-radius: 8px;
++	max-width: 540px;
++	margin: 32px auto 0;
++	text-align: center;
++}
++
++.krt-pr-tour-empty-heading {
++	margin: 0;
++	font-size: 18px;
++	font-weight: 600;
++	color: var(--vscode-foreground);
++}
++
++.krt-pr-tour-empty-body {
++	margin: 0;
++	font-size: 13px;
++	color: var(--vscode-descriptionForeground);
++	line-height: 1.5;
++}
++
++.krt-pr-tour-cta {
++	background: var(--vscode-button-background);
++	color: var(--vscode-button-foreground);
++	border: none;
++	padding: 8px 16px;
++	border-radius: 4px;
++	cursor: pointer;
++	font-size: 13px;
++	font-weight: 500;
++	align-self: center;
++}
++
++.krt-pr-tour-cta:hover {
++	background: var(--vscode-button-hoverBackground);
++}
++
++.krt-pr-tour-cta-secondary {
++	background: transparent;
++	color: var(--vscode-foreground);
++	border: 1px solid var(--vscode-widget-border, rgba(127, 127, 127, 0.3));
++	padding: 6px 12px;
++	border-radius: 4px;
++	cursor: pointer;
++	font-size: 12px;
++	align-self: center;
++}
++
++.krt-pr-tour-cta-secondary:hover {
++	background: var(--vscode-toolbar-hoverBackground, rgba(127, 127, 127, 0.1));
++}
++
++.krt-pr-tour-retry {
++	align-self: flex-start;
++	background: transparent;
++	color: var(--vscode-foreground);
++	border: 1px solid var(--vscode-widget-border, rgba(127, 127, 127, 0.3));
++	padding: 4px 10px;
++	border-radius: 4px;
++	cursor: pointer;
++	font-size: 12px;
++}
++
++.krt-pr-tour-layout {
++	display: grid;
++	grid-template-columns: 320px 1fr;
++	gap: 20px;
++	align-items: flex-start;
++}
++
++.krt-pr-tour-rail {
++	display: flex;
++	flex-direction: column;
++	gap: 8px;
++	position: sticky;
++	top: 0;
++}
++
++.krt-pr-tour-card {
++	display: flex;
++	flex-direction: column;
++	gap: 6px;
++	padding: 10px 12px;
++	border: 1px solid var(--vscode-widget-border, rgba(127, 127, 127, 0.25));
++	border-radius: 6px;
++	background: var(--vscode-editor-background, transparent);
++	cursor: pointer;
++}
++
++.krt-pr-tour-card:hover {
++	background: var(--vscode-toolbar-hoverBackground, rgba(127, 127, 127, 0.08));
++}
++
++.krt-pr-tour-card.selected {
++	border-color: var(--vscode-focusBorder, var(--vscode-button-background));
++	box-shadow: 0 0 0 1px var(--vscode-focusBorder, var(--vscode-button-background));
++}
++
++.krt-pr-tour-card.reviewed {
++	opacity: 0.65;
++}
++
++.krt-pr-tour-card.sensitive {
++	border-left: 3px solid var(--vscode-editorWarning-foreground, #c2c200);
++}
++
++.krt-pr-tour-card-head {
++	display: flex;
++	align-items: center;
++	gap: 8px;
++}
++
++.krt-pr-tour-card-title {
++	font-size: 13px;
++	font-weight: 600;
++	color: var(--vscode-foreground);
++	flex: 1;
++}
++
++.krt-pr-tour-sensitive-badge {
++	font-size: 10.5px;
++	font-weight: 600;
++	letter-spacing: 0.04em;
++	color: var(--vscode-editorWarning-foreground, #c2c200);
++	text-transform: uppercase;
++	border: 1px solid currentColor;
++	border-radius: 3px;
++	padding: 1px 5px;
++}
++
++.krt-pr-tour-card-summary {
++	margin: 0;
++	font-size: 12px;
++	line-height: 1.4;
++	color: var(--vscode-descriptionForeground);
++}
++
++.krt-pr-tour-card-meta {
++	display: flex;
++	align-items: center;
++	gap: 8px;
++	font-size: 11px;
++	color: var(--vscode-descriptionForeground);
++}
++
++.krt-pr-tour-card-files {
++	flex: 1;
++}
++
++.krt-pr-tour-card-counts {
++	display: inline-flex;
++	gap: 6px;
++	font-family: var(--monaco-monospace-font, monospace);
++}
++
++.krt-pr-tour-card-counts .add {
++	color: var(--vscode-gitDecoration-addedResourceForeground, #587c0c);
++}
++
++.krt-pr-tour-card-counts .del {
++	color: var(--vscode-gitDecoration-deletedResourceForeground, #ad0707);
++}
++
++.krt-pr-tour-reviewed {
++	display: inline-flex;
++	align-items: center;
++	gap: 6px;
++	font-size: 11.5px;
++	color: var(--vscode-descriptionForeground);
++	cursor: pointer;
++}
++
++.krt-pr-tour-detail {
++	display: flex;
++	flex-direction: column;
++	gap: 12px;
++	min-width: 0;
++}
++
++.krt-pr-tour-detail-head {
++	display: flex;
++	align-items: center;
++}
++
++.krt-pr-tour-detail-title {
++	margin: 0;
++	font-size: 18px;
++	font-weight: 600;
++	color: var(--vscode-foreground);
++}
++
++.krt-pr-tour-detail-summary {
++	margin: 0;
++	font-size: 13px;
++	line-height: 1.5;
++	color: var(--vscode-foreground);
++}
++
++.krt-pr-tour-detail-bullets,
++.krt-pr-tour-chapter-bullets {
++	margin: 0;
++	padding-left: 20px;
++	display: flex;
++	flex-direction: column;
++	gap: 4px;
++	font-size: 13px;
++	color: var(--vscode-foreground);
++	line-height: 1.4;
++}
++
++.krt-pr-tour-callout {
++	display: flex;
++	flex-direction: column;
++	gap: 4px;
++	border-left: 3px solid var(--vscode-editorWarning-foreground, #c2c200);
++	background: var(--vscode-inputValidation-warningBackground, rgba(194, 194, 0, 0.1));
++	padding: 8px 12px;
++	border-radius: 0 4px 4px 0;
++}
++
++.krt-pr-tour-callout-heading {
++	font-size: 11px;
++	font-weight: 600;
++	letter-spacing: 0.04em;
++	text-transform: uppercase;
++	color: var(--vscode-editorWarning-foreground, #c2c200);
++}
++
++.krt-pr-tour-callout-body {
++	font-size: 12.5px;
++	color: var(--vscode-foreground);
++	line-height: 1.4;
++}
++
++.krt-pr-tour-mini-diffs {
++	display: flex;
++	flex-direction: column;
++	gap: 12px;
++}
++
++.krt-pr-tour-mini-section {
++	border: 1px solid var(--vscode-widget-border, rgba(127, 127, 127, 0.25));
++	border-radius: 6px;
++	overflow: hidden;
++}
++
++.krt-pr-tour-mini-head {
++	display: flex;
++	align-items: center;
++	gap: 8px;
++	padding: 6px 10px;
++	background: var(--vscode-editorGroupHeader-tabsBackground, transparent);
++	border-bottom: 1px solid var(--vscode-widget-border, rgba(127, 127, 127, 0.25));
++	font-size: 12px;
++}
++
++.krt-pr-tour-mini-path {
++	flex: 1;
++	font-family: var(--monaco-monospace-font, monospace);
++	overflow: hidden;
++	text-overflow: ellipsis;
++	white-space: nowrap;
++}
++
++.krt-pr-tour-mini-counts {
++	display: inline-flex;
++	gap: 6px;
++	font-family: var(--monaco-monospace-font, monospace);
++	font-size: 11px;
++}
++
++.krt-pr-tour-mini-counts .add {
++	color: var(--vscode-gitDecoration-addedResourceForeground, #587c0c);
++}
++
++.krt-pr-tour-mini-counts .del {
++	color: var(--vscode-gitDecoration-deletedResourceForeground, #ad0707);
++}
++
++.krt-pr-tour-mini-body {
++	max-height: 320px;
++	overflow: auto;
++	font-family: var(--monaco-monospace-font, monospace);
++	font-size: 12px;
++}
++
++.krt-pr-tour-mini-empty {
++	padding: 12px;
++	font-size: 12px;
++	color: var(--vscode-descriptionForeground);
++	font-style: italic;
++}
++
++.krt-pr-tour-reading {
++	display: flex;
++	flex-direction: column;
++	gap: 28px;
++	max-width: 880px;
++	margin: 0 auto;
++}
++
++.krt-pr-tour-chapter {
++	display: flex;
++	flex-direction: column;
++	gap: 10px;
++	padding: 16px 20px;
++	border: 1px solid var(--vscode-widget-border, rgba(127, 127, 127, 0.2));
++	border-radius: 8px;
++	background: var(--vscode-editor-background, transparent);
++}
++
++.krt-pr-tour-chapter.reviewed {
++	opacity: 0.7;
++}
++
++.krt-pr-tour-chapter.sensitive {
++	border-left: 3px solid var(--vscode-editorWarning-foreground, #c2c200);
++}
++
++.krt-pr-tour-chapter-head {
++	display: flex;
++	align-items: center;
++	gap: 12px;
++}
++
++.krt-pr-tour-chapter-title {
++	margin: 0;
++	font-size: 16px;
++	font-weight: 600;
++	color: var(--vscode-foreground);
++	flex: 1;
++}
++
++.krt-pr-tour-chapter-summary {
++	margin: 0;
++	font-size: 13px;
++	line-height: 1.5;
++	color: var(--vscode-foreground);
++}
+diff --git a/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.ts b/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.ts
+index 670eb40fbf7..b88d94c1ed8 100644
+--- a/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.ts
++++ b/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.ts
+@@ -12,6 +12,7 @@ import { DisposableStore } from '../../../../../base/common/lifecycle.js';
+ import { MarkdownString } from '../../../../../base/common/htmlContent.js';
+ import { URI } from '../../../../../base/common/uri.js';
+ import { localize } from '../../../../../nls.js';
++import { ICommandService } from '../../../../../platform/commands/common/commands.js';
+ import { IEditorOptions } from '../../../../../platform/editor/common/editor.js';
+ import { IStorageService } from '../../../../../platform/storage/common/storage.js';
+ import { ITelemetryService } from '../../../../../platform/telemetry/common/telemetry.js';
+@@ -19,6 +20,14 @@ import { IThemeService } from '../../../../../platform/theme/common/themeService
+ import { ILogService } from '../../../../../platform/log/common/log.js';
+ import { IOpenerService } from '../../../../../platform/opener/common/opener.js';
+ import { isKrtError } from '../../../../../platform/krt/common/errors.js';
++import { Chapter, TourVariant } from '../ai/krtTourTypes.js';
++import { ITourGenerator, TourGenerationStatus } from '../ai/krtTourGenerator.js';
++import {
++	readReviewedChapters,
++	readVariant,
++	writeReviewedChapters,
++	writeVariant,
++} from '../ai/krtTourReviewed.js';
+ import {
+ 	AutomationEvent,
+ 	CheckConclusion,
+@@ -39,7 +48,13 @@ import { KrtPullRequestEditorInput } from './krtPullRequestEditorInput.js';
+ import { readReviewedPaths, writeReviewedPaths } from './krtPrReviewed.js';
+ 
+ type ActivityTab = 'discussion' | 'automation';
+-type SubMode = 'pr' | 'diff';
++type SubMode = 'pr' | 'diff' | 'tour';
++
++interface TourState {
++	readonly chapters: readonly Chapter[];
++	readonly model: string;
++	readonly fromCache: boolean;
++}
+ 
+ interface PatchLine {
+ 	readonly raw: string;
+@@ -94,6 +109,17 @@ export class KrtPullRequestEditorPane extends EditorPane {
+ 	private diffTreeRowsByPath = new Map<string, HTMLElement>();
+ 	private diffTreeCountEl: HTMLElement | undefined;
+ 
++	// Tour sub-mode state
++	private tourState: TourState | undefined;
++	private tourLoading = false;
++	private tourError: string | undefined;
++	private tourNoKey = false;
++	private tourVariant: TourVariant = 'chapters';
++	private tourSelectedChapterId: string | undefined;
++	private reviewedChapters: Set<string> = new Set();
++	private tourFetchToken = 0;
++	private tourSubheadingEl: HTMLElement | undefined;
++
+ 	constructor(
+ 		group: IEditorGroup,
+ 		@ITelemetryService telemetryService: ITelemetryService,
+@@ -102,6 +128,8 @@ export class KrtPullRequestEditorPane extends EditorPane {
+ 		@IPullRequestProvider private readonly pullRequestProvider: IPullRequestProvider,
+ 		@ILogService private readonly logService: ILogService,
+ 		@IOpenerService private readonly openerService: IOpenerService,
++		@ITourGenerator private readonly tourGenerator: ITourGenerator,
++		@ICommandService private readonly commandService: ICommandService,
+ 	) {
+ 		super(KrtPullRequestEditorPane.ID, group, telemetryService, themeService, krtStorageService);
+ 	}
+@@ -135,6 +163,14 @@ export class KrtPullRequestEditorPane extends EditorPane {
+ 		this.liveReviewComments = [];
+ 		this.composingAt = undefined;
+ 		this.reviewedPaths = new Set(readReviewedPaths(this.krtStorageService, input.owner, input.repo, input.number));
++		this.tourState = undefined;
++		this.tourLoading = false;
++		this.tourError = undefined;
++		this.tourNoKey = false;
++		this.tourSelectedChapterId = undefined;
++		this.tourFetchToken++;
++		this.tourVariant = readVariant(this.krtStorageService, input.owner, input.repo, input.number);
++		this.reviewedChapters = new Set(readReviewedChapters(this.krtStorageService, input.owner, input.repo, input.number));
+ 		this.renderPlaceholder(input);
+ 		this.fetchToken++;
+ 		const myToken = this.fetchToken;
+@@ -168,6 +204,7 @@ export class KrtPullRequestEditorPane extends EditorPane {
+ 		this.fetchToken++;
+ 		this.diffTreeRowsByPath = new Map();
+ 		this.diffTreeCountEl = undefined;
++		this.tourSubheadingEl = undefined;
+ 		this.bodyDisposables.clear();
+ 		super.clearInput();
+ 	}
+@@ -204,6 +241,8 @@ export class KrtPullRequestEditorPane extends EditorPane {
+ 		this.renderSubModeBar(pr);
+ 		if (this.subMode === 'diff') {
+ 			this.renderDiffView(pr);
++		} else if (this.subMode === 'tour') {
++			this.renderTourView(pr);
+ 		} else {
+ 			this.renderPrView(pr);
+ 		}
+@@ -231,8 +270,10 @@ export class KrtPullRequestEditorPane extends EditorPane {
+ 		const segmented = DOM.append(this.subModeBarElement, DOM.$('.krt-pr-segmented'));
+ 		const prBtn = this.makeSubModeButton(segmented, 'pr', localize('krt.pr.mode.pr', "PR view"));
+ 		const diffBtn = this.makeSubModeButton(segmented, 'diff', localize('krt.pr.mode.diff', "Diff"));
++		const tourBtn = this.makeSubModeButton(segmented, 'tour', localize('krt.pr.mode.tour', "Tour"));
+ 		this.bodyDisposables.add(DOM.addDisposableListener(prBtn, 'click', () => this.switchSubMode('pr', pr)));
+ 		this.bodyDisposables.add(DOM.addDisposableListener(diffBtn, 'click', () => this.switchSubMode('diff', pr)));
++		this.bodyDisposables.add(DOM.addDisposableListener(tourBtn, 'click', () => this.switchSubMode('tour', pr)));
+ 	}
+ 
+ 	private makeSubModeButton(parent: HTMLElement, mode: SubMode, label: string): HTMLButtonElement {
+@@ -997,6 +1038,411 @@ export class KrtPullRequestEditorPane extends EditorPane {
+ 		}
+ 	}
+ 
++	// ---------- Tour sub-mode ----------
++
++	private renderTourView(pr: PullRequest): void {
++		this.bodyElement.classList.remove('pr', 'diff');
++		this.bodyElement.classList.add('tour');
++
++		// Header bar with variant toggle.
++		const headerBar = DOM.append(this.bodyElement, DOM.$('.krt-pr-tour-header'));
++		const heading = DOM.append(headerBar, DOM.$('.krt-pr-tour-heading'));
++		heading.textContent = localize('krt.pr.tour.heading', "AI Tour");
++		const subHeading = DOM.append(headerBar, DOM.$('.krt-pr-tour-subheading'));
++		this.tourSubheadingEl = subHeading;
++		this.refreshTourSubheading();
++		this.renderTourVariantToggle(headerBar, pr);
++
++		const body = DOM.append(this.bodyElement, DOM.$('.krt-pr-tour-body'));
++
++		if (this.tourNoKey) {
++			this.renderTourEmptyNoKey(body);
++			return;
++		}
++		if (this.tourLoading) {
++			const loading = DOM.append(body, DOM.$('.krt-pr-empty'));
++			loading.textContent = localize('krt.pr.tour.loading', "Generating chapters with the Anthropic API…");
++			return;
++		}
++		if (this.tourError) {
++			const err = DOM.append(body, DOM.$('.krt-pr-empty.error'));
++			err.textContent = this.tourError;
++			const retry = DOM.append(body, DOM.$('button.krt-pr-tour-retry')) as HTMLButtonElement;
++			retry.type = 'button';
++			retry.textContent = localize('krt.pr.tour.retry', "Try again");
++			this.bodyDisposables.add(DOM.addDisposableListener(retry, 'click', () => {
++				this.tourError = undefined;
++				void this.loadTour(pr, /* forceRefresh */ true);
++			}));
++			return;
++		}
++		if (!this.tourState) {
++			const loading = DOM.append(body, DOM.$('.krt-pr-empty'));
++			loading.textContent = localize('krt.pr.tour.starting', "Preparing tour…");
++			void this.loadTour(pr, /* forceRefresh */ false);
++			return;
++		}
++		if (this.tourState.chapters.length === 0) {
++			const empty = DOM.append(body, DOM.$('.krt-pr-empty'));
++			empty.textContent = localize('krt.pr.tour.noChapters', "The model returned no chapters for this PR.");
++			return;
++		}
++
++		if (this.tourVariant === 'reading') {
++			this.renderTourReading(body, pr, this.tourState.chapters);
++		} else {
++			this.renderTourChapters(body, pr, this.tourState.chapters);
++		}
++	}
++
++	private renderTourEmptyNoKey(parent: HTMLElement): void {
++		const card = DOM.append(parent, DOM.$('.krt-pr-tour-empty'));
++		const heading = DOM.append(card, DOM.$('h2.krt-pr-tour-empty-heading'));
++		heading.textContent = localize('krt.pr.tour.noKeyHeading', "Bring your own Anthropic key");
++		const body = DOM.append(card, DOM.$('p.krt-pr-tour-empty-body'));
++		body.textContent = localize(
++			'krt.pr.tour.noKeyBody',
++			"KRT generates the AI Tour by calling api.anthropic.com directly with your key. Nothing is proxied through a KRT-operated server. The key is stored in your OS keychain.",
++		);
++		const cta = DOM.append(card, DOM.$('button.krt-pr-tour-cta')) as HTMLButtonElement;
++		cta.type = 'button';
++		cta.textContent = localize('krt.pr.tour.configureCta', "Configure Anthropic API Key…");
++		this.bodyDisposables.add(DOM.addDisposableListener(cta, 'click', async () => {
++			await this.commandService.executeCommand('krt.configureAnthropicKey');
++			// After the user completes the dialog, retry.
++			if (this.currentPr) {
++				this.tourNoKey = false;
++				this.tourState = undefined;
++				this.renderLoaded(this.currentPr);
++			}
++		}));
++		const modelCta = DOM.append(card, DOM.$('button.krt-pr-tour-cta-secondary')) as HTMLButtonElement;
++		modelCta.type = 'button';
++		modelCta.textContent = localize('krt.pr.tour.modelCta', "Select model…");
++		this.bodyDisposables.add(DOM.addDisposableListener(modelCta, 'click', () => {
++			void this.commandService.executeCommand('krt.selectAnthropicModel');
++		}));
++	}
++
++	private renderTourVariantToggle(parent: HTMLElement, pr: PullRequest): void {
++		const toggle = DOM.append(parent, DOM.$('.krt-pr-tour-variant'));
++		const chaptersBtn = DOM.append(toggle, DOM.$('button.krt-pr-tour-variant-btn')) as HTMLButtonElement;
++		chaptersBtn.type = 'button';
++		chaptersBtn.textContent = localize('krt.pr.tour.variantChapters', "Chapters");
++		chaptersBtn.classList.toggle('active', this.tourVariant === 'chapters');
++		const readingBtn = DOM.append(toggle, DOM.$('button.krt-pr-tour-variant-btn')) as HTMLButtonElement;
++		readingBtn.type = 'button';
++		readingBtn.textContent = localize('krt.pr.tour.variantReading', "Reading");
++		readingBtn.classList.toggle('active', this.tourVariant === 'reading');
++		const onSelect = (variant: TourVariant) => {
++			if (this.tourVariant === variant || !this.currentInput) {
++				return;
++			}
++			this.tourVariant = variant;
++			writeVariant(this.krtStorageService, this.currentInput.owner, this.currentInput.repo, this.currentInput.number, variant);
++			this.renderLoaded(pr);
++		};
++		this.bodyDisposables.add(DOM.addDisposableListener(chaptersBtn, 'click', () => onSelect('chapters')));
++		this.bodyDisposables.add(DOM.addDisposableListener(readingBtn, 'click', () => onSelect('reading')));
++	}
++
++	private renderTourChapters(parent: HTMLElement, pr: PullRequest, chapters: readonly Chapter[]): void {
++		const layout = DOM.append(parent, DOM.$('.krt-pr-tour-layout'));
++		const rail = DOM.append(layout, DOM.$('.krt-pr-tour-rail'));
++		const detail = DOM.append(layout, DOM.$('.krt-pr-tour-detail'));
++
++		// Default selected chapter.
++		const selectedId = this.tourSelectedChapterId
++			&& chapters.some(c => c.id === this.tourSelectedChapterId)
++			? this.tourSelectedChapterId
++			: chapters[0].id;
++		this.tourSelectedChapterId = selectedId;
++
++		for (const chapter of chapters) {
++			const card = DOM.append(rail, DOM.$('.krt-pr-tour-card'));
++			card.setAttribute('role', 'button');
++			card.setAttribute('tabindex', '0');
++			if (chapter.id === selectedId) {
++				card.classList.add('selected');
++			}
++			if (this.reviewedChapters.has(chapter.id)) {
++				card.classList.add('reviewed');
++			}
++			if (chapter.sensitive) {
++				card.classList.add('sensitive');
++			}
++
++			const head = DOM.append(card, DOM.$('.krt-pr-tour-card-head'));
++			const title = DOM.append(head, DOM.$('span.krt-pr-tour-card-title'));
++			title.textContent = chapter.title;
++			if (chapter.sensitive) {
++				const badge = DOM.append(head, DOM.$('span.krt-pr-tour-sensitive-badge'));
++				badge.textContent = localize('krt.pr.tour.sensitiveBadge', "Caution");
++				if (chapter.sensitiveReason) {
++					badge.title = chapter.sensitiveReason;
++				}
++			}
++
++			const summary = DOM.append(card, DOM.$('p.krt-pr-tour-card-summary'));
++			summary.textContent = chapter.summary;
++
++			const meta = DOM.append(card, DOM.$('.krt-pr-tour-card-meta'));
++			const filesCount = DOM.append(meta, DOM.$('span.krt-pr-tour-card-files'));
++			filesCount.textContent = chapter.files.length === 1
++				? localize('krt.pr.tour.oneFile', "1 file")
++				: localize('krt.pr.tour.nFiles', "{0} files", chapter.files.length);
++			const counts = DOM.append(meta, DOM.$('span.krt-pr-tour-card-counts'));
++			const add = DOM.append(counts, DOM.$('span.add'));
++			add.textContent = `+${chapter.plus}`;
++			const del = DOM.append(counts, DOM.$('span.del'));
++			del.textContent = `-${chapter.minus}`;
++
++			const reviewedLbl = DOM.append(card, DOM.$('label.krt-pr-tour-reviewed'));
++			const reviewedBox = DOM.append(reviewedLbl, DOM.$('input')) as HTMLInputElement;
++			reviewedBox.type = 'checkbox';
++			reviewedBox.checked = this.reviewedChapters.has(chapter.id);
++			const reviewedTxt = DOM.append(reviewedLbl, DOM.$('span'));
++			reviewedTxt.textContent = localize('krt.pr.tour.reviewedCheck', "Reviewed");
++			this.bodyDisposables.add(DOM.addDisposableListener(reviewedBox, 'change', e => {
++				e.stopPropagation();
++				this.toggleChapterReviewed(chapter.id, reviewedBox.checked);
++				card.classList.toggle('reviewed', reviewedBox.checked);
++				this.refreshTourSubheading();
++			}));
++			// Prevent the label's click from also bubbling as a card click.
++			this.bodyDisposables.add(DOM.addDisposableListener(reviewedLbl, 'click', e => e.stopPropagation()));
++
++			const select = () => {
++				if (this.tourSelectedChapterId === chapter.id) {
++					return;
++				}
++				this.tourSelectedChapterId = chapter.id;
++				this.renderLoaded(pr);
++			};
++			this.bodyDisposables.add(DOM.addDisposableListener(card, 'click', select));
++			this.bodyDisposables.add(DOM.addDisposableListener(card, 'keydown', e => {
++				if (e.key === 'Enter' || e.key === ' ') {
++					e.preventDefault();
++					select();
++				}
++			}));
++		}
++
++		// Detail pane shows the selected chapter's mini-diff(s).
++		const selected = chapters.find(c => c.id === selectedId) ?? chapters[0];
++		this.renderTourChapterDetail(detail, pr, selected);
++	}
++
++	private renderTourChapterDetail(parent: HTMLElement, pr: PullRequest, chapter: Chapter): void {
++		const head = DOM.append(parent, DOM.$('.krt-pr-tour-detail-head'));
++		const title = DOM.append(head, DOM.$('h2.krt-pr-tour-detail-title'));
++		title.textContent = chapter.title;
++		if (chapter.sensitive && chapter.sensitiveReason) {
++			const callout = DOM.append(parent, DOM.$('.krt-pr-tour-callout'));
++			const heading = DOM.append(callout, DOM.$('span.krt-pr-tour-callout-heading'));
++			heading.textContent = localize('krt.pr.tour.flaggedHeading', "Flagged by reviewer");
++			const body = DOM.append(callout, DOM.$('span.krt-pr-tour-callout-body'));
++			body.textContent = chapter.sensitiveReason;
++		}
++		const summary = DOM.append(parent, DOM.$('p.krt-pr-tour-detail-summary'));
++		summary.textContent = chapter.summary;
++		if (chapter.bullets.length > 0) {
++			const list = DOM.append(parent, DOM.$('ul.krt-pr-tour-detail-bullets'));
++			for (const b of chapter.bullets) {
++				const li = DOM.append(list, DOM.$('li'));
++				li.textContent = b;
++			}
++		}
++		const focusPath = chapter.diffFile && chapter.files.includes(chapter.diffFile)
++			? chapter.diffFile
++			: chapter.files[0];
++		this.renderTourMiniDiffs(parent, pr, [focusPath, ...chapter.files.filter(p => p !== focusPath)]);
++	}
++
++	private renderTourReading(parent: HTMLElement, pr: PullRequest, chapters: readonly Chapter[]): void {
++		const reading = DOM.append(parent, DOM.$('.krt-pr-tour-reading'));
++		for (const chapter of chapters) {
++			const block = DOM.append(reading, DOM.$('article.krt-pr-tour-chapter'));
++			block.setAttribute('data-chapter', chapter.id);
++			if (this.reviewedChapters.has(chapter.id)) {
++				block.classList.add('reviewed');
++			}
++			if (chapter.sensitive) {
++				block.classList.add('sensitive');
++			}
++
++			const head = DOM.append(block, DOM.$('.krt-pr-tour-chapter-head'));
++			const title = DOM.append(head, DOM.$('h2.krt-pr-tour-chapter-title'));
++			title.textContent = chapter.title;
++			const reviewedLbl = DOM.append(head, DOM.$('label.krt-pr-tour-reviewed'));
++			const reviewedBox = DOM.append(reviewedLbl, DOM.$('input')) as HTMLInputElement;
++			reviewedBox.type = 'checkbox';
++			reviewedBox.checked = this.reviewedChapters.has(chapter.id);
++			const reviewedTxt = DOM.append(reviewedLbl, DOM.$('span'));
++			reviewedTxt.textContent = localize('krt.pr.tour.reviewedCheck', "Reviewed");
++			this.bodyDisposables.add(DOM.addDisposableListener(reviewedBox, 'change', () => {
++				this.toggleChapterReviewed(chapter.id, reviewedBox.checked);
++				block.classList.toggle('reviewed', reviewedBox.checked);
++				this.refreshTourSubheading();
++			}));
++			if (chapter.sensitive && chapter.sensitiveReason) {
++				const callout = DOM.append(block, DOM.$('.krt-pr-tour-callout'));
++				const calloutHead = DOM.append(callout, DOM.$('span.krt-pr-tour-callout-heading'));
++				calloutHead.textContent = localize('krt.pr.tour.flaggedHeading', "Flagged by reviewer");
++				const calloutBody = DOM.append(callout, DOM.$('span.krt-pr-tour-callout-body'));
++				calloutBody.textContent = chapter.sensitiveReason;
++			}
++			const summary = DOM.append(block, DOM.$('p.krt-pr-tour-chapter-summary'));
++			summary.textContent = chapter.summary;
++			if (chapter.bullets.length > 0) {
++				const list = DOM.append(block, DOM.$('ul.krt-pr-tour-chapter-bullets'));
++				for (const b of chapter.bullets) {
++					const li = DOM.append(list, DOM.$('li'));
++					li.textContent = b;
++				}
++			}
++			this.renderTourMiniDiffs(block, pr, chapter.files);
++		}
++	}
++
++	private renderTourMiniDiffs(parent: HTMLElement, pr: PullRequest, paths: readonly string[]): void {
++		const filesByPath = new Map<string, PullRequestFile>();
++		for (const f of this.diffFiles ?? []) {
++			filesByPath.set(f.path, f);
++		}
++		const wrap = DOM.append(parent, DOM.$('.krt-pr-tour-mini-diffs'));
++		if (this.diffFiles === undefined) {
++			const note = DOM.append(wrap, DOM.$('.krt-pr-empty'));
++			note.textContent = localize('krt.pr.tour.diffPending', "Loading file patches…");
++			if (!this.diffFilesLoading) {
++				this.loadDiffFiles(pr);
++			}
++			return;
++		}
++		for (const path of paths) {
++			const file = filesByPath.get(path);
++			const section = DOM.append(wrap, DOM.$('.krt-pr-tour-mini-section'));
++			const head = DOM.append(section, DOM.$('.krt-pr-tour-mini-head'));
++			const status = DOM.append(head, DOM.$('span.krt-pr-diff-status-dot'));
++			const headPath = DOM.append(head, DOM.$('span.krt-pr-tour-mini-path'));
++			headPath.textContent = path;
++			if (!file) {
++				status.classList.add('changed');
++				status.textContent = '·';
++				const note = DOM.append(section, DOM.$('.krt-pr-tour-mini-empty'));
++				note.textContent = localize('krt.pr.tour.fileMissing', "(file is not in the PR's changed-files list)");
++				continue;
++			}
++			status.classList.add(file.status);
++			status.textContent = statusGlyph(file.status);
++			const counts = DOM.append(head, DOM.$('span.krt-pr-tour-mini-counts'));
++			const add = DOM.append(counts, DOM.$('span.add'));
++			add.textContent = `+${file.additions}`;
++			const del = DOM.append(counts, DOM.$('span.del'));
++			del.textContent = `-${file.deletions}`;
++			const body = DOM.append(section, DOM.$('.krt-pr-tour-mini-body'));
++			if (!file.patch) {
++				const empty = DOM.append(body, DOM.$('.krt-pr-tour-mini-empty'));
++				empty.textContent = file.status === 'renamed'
++					? localize('krt.pr.diffRenameOnly', "Rename only — no content change.")
++					: localize('krt.pr.diffNoPatchAvailable', "No patch available (binary or too large).");
++				continue;
++			}
++			for (const line of parsePatch(file.patch)) {
++				const row = DOM.append(body, DOM.$('.krt-pr-diff-line'));
++				row.classList.add(line.kind);
++				const oldNo = DOM.append(row, DOM.$('span.krt-pr-diff-lineno.old'));
++				oldNo.textContent = line.oldLine !== undefined ? String(line.oldLine) : '';
++				const newNo = DOM.append(row, DOM.$('span.krt-pr-diff-lineno.new'));
++				newNo.textContent = line.newLine !== undefined ? String(line.newLine) : '';
++				const gutter = DOM.append(row, DOM.$('span.krt-pr-diff-gutter'));
++				gutter.textContent = '';
++				const content = DOM.append(row, DOM.$('span.krt-pr-diff-line-content'));
++				const prefix = line.kind === 'add' ? '+' : line.kind === 'del' ? '-' : line.kind === 'hunk' ? '' : ' ';
++				content.textContent = line.kind === 'hunk' ? line.raw : `${prefix}${line.raw}`;
++			}
++		}
++	}
++
++	private refreshTourSubheading(): void {
++		const sub = this.tourSubheadingEl;
++		if (!sub) {
++			return;
++		}
++		if (!this.tourState) {
++			sub.textContent = '';
++			return;
++		}
++		const reviewedCount = this.tourState.chapters.filter(c => this.reviewedChapters.has(c.id)).length;
++		const total = this.tourState.chapters.length;
++		sub.textContent = localize(
++			'krt.pr.tour.progress',
++			"{0}/{1} chapters reviewed · model {2}{3}",
++			reviewedCount,
++			total,
++			this.tourState.model,
++			this.tourState.fromCache ? localize('krt.pr.tour.cached', " · cached") : '',
++		);
++	}
++
++	private toggleChapterReviewed(id: string, reviewed: boolean): void {
++		if (reviewed) {
++			this.reviewedChapters.add(id);
++		} else {
++			this.reviewedChapters.delete(id);
++		}
++		const input = this.currentInput;
++		if (input) {
++			writeReviewedChapters(this.krtStorageService, input.owner, input.repo, input.number, this.reviewedChapters);
++		}
++	}
++
++	private async loadTour(pr: PullRequest, forceRefresh: boolean): Promise<void> {
++		if (this.tourLoading) {
++			return;
++		}
++		this.tourLoading = true;
++		this.tourError = undefined;
++		this.tourFetchToken++;
++		const myToken = this.tourFetchToken;
++		this.renderLoaded(pr);
++
++		// Tour generation needs the PR file list; if not yet loaded, fetch it.
++		let files = this.diffFiles;
++		if (files === undefined) {
++			try {
++				files = await this.pullRequestProvider.getFiles(pr.url);
++			} catch (e) {
++				if (this.currentPr?.url !== pr.url || myToken !== this.tourFetchToken) {
++					return;
++				}
++				this.tourLoading = false;
++				this.tourError = isKrtError(e) ? e.message : String(e);
++				this.renderLoaded(pr);
++				return;
++			}
++			if (this.currentPr?.url !== pr.url || myToken !== this.tourFetchToken) {
++				return;
++			}
++			this.diffFiles = files;
++		}
++
++		const status: TourGenerationStatus = await this.tourGenerator.generate(pr, files, { forceRefresh });
++		if (this.currentPr?.url !== pr.url || myToken !== this.tourFetchToken) {
++			return;
++		}
++		this.tourLoading = false;
++		if (status.kind === 'no-key') {
++			this.tourNoKey = true;
++		} else if (status.kind === 'error') {
++			this.tourError = status.message;
++		} else {
++			this.tourState = status.result;
++			this.tourSelectedChapterId = status.result.chapters[0]?.id;
++		}
++		this.renderLoaded(pr);
++	}
++
+ 	private renderError(kind: string, message: string, hint: string): void {
+ 		this.titleElement.textContent = localize('krt.pr.errorTitle', "Couldn't load this PR");
+ 		this.statePillElement.textContent = '';
+-- 
+2.52.0
+
