@@ -76,4 +76,15 @@ node "$BUILD_DIR/merge-product.mjs" \
   "$BUILD_DIR/product.json" \
   "$VSCODE_DIR/product.json"
 
+# Remove MS-coupled built-in extensions we don't ship. The companion patch in
+# build/patches/krt strips references from build/npm/dirs.ts, build/lib/extensions.ts,
+# and build/gulpfile.extensions.ts so the build pipeline doesn't try to compile them.
+# Done as an rm here (not a patch) because the diff would be 2GB+ of dependency
+# tree noise; the rm is reproducible and the deleted set is small + explicit.
+echo "[prepare_vscode] removing MS-coupled built-in extensions"
+rm -rf \
+  "$VSCODE_DIR/extensions/copilot" \
+  "$VSCODE_DIR/extensions/microsoft-authentication" \
+  "$VSCODE_DIR/extensions/mermaid-chat-features"
+
 echo "[prepare_vscode] done"

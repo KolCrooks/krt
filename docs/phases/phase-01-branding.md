@@ -110,12 +110,39 @@ changes:
       when profiles exist (default install has none). Strip when
       Phase 2 replaces the workbench shell.
 
-### Walkthrough / Get Started / MS sign-in / Live Share
+### Strip MS-coupled built-in extensions
+
+- [x] `extensions/copilot/` — GitHub Copilot Chat (~2GB with deps).
+      All `aka.ms` chat URLs originate here. Deleted via
+      `prepare_vscode.sh` rm step (vs. a 2GB patch diff).
+- [x] `extensions/microsoft-authentication/` — MS sign-in extension.
+      PLAN.md Phase 1 calls for stripping MS sign-in. Deleted.
+- [x] `extensions/mermaid-chat-features/` — chat-coupled (only useful
+      with Copilot Chat). Deleted.
+- [x] Patch `0004-Drop-MS-coupled-extension-build-references.patch`
+      removes references in `build/npm/dirs.ts` (npm install
+      directories), `build/lib/extensions.ts` (`nativeExtensions`,
+      `esbuildMediaScripts`), and `build/gulpfile.extensions.ts`
+      (tsconfig list). Vestigial refs in `excludedExtensions` and
+      `packageCopilotExtensionStream` left alone — they handle the
+      missing-dir case gracefully and patching them would just
+      increase rot surface.
+- [ ] **Deferred**: `src/vs/workbench/contrib/chat/` still references
+      `defaultChatAgent.extensionId` in 40+ files. With the copilot
+      extension gone, the chat UI will show empty/unconfigured. Phase 5
+      replaces chat with the KRT AI panel.
+
+### Walkthrough / Get Started / Live Share
 
 - [ ] Find the registration sites (likely
-      `workbench.common.main.ts` side-effect imports).
+      `workbench.common.main.ts` side-effect imports +
+      `src/vs/workbench/contrib/welcomeGettingStarted/`,
+      `src/vs/workbench/contrib/welcomeOnboarding/`).
 - [ ] Patch the import out (preferred over disabling at runtime — leaves
       a smaller binary and can't be re-enabled by config).
+- [ ] Live Share isn't bundled in 1.118.1 OSS build (no `liveshare`
+      extension in `extensions/`). Nothing to do here unless upstream
+      adds it back.
 
 ### Icons
 
