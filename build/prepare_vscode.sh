@@ -87,4 +87,12 @@ rm -rf \
   "$VSCODE_DIR/extensions/microsoft-authentication" \
   "$VSCODE_DIR/extensions/mermaid-chat-features"
 
+# Swap in KRT placeholder icons. The .icns / .png assets live in build/icons/
+# (committed, regenerable via build/icons/build-icns.sh). Phase 11 swaps these
+# for polished assets. We don't touch the win32 .ico — that's packaging
+# territory and the dev launch doesn't need it.
+echo "[prepare_vscode] swapping in KRT icons"
+cp "$BUILD_DIR/icons/krt.icns" "$VSCODE_DIR/resources/darwin/code.icns"
+cp "$BUILD_DIR/icons/krt.png"  "$VSCODE_DIR/resources/linux/code.png"
+
 echo "[prepare_vscode] done"

@@ -186,16 +186,27 @@ changes:
 
 ### Icons
 
-- [ ] Source asset for the KRT mark. Options:
-  - Use `design/kol-s-review-tool/project/uploads/*.png` if any is the
-    actual KRT icon (need to inspect).
-  - Otherwise generate a placeholder "K" mark (block letter on indigo
-    accent, matches the design tokens) — replace later with a polished
-    asset in Phase 11.
-- [ ] Convert: `.icns` (macOS), `.ico` (win32), `.png` (linux).
-- [ ] Patch into `vscode/resources/darwin/code.icns`,
-      `vscode/resources/win32/code_*.png` + `*.ico`,
-      `vscode/resources/linux/code.png`.
+- [x] Source asset: design uploads turned out to be screenshots, not
+      icon assets. Generated a placeholder: white bold "K" centered on
+      the design's deep-indigo accent (`rgb(79, 71, 197)` ≈
+      `oklch(0.5 0.18 280)`). Phase 11 swaps for a polished asset.
+- [x] `build/icons/generate.py` — Python+PIL renders the 1024×1024
+      source PNG.
+- [x] `build/icons/build-icns.sh` — sips downscales to Apple's
+      iconset sizes, `iconutil -c icns` compiles the `.icns`. Same
+      script copies the 1024 PNG as `krt.png` for Linux.
+- [x] Committed: `build/icons/krt-1024.png` (source),
+      `build/icons/krt.icns` (84 KB), `build/icons/krt.png` (17 KB).
+- [x] `prepare_vscode.sh` swaps `.icns` and `.png` into
+      `vscode/resources/darwin/code.icns` and
+      `vscode/resources/linux/code.png`. Win32 `.ico` deferred to
+      Phase 11 packaging — the dev launch doesn't need it and there's
+      no clean cross-platform `.ico` toolchain on macOS without
+      ImageMagick.
+- [ ] **Note**: dev-mode Electron launch on macOS uses Electron's
+      default app icon (yellow/orange/blue), not `code.icns`. The
+      .icns swap takes effect for *packaged* builds (Phase 11). File
+      is in place + correct format.
 
 ### Demo gate
 
