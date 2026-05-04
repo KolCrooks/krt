@@ -1,9 +1,9 @@
 # Phase 1 — Branding + product identity
 
-Goal: a build that calls itself "Kol's Review Tool" everywhere a user can
-see it, points its extension gallery at open-vsx, has all upstream
-telemetry stripped, locks to a single window, and ships KRT icons.
-By the end, no Microsoft strings should reach the production binary.
+Goal: a build that calls itself "KRT" everywhere a user can see it,
+points its extension gallery at open-vsx, has all upstream telemetry
+stripped, locks to a single window, and ships KRT icons. By the end,
+no Microsoft strings should reach the production binary.
 
 Reference: PLAN.md §4 Phase 1. PLAN.md is the source of truth; this file
 is the working checklist.
@@ -30,8 +30,8 @@ changes:
    `resources/win32/code.ico`, `resources/linux/code.png`.
 7. **Smoke-test extension host** — install rust-analyzer + ESLint +
    Prettier from open-vsx; verify hover/diagnostics/format on `.rs`/`.ts`.
-8. **Demo gate** — full launch as "Kol's Review Tool", Cmd+Shift+N is a
-   no-op, rust-analyzer hover working in a `.rs` file.
+8. **Demo gate** — full launch as "KRT", Cmd+Shift+N is a no-op,
+   rust-analyzer hover working in a `.rs` file.
 
 ## Tasks
 
@@ -133,8 +133,8 @@ changes:
 ### Demo gate
 
 - [ ] `bash build/build.sh && ./vscode/scripts/code.sh` launches.
-- [ ] Window title says "Kol's Review Tool".
-- [ ] About dialog says "Kol's Review Tool".
+- [ ] Window title says "KRT".
+- [ ] About dialog says "KRT".
 - [ ] No "Visual Studio Code" / "VS Code" / "Microsoft" strings in About
       (except attribution, e.g. NOTICE/credits).
 - [ ] Cmd+Shift+N is a no-op (or shows "disabled" message).

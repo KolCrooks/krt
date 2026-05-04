@@ -1,4 +1,4 @@
-# KRT — Kol's Review Tool
+# KRT
 
 Desktop code-review app, shipped as a VSCodium fork. **Pre-Phase-0
 scaffolding** — there is nothing to run yet.

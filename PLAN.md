@@ -1,4 +1,4 @@
-# Kol's Review Tool (KRT) — Implementation Plan
+# KRT — Implementation Plan
 
 A desktop code-review app, shipped as a VSCodium fork. This document captures the
 shape of the work: what we're building, why VSCodium is a viable foundation,
@@ -256,7 +256,7 @@ Rules:
 - **Demo**: stock VSCodium build with one KRT status bar item visible.
 
 ### Phase 1 — Branding + product identity (4 days)
-- `product.json`: `nameShort: "KRT"`, `nameLong: "Kol's Review Tool"`,
+- `product.json`: `nameShort: "KRT"`, `nameLong: "KRT"`,
   `applicationName: "krt"`, `urlProtocol: "krt"`, bundle id, icon set.
 - Point the extension gallery at **open-vsx.org** (`extensionsGallery` block
   with `serviceUrl`, `itemUrl`, `resourceUrlTemplate`); same wiring VSCodium
@@ -277,7 +277,7 @@ Rules:
 - Lock the app to **single-window**: disable `File → New Window` and the
   `workbench.action.newWindow` command; remove the multi-window code paths
   in `electron-main`.
-- Verify build still launches as "Kol's Review Tool" with our branding.
+- Verify build still launches as "KRT" with our branding.
 - **Demo**: dock shows KRT icon, About dialog says KRT, no Microsoft strings,
   Cmd+Shift+N is a no-op, rust-analyzer installed from open-vsx is giving you
   hover docs in a `.rs` file.
