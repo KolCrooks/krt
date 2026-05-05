@@ -1,0 +1,838 @@
+From 9350e9665972f827466a56d0d9b036071c0f197c Mon Sep 17 00:00:00 2001
+From: Kol Crooks <kol.crooks@datadoghq.com>
+Date: Tue, 5 May 2026 09:58:26 -0400
+Subject: [PATCH] Phase 8: Storyboard sub-mode (chapter dependency graph)
+
+Adds a fourth sub-mode to the PR editor that visualises the
+Phase-7 chapter graph using `Chapter.dependsOn[]`. Pure SVG/DOM
+inside the existing EditorPane (no React webview); tier-by-
+dependency-depth layout with single-bend Manhattan edge routing
+and stagger ports for nodes with multiple incoming/outgoing
+edges. Hover-to-spotlight dims unrelated nodes/edges; clicking
+a node populates a detail rail with the chapter's title,
+summary, bullets, and clickable upstream/downstream
+connections.
+---
+ .../krt/browser/ai/krtStoryboardLayout.ts     | 229 ++++++++++++++
+ .../browser/pr/krtPullRequestEditorPane.css   | 232 ++++++++++++++
+ .../browser/pr/krtPullRequestEditorPane.ts    | 283 +++++++++++++++++-
+ 3 files changed, 743 insertions(+), 1 deletion(-)
+ create mode 100644 src/vs/workbench/contrib/krt/browser/ai/krtStoryboardLayout.ts
+
+diff --git a/src/vs/workbench/contrib/krt/browser/ai/krtStoryboardLayout.ts b/src/vs/workbench/contrib/krt/browser/ai/krtStoryboardLayout.ts
+new file mode 100644
+index 00000000000..629b39edcc2
+--- /dev/null
++++ b/src/vs/workbench/contrib/krt/browser/ai/krtStoryboardLayout.ts
+@@ -0,0 +1,229 @@
++/*---------------------------------------------------------------------------------------------
++ *  Copyright (c) Microsoft Corporation. All rights reserved.
++ *  Licensed under the MIT License. See License.txt in the project root for license information.
++ *--------------------------------------------------------------------------------------------*/
++
++import { Chapter } from './krtTourTypes.js';
++
++/**
++ * Storyboard layout — pure function over `Chapter[]`. No DOM
++ * imports. Renderer takes the result and absolutely-positions
++ * cards + draws SVG edge paths.
++ *
++ * Layout strategy:
++ *   - Tier = longest path from a chapter with no dependencies.
++ *     Cycles (rare but possible if the model emits one) are
++ *     broken by dropping the back-edge during DFS.
++ *   - Within a tier, chapters are ordered by their first
++ *     appearance in the input array (stable for re-renders).
++ *   - Edges are routed Manhattan-style (right edge of source ->
++ *     mid-channel between tiers -> left edge of target).
++ *   - Multiple edges into / out of the same node are vertically
++ *     staggered on its left/right edge so they don't overlap.
++ */
++
++export interface StoryboardNode {
++	readonly id: string;
++	readonly tier: number;
++	readonly x: number;
++	readonly y: number;
++	readonly width: number;
++	readonly height: number;
++}
++
++export interface StoryboardEdge {
++	readonly from: string;
++	readonly to: string;
++	/** SVG path `d` attribute (Manhattan with one bend). */
++	readonly path: string;
++}
++
++export interface StoryboardLayout {
++	readonly nodes: readonly StoryboardNode[];
++	readonly edges: readonly StoryboardEdge[];
++	readonly width: number;
++	readonly height: number;
++}
++
++export interface StoryboardLayoutOptions {
++	readonly nodeWidth: number;
++	readonly nodeHeight: number;
++	/** Horizontal gap between tier columns. */
++	readonly columnGap: number;
++	/** Vertical gap between rows within a tier. */
++	readonly rowGap: number;
++	/** Padding around the whole graph. */
++	readonly padding: number;
++}
++
++export const DEFAULT_LAYOUT_OPTIONS: StoryboardLayoutOptions = {
++	nodeWidth: 220,
++	nodeHeight: 96,
++	columnGap: 96,
++	rowGap: 24,
++	padding: 32,
++};
++
++export function layoutStoryboard(
++	chapters: readonly Chapter[],
++	options: StoryboardLayoutOptions = DEFAULT_LAYOUT_OPTIONS,
++): StoryboardLayout {
++	const { nodeWidth, nodeHeight, columnGap, rowGap, padding } = options;
++
++	const ids = new Set(chapters.map(c => c.id));
++	// Filter dependsOn to known ids (model occasionally references
++	// nonexistent chapters).
++	const deps = new Map<string, string[]>();
++	for (const c of chapters) {
++		deps.set(c.id, c.dependsOn.filter(d => ids.has(d) && d !== c.id));
++	}
++
++	const tiers = assignTiers(chapters, deps);
++	const tierCount = chapters.length === 0 ? 0 : Math.max(...tiers.values()) + 1;
++
++	// Bucket nodes by tier in input order.
++	const byTier: string[][] = Array.from({ length: tierCount }, () => []);
++	for (const c of chapters) {
++		byTier[tiers.get(c.id)!].push(c.id);
++	}
++
++	const nodes: StoryboardNode[] = [];
++	const positions = new Map<string, StoryboardNode>();
++	for (let t = 0; t < tierCount; t++) {
++		const column = byTier[t];
++		const columnHeight = column.length * nodeHeight + Math.max(0, column.length - 1) * rowGap;
++		// Centre the column vertically against the tallest column.
++		const tallest = byTier.reduce((max, col) => {
++			const h = col.length * nodeHeight + Math.max(0, col.length - 1) * rowGap;
++			return Math.max(max, h);
++		}, 0);
++		const yOffset = padding + (tallest - columnHeight) / 2;
++		for (let i = 0; i < column.length; i++) {
++			const id = column[i];
++			const node: StoryboardNode = {
++				id,
++				tier: t,
++				x: padding + t * (nodeWidth + columnGap),
++				y: yOffset + i * (nodeHeight + rowGap),
++				width: nodeWidth,
++				height: nodeHeight,
++			};
++			nodes.push(node);
++			positions.set(id, node);
++		}
++	}
++
++	const totalHeight = byTier.reduce((max, col) => {
++		const h = col.length * nodeHeight + Math.max(0, col.length - 1) * rowGap;
++		return Math.max(max, h);
++	}, 0) + padding * 2;
++	const totalWidth = tierCount === 0
++		? padding * 2
++		: padding * 2 + tierCount * nodeWidth + Math.max(0, tierCount - 1) * columnGap;
++
++	const edges = routeEdges(chapters, deps, positions);
++	return { nodes, edges, width: totalWidth, height: totalHeight };
++}
++
++/**
++ * Assign each chapter a tier = longest dependency-path length.
++ * Implemented via memoized DFS with a visiting-set to break
++ * cycles (back-edges are ignored, treated as if they didn't
++ * exist).
++ */
++function assignTiers(
++	chapters: readonly Chapter[],
++	deps: Map<string, string[]>,
++): Map<string, number> {
++	const tier = new Map<string, number>();
++	const visiting = new Set<string>();
++	const visit = (id: string): number => {
++		const cached = tier.get(id);
++		if (cached !== undefined) {
++			return cached;
++		}
++		if (visiting.has(id)) {
++			// Cycle — caller will treat the back-edge as missing.
++			return 0;
++		}
++		visiting.add(id);
++		const ds = deps.get(id) ?? [];
++		let max = -1;
++		for (const d of ds) {
++			max = Math.max(max, visit(d));
++		}
++		visiting.delete(id);
++		const t = max + 1;
++		tier.set(id, t);
++		return t;
++	};
++	for (const c of chapters) {
++		visit(c.id);
++	}
++	return tier;
++}
++
++function routeEdges(
++	chapters: readonly Chapter[],
++	deps: Map<string, string[]>,
++	positions: Map<string, StoryboardNode>,
++): StoryboardEdge[] {
++	// Bucket edges by their target / source so we can stagger
++	// multiple incoming / outgoing edges along the node's edge.
++	const incoming = new Map<string, string[]>();
++	const outgoing = new Map<string, string[]>();
++	const push = (map: Map<string, string[]>, key: string, value: string) => {
++		const existing = map.get(key);
++		if (existing) {
++			existing.push(value);
++		} else {
++			map.set(key, [value]);
++		}
++	};
++	for (const c of chapters) {
++		for (const d of deps.get(c.id) ?? []) {
++			push(incoming, c.id, d);
++			push(outgoing, d, c.id);
++		}
++	}
++
++	const portY = (count: number, index: number, top: number, height: number): number => {
++		// Distribute `count` ports evenly along the node's vertical
++		// edge, with a small inset so they don't stack at the corners.
++		const inset = Math.min(12, height / 4);
++		if (count === 1) {
++			return top + height / 2;
++		}
++		const usable = height - inset * 2;
++		return top + inset + (usable * index) / (count - 1);
++	};
++
++	const edges: StoryboardEdge[] = [];
++	for (const c of chapters) {
++		const ds = deps.get(c.id) ?? [];
++		const inList = incoming.get(c.id) ?? [];
++		const target = positions.get(c.id);
++		if (!target) {
++			continue;
++		}
++		for (const dep of ds) {
++			const source = positions.get(dep);
++			if (!source) {
++				continue;
++			}
++			const outList = outgoing.get(dep) ?? [];
++			const sourceIdx = outList.indexOf(c.id);
++			const targetIdx = inList.indexOf(dep);
++			const sx = source.x + source.width;
++			const sy = portY(outList.length, sourceIdx, source.y, source.height);
++			const tx = target.x;
++			const ty = portY(inList.length, targetIdx, target.y, target.height);
++			// Single-bend Manhattan: out from source by half the gap,
++			// vertical to target's y, then in to target.
++			const midX = (sx + tx) / 2;
++			const path = `M ${sx} ${sy} L ${midX} ${sy} L ${midX} ${ty} L ${tx} ${ty}`;
++			edges.push({ from: dep, to: c.id, path });
++		}
++	}
++	return edges;
++}
+diff --git a/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.css b/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.css
+index 9c4eee9eafb..60ca733f4d3 100644
+--- a/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.css
++++ b/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.css
+@@ -1434,3 +1434,235 @@
+ 	line-height: 1.5;
+ 	color: var(--vscode-foreground);
+ }
++
++/* ---------- Storyboard sub-mode ---------- */
++
++.krt-pr-editor-body.storyboard {
++	display: flex;
++	flex-direction: column;
++	gap: 12px;
++	padding: 16px 24px 24px;
++	overflow: hidden;
++}
++
++.krt-pr-storyboard-header {
++	display: flex;
++	align-items: baseline;
++	gap: 12px;
++	flex-wrap: wrap;
++	padding-bottom: 8px;
++	border-bottom: 1px solid var(--vscode-widget-border, rgba(127, 127, 127, 0.2));
++}
++
++.krt-pr-storyboard-heading {
++	font-size: 15px;
++	font-weight: 600;
++	color: var(--vscode-foreground);
++}
++
++.krt-pr-storyboard-subheading {
++	font-size: 12px;
++	color: var(--vscode-descriptionForeground);
++}
++
++.krt-pr-storyboard-body {
++	flex: 1;
++	min-height: 0;
++	overflow: hidden;
++}
++
++.krt-pr-storyboard-layout {
++	display: grid;
++	grid-template-columns: minmax(0, 1fr) 320px;
++	gap: 16px;
++	height: 100%;
++}
++
++.krt-pr-storyboard-canvas {
++	position: relative;
++	overflow: auto;
++	border: 1px solid var(--vscode-widget-border, rgba(127, 127, 127, 0.2));
++	border-radius: 8px;
++	background: var(--vscode-editor-background, transparent);
++}
++
++.krt-pr-storyboard-edges {
++	position: absolute;
++	left: 0;
++	top: 0;
++	pointer-events: none;
++	overflow: visible;
++}
++
++.krt-pr-storyboard-edge {
++	fill: none;
++	stroke: var(--vscode-editorLineNumber-foreground, rgba(127, 127, 127, 0.6));
++	stroke-width: 1.5;
++	transition: stroke 120ms ease, opacity 120ms ease;
++}
++
++.krt-pr-storyboard-arrowhead {
++	fill: var(--vscode-editorLineNumber-foreground, rgba(127, 127, 127, 0.6));
++}
++
++.krt-pr-storyboard-canvas.hovering .krt-pr-storyboard-edge.dimmed {
++	opacity: 0.15;
++}
++
++.krt-pr-storyboard-canvas.hovering .krt-pr-storyboard-edge.highlight {
++	stroke: var(--vscode-focusBorder, #007acc);
++	stroke-width: 2;
++}
++
++.krt-pr-storyboard-node {
++	position: absolute;
++	display: flex;
++	flex-direction: column;
++	gap: 6px;
++	padding: 10px 12px;
++	box-sizing: border-box;
++	border: 1px solid var(--vscode-widget-border, rgba(127, 127, 127, 0.2));
++	border-left: 3px solid var(--vscode-focusBorder, #007acc);
++	border-radius: 8px;
++	background: var(--vscode-editorWidget-background, var(--vscode-editor-background));
++	color: var(--vscode-foreground);
++	cursor: pointer;
++	transition: opacity 120ms ease, box-shadow 120ms ease, border-color 120ms ease;
++	overflow: hidden;
++}
++
++.krt-pr-storyboard-node[data-tier="0"] { border-left-color: var(--vscode-charts-blue, #4fc1ff); }
++.krt-pr-storyboard-node[data-tier="1"] { border-left-color: var(--vscode-charts-green, #89d185); }
++.krt-pr-storyboard-node[data-tier="2"] { border-left-color: var(--vscode-charts-yellow, #ffcb6b); }
++.krt-pr-storyboard-node[data-tier="3"] { border-left-color: var(--vscode-charts-orange, #f48771); }
++.krt-pr-storyboard-node[data-tier="4"] { border-left-color: var(--vscode-charts-red, #f44747); }
++.krt-pr-storyboard-node[data-tier="5"] { border-left-color: var(--vscode-charts-purple, #b180d7); }
++
++.krt-pr-storyboard-node.sensitive {
++	border-color: var(--vscode-editorWarning-foreground, #c2c200);
++}
++
++.krt-pr-storyboard-node.reviewed {
++	opacity: 0.6;
++}
++
++.krt-pr-storyboard-node.selected {
++	box-shadow: 0 0 0 2px var(--vscode-focusBorder, #007acc) inset;
++}
++
++.krt-pr-storyboard-canvas.hovering .krt-pr-storyboard-node.dimmed {
++	opacity: 0.25;
++}
++
++.krt-pr-storyboard-canvas.hovering .krt-pr-storyboard-node.highlight {
++	box-shadow: 0 0 0 2px var(--vscode-focusBorder, #007acc) inset;
++}
++
++.krt-pr-storyboard-node-title {
++	font-size: 13px;
++	font-weight: 600;
++	white-space: nowrap;
++	overflow: hidden;
++	text-overflow: ellipsis;
++}
++
++.krt-pr-storyboard-node-meta {
++	display: flex;
++	align-items: center;
++	justify-content: space-between;
++	font-size: 11px;
++	color: var(--vscode-descriptionForeground);
++}
++
++.krt-pr-storyboard-node-counts .add {
++	color: var(--vscode-gitDecoration-addedResourceForeground, #587c0c);
++	margin-right: 6px;
++}
++
++.krt-pr-storyboard-node-counts .del {
++	color: var(--vscode-gitDecoration-deletedResourceForeground, #ad0707);
++}
++
++.krt-pr-storyboard-detail {
++	display: flex;
++	flex-direction: column;
++	gap: 12px;
++	padding: 16px;
++	border: 1px solid var(--vscode-widget-border, rgba(127, 127, 127, 0.2));
++	border-radius: 8px;
++	background: var(--vscode-editor-background, transparent);
++	overflow: auto;
++}
++
++.krt-pr-storyboard-detail-empty {
++	font-size: 12px;
++	color: var(--vscode-descriptionForeground);
++	font-style: italic;
++}
++
++.krt-pr-storyboard-detail-head {
++	display: flex;
++	align-items: center;
++	gap: 8px;
++	flex-wrap: wrap;
++}
++
++.krt-pr-storyboard-detail-title {
++	margin: 0;
++	font-size: 15px;
++	font-weight: 600;
++	color: var(--vscode-foreground);
++}
++
++.krt-pr-storyboard-detail-summary {
++	margin: 0;
++	font-size: 13px;
++	line-height: 1.5;
++	color: var(--vscode-foreground);
++}
++
++.krt-pr-storyboard-detail-bullets {
++	margin: 0;
++	padding-left: 20px;
++	font-size: 12px;
++	line-height: 1.5;
++	color: var(--vscode-foreground);
++}
++
++.krt-pr-storyboard-connections {
++	display: flex;
++	flex-direction: column;
++	gap: 6px;
++	padding-top: 8px;
++	border-top: 1px dashed var(--vscode-widget-border, rgba(127, 127, 127, 0.2));
++}
++
++.krt-pr-storyboard-connections-heading {
++	font-size: 11px;
++	font-weight: 600;
++	text-transform: uppercase;
++	letter-spacing: 0.04em;
++	color: var(--vscode-descriptionForeground);
++}
++
++.krt-pr-storyboard-connections-empty {
++	font-size: 12px;
++	color: var(--vscode-descriptionForeground);
++	font-style: italic;
++}
++
++.krt-pr-storyboard-connections-list {
++	margin: 0;
++	padding-left: 16px;
++	font-size: 12px;
++}
++
++.krt-pr-storyboard-connection {
++	color: var(--vscode-textLink-foreground);
++	cursor: pointer;
++	text-decoration: none;
++}
++
++.krt-pr-storyboard-connection:hover {
++	text-decoration: underline;
++}
+diff --git a/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.ts b/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.ts
+index b88d94c1ed8..868f540365b 100644
+--- a/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.ts
++++ b/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.ts
+@@ -22,6 +22,7 @@ import { IOpenerService } from '../../../../../platform/opener/common/opener.js'
+ import { isKrtError } from '../../../../../platform/krt/common/errors.js';
+ import { Chapter, TourVariant } from '../ai/krtTourTypes.js';
+ import { ITourGenerator, TourGenerationStatus } from '../ai/krtTourGenerator.js';
++import { layoutStoryboard } from '../ai/krtStoryboardLayout.js';
+ import {
+ 	readReviewedChapters,
+ 	readVariant,
+@@ -48,7 +49,7 @@ import { KrtPullRequestEditorInput } from './krtPullRequestEditorInput.js';
+ import { readReviewedPaths, writeReviewedPaths } from './krtPrReviewed.js';
+ 
+ type ActivityTab = 'discussion' | 'automation';
+-type SubMode = 'pr' | 'diff' | 'tour';
++type SubMode = 'pr' | 'diff' | 'tour' | 'storyboard';
+ 
+ interface TourState {
+ 	readonly chapters: readonly Chapter[];
+@@ -120,6 +121,9 @@ export class KrtPullRequestEditorPane extends EditorPane {
+ 	private tourFetchToken = 0;
+ 	private tourSubheadingEl: HTMLElement | undefined;
+ 
++	// Storyboard sub-mode state
++	private storyboardSelectedId: string | undefined;
++
+ 	constructor(
+ 		group: IEditorGroup,
+ 		@ITelemetryService telemetryService: ITelemetryService,
+@@ -169,6 +173,7 @@ export class KrtPullRequestEditorPane extends EditorPane {
+ 		this.tourNoKey = false;
+ 		this.tourSelectedChapterId = undefined;
+ 		this.tourFetchToken++;
++		this.storyboardSelectedId = undefined;
+ 		this.tourVariant = readVariant(this.krtStorageService, input.owner, input.repo, input.number);
+ 		this.reviewedChapters = new Set(readReviewedChapters(this.krtStorageService, input.owner, input.repo, input.number));
+ 		this.renderPlaceholder(input);
+@@ -243,6 +248,8 @@ export class KrtPullRequestEditorPane extends EditorPane {
+ 			this.renderDiffView(pr);
+ 		} else if (this.subMode === 'tour') {
+ 			this.renderTourView(pr);
++		} else if (this.subMode === 'storyboard') {
++			this.renderStoryboardView(pr);
+ 		} else {
+ 			this.renderPrView(pr);
+ 		}
+@@ -271,9 +278,11 @@ export class KrtPullRequestEditorPane extends EditorPane {
+ 		const prBtn = this.makeSubModeButton(segmented, 'pr', localize('krt.pr.mode.pr', "PR view"));
+ 		const diffBtn = this.makeSubModeButton(segmented, 'diff', localize('krt.pr.mode.diff', "Diff"));
+ 		const tourBtn = this.makeSubModeButton(segmented, 'tour', localize('krt.pr.mode.tour', "Tour"));
++		const storyboardBtn = this.makeSubModeButton(segmented, 'storyboard', localize('krt.pr.mode.storyboard', "Storyboard"));
+ 		this.bodyDisposables.add(DOM.addDisposableListener(prBtn, 'click', () => this.switchSubMode('pr', pr)));
+ 		this.bodyDisposables.add(DOM.addDisposableListener(diffBtn, 'click', () => this.switchSubMode('diff', pr)));
+ 		this.bodyDisposables.add(DOM.addDisposableListener(tourBtn, 'click', () => this.switchSubMode('tour', pr)));
++		this.bodyDisposables.add(DOM.addDisposableListener(storyboardBtn, 'click', () => this.switchSubMode('storyboard', pr)));
+ 	}
+ 
+ 	private makeSubModeButton(parent: HTMLElement, mode: SubMode, label: string): HTMLButtonElement {
+@@ -1443,6 +1452,278 @@ export class KrtPullRequestEditorPane extends EditorPane {
+ 		this.renderLoaded(pr);
+ 	}
+ 
++	// ---------- Storyboard sub-mode ----------
++
++	private renderStoryboardView(pr: PullRequest): void {
++		this.bodyElement.classList.remove('pr', 'diff', 'tour');
++		this.bodyElement.classList.add('storyboard');
++
++		const headerBar = DOM.append(this.bodyElement, DOM.$('.krt-pr-storyboard-header'));
++		const heading = DOM.append(headerBar, DOM.$('.krt-pr-storyboard-heading'));
++		heading.textContent = localize('krt.pr.storyboard.heading', "Storyboard");
++		const subHeading = DOM.append(headerBar, DOM.$('.krt-pr-storyboard-subheading'));
++		subHeading.textContent = this.tourState
++			? localize(
++				'krt.pr.storyboard.sub',
++				"{0} chapters · {1} dependencies",
++				this.tourState.chapters.length,
++				this.tourState.chapters.reduce((sum, c) => sum + c.dependsOn.length, 0),
++			)
++			: '';
++
++		const body = DOM.append(this.bodyElement, DOM.$('.krt-pr-storyboard-body'));
++
++		if (this.tourNoKey) {
++			this.renderTourEmptyNoKey(body);
++			return;
++		}
++		if (this.tourLoading) {
++			const loading = DOM.append(body, DOM.$('.krt-pr-empty'));
++			loading.textContent = localize('krt.pr.storyboard.loading', "Generating chapters with the Anthropic API…");
++			return;
++		}
++		if (this.tourError) {
++			const err = DOM.append(body, DOM.$('.krt-pr-empty.error'));
++			err.textContent = this.tourError;
++			const retry = DOM.append(body, DOM.$('button.krt-pr-tour-retry')) as HTMLButtonElement;
++			retry.type = 'button';
++			retry.textContent = localize('krt.pr.tour.retry', "Try again");
++			this.bodyDisposables.add(DOM.addDisposableListener(retry, 'click', () => {
++				this.tourError = undefined;
++				void this.loadTour(pr, /* forceRefresh */ true);
++			}));
++			return;
++		}
++		if (!this.tourState) {
++			const loading = DOM.append(body, DOM.$('.krt-pr-empty'));
++			loading.textContent = localize('krt.pr.storyboard.starting', "Preparing storyboard…");
++			void this.loadTour(pr, /* forceRefresh */ false);
++			return;
++		}
++		if (this.tourState.chapters.length === 0) {
++			const empty = DOM.append(body, DOM.$('.krt-pr-empty'));
++			empty.textContent = localize('krt.pr.storyboard.noChapters', "The model returned no chapters for this PR.");
++			return;
++		}
++
++		this.renderStoryboardGraph(body, this.tourState.chapters);
++	}
++
++	private renderStoryboardGraph(parent: HTMLElement, chapters: readonly Chapter[]): void {
++		const layout = layoutStoryboard(chapters);
++
++		const wrap = DOM.append(parent, DOM.$('.krt-pr-storyboard-layout'));
++		const canvas = DOM.append(wrap, DOM.$('.krt-pr-storyboard-canvas'));
++		canvas.style.width = `${layout.width}px`;
++		canvas.style.height = `${layout.height}px`;
++
++		// Edges layer (SVG) drawn behind the node cards.
++		const SVG_NS = 'http://www.w3.org/2000/svg';
++		const svg = document.createElementNS(SVG_NS, 'svg');
++		svg.setAttribute('class', 'krt-pr-storyboard-edges');
++		svg.setAttribute('width', String(layout.width));
++		svg.setAttribute('height', String(layout.height));
++		svg.setAttribute('viewBox', `0 0 ${layout.width} ${layout.height}`);
++		// Arrowhead marker.
++		const defs = document.createElementNS(SVG_NS, 'defs');
++		const marker = document.createElementNS(SVG_NS, 'marker');
++		marker.setAttribute('id', 'krt-storyboard-arrow');
++		marker.setAttribute('viewBox', '0 0 10 10');
++		marker.setAttribute('refX', '9');
++		marker.setAttribute('refY', '5');
++		marker.setAttribute('markerWidth', '6');
++		marker.setAttribute('markerHeight', '6');
++		marker.setAttribute('orient', 'auto-start-reverse');
++		const arrowPath = document.createElementNS(SVG_NS, 'path');
++		arrowPath.setAttribute('d', 'M 0 0 L 10 5 L 0 10 z');
++		arrowPath.setAttribute('class', 'krt-pr-storyboard-arrowhead');
++		marker.appendChild(arrowPath);
++		defs.appendChild(marker);
++		svg.appendChild(defs);
++
++		const edgeEls = new Map<string, SVGPathElement>();
++		const edgeKey = (from: string, to: string) => `${from}->${to}`;
++		for (const edge of layout.edges) {
++			const path = document.createElementNS(SVG_NS, 'path');
++			path.setAttribute('class', 'krt-pr-storyboard-edge');
++			path.setAttribute('d', edge.path);
++			path.setAttribute('marker-end', 'url(#krt-storyboard-arrow)');
++			path.setAttribute('data-from', edge.from);
++			path.setAttribute('data-to', edge.to);
++			svg.appendChild(path);
++			edgeEls.set(edgeKey(edge.from, edge.to), path);
++		}
++		canvas.appendChild(svg);
++
++		const chaptersById = new Map(chapters.map(c => [c.id, c] as const));
++		const nodeEls = new Map<string, HTMLElement>();
++		const incoming = new Map<string, string[]>();
++		const outgoing = new Map<string, string[]>();
++		for (const c of chapters) {
++			for (const d of c.dependsOn) {
++				if (!chaptersById.has(d) || d === c.id) {
++					continue;
++				}
++				const inList = incoming.get(c.id) ?? incoming.set(c.id, []).get(c.id);
++				inList!.push(d);
++				const outList = outgoing.get(d) ?? outgoing.set(d, []).get(d);
++				outList!.push(c.id);
++			}
++		}
++
++		for (const node of layout.nodes) {
++			const chapter = chaptersById.get(node.id);
++			if (!chapter) {
++				continue;
++			}
++			const card = DOM.append(canvas, DOM.$('.krt-pr-storyboard-node'));
++			card.setAttribute('role', 'button');
++			card.setAttribute('tabindex', '0');
++			card.setAttribute('data-node', node.id);
++			card.setAttribute('data-tier', String(node.tier));
++			card.style.left = `${node.x}px`;
++			card.style.top = `${node.y}px`;
++			card.style.width = `${node.width}px`;
++			card.style.height = `${node.height}px`;
++			if (chapter.sensitive) {
++				card.classList.add('sensitive');
++			}
++			if (this.reviewedChapters.has(chapter.id)) {
++				card.classList.add('reviewed');
++			}
++
++			const title = DOM.append(card, DOM.$('.krt-pr-storyboard-node-title'));
++			title.textContent = chapter.title;
++			const meta = DOM.append(card, DOM.$('.krt-pr-storyboard-node-meta'));
++			const filesEl = DOM.append(meta, DOM.$('span.krt-pr-storyboard-node-files'));
++			filesEl.textContent = chapter.files.length === 1
++				? localize('krt.pr.storyboard.oneFile', "1 file")
++				: localize('krt.pr.storyboard.nFiles', "{0} files", chapter.files.length);
++			const counts = DOM.append(meta, DOM.$('span.krt-pr-storyboard-node-counts'));
++			const add = DOM.append(counts, DOM.$('span.add'));
++			add.textContent = `+${chapter.plus}`;
++			const del = DOM.append(counts, DOM.$('span.del'));
++			del.textContent = `-${chapter.minus}`;
++
++			nodeEls.set(node.id, card);
++		}
++
++		const detail = DOM.append(wrap, DOM.$('.krt-pr-storyboard-detail'));
++		const renderDetail = (id: string | undefined) => {
++			DOM.clearNode(detail);
++			const chapter = id ? chaptersById.get(id) : undefined;
++			if (!chapter) {
++				const empty = DOM.append(detail, DOM.$('.krt-pr-storyboard-detail-empty'));
++				empty.textContent = localize('krt.pr.storyboard.detailEmpty', "Click a node to inspect its connections.");
++				return;
++			}
++			const head = DOM.append(detail, DOM.$('.krt-pr-storyboard-detail-head'));
++			const dTitle = DOM.append(head, DOM.$('h2.krt-pr-storyboard-detail-title'));
++			dTitle.textContent = chapter.title;
++			if (chapter.sensitive) {
++				const badge = DOM.append(head, DOM.$('span.krt-pr-tour-sensitive-badge'));
++				badge.textContent = localize('krt.pr.tour.sensitiveBadge', "Caution");
++				if (chapter.sensitiveReason) {
++					badge.title = chapter.sensitiveReason;
++				}
++			}
++			const summary = DOM.append(detail, DOM.$('p.krt-pr-storyboard-detail-summary'));
++			summary.textContent = chapter.summary;
++			if (chapter.bullets.length > 0) {
++				const list = DOM.append(detail, DOM.$('ul.krt-pr-storyboard-detail-bullets'));
++				for (const b of chapter.bullets) {
++					const li = DOM.append(list, DOM.$('li'));
++					li.textContent = b;
++				}
++			}
++
++			const renderConnectionList = (label: string, ids: readonly string[]) => {
++				const section = DOM.append(detail, DOM.$('.krt-pr-storyboard-connections'));
++				const heading = DOM.append(section, DOM.$('span.krt-pr-storyboard-connections-heading'));
++				heading.textContent = label;
++				if (ids.length === 0) {
++					const none = DOM.append(section, DOM.$('span.krt-pr-storyboard-connections-empty'));
++					none.textContent = localize('krt.pr.storyboard.connectionsNone', "(none)");
++					return;
++				}
++				const ul = DOM.append(section, DOM.$('ul.krt-pr-storyboard-connections-list'));
++				for (const cid of ids) {
++					const c = chaptersById.get(cid);
++					if (!c) {
++						continue;
++					}
++					const li = DOM.append(ul, DOM.$('li'));
++					const link = DOM.append(li, DOM.$('a.krt-pr-storyboard-connection')) as HTMLAnchorElement;
++					link.href = '#';
++					link.textContent = c.title;
++					this.bodyDisposables.add(DOM.addDisposableListener(link, 'click', e => {
++						e.preventDefault();
++						selectNode(cid);
++					}));
++				}
++			};
++			renderConnectionList(localize('krt.pr.storyboard.upstream', "Depends on"), chapter.dependsOn);
++			renderConnectionList(localize('krt.pr.storyboard.downstream', "Required by"), outgoing.get(chapter.id) ?? []);
++		};
++
++		const clearHighlight = () => {
++			canvas.classList.remove('hovering');
++			for (const el of nodeEls.values()) {
++				el.classList.remove('highlight', 'dimmed');
++			}
++			for (const el of edgeEls.values()) {
++				el.classList.remove('highlight', 'dimmed');
++			}
++		};
++		const highlightNode = (id: string) => {
++			canvas.classList.add('hovering');
++			const ins = incoming.get(id) ?? [];
++			const outs = outgoing.get(id) ?? [];
++			const related = new Set<string>([id, ...ins, ...outs]);
++			for (const [nid, el] of nodeEls) {
++				el.classList.toggle('highlight', nid === id);
++				el.classList.toggle('dimmed', !related.has(nid));
++			}
++			for (const [k, el] of edgeEls) {
++				const [from, to] = k.split('->');
++				const involved = from === id || to === id;
++				el.classList.toggle('highlight', involved);
++				el.classList.toggle('dimmed', !involved);
++			}
++		};
++
++		const selectNode = (id: string) => {
++			this.storyboardSelectedId = id;
++			for (const [nid, el] of nodeEls) {
++				el.classList.toggle('selected', nid === id);
++			}
++			renderDetail(id);
++		};
++
++		for (const [id, el] of nodeEls) {
++			this.bodyDisposables.add(DOM.addDisposableListener(el, 'mouseenter', () => highlightNode(id)));
++			this.bodyDisposables.add(DOM.addDisposableListener(el, 'mouseleave', clearHighlight));
++			this.bodyDisposables.add(DOM.addDisposableListener(el, 'focus', () => highlightNode(id)));
++			this.bodyDisposables.add(DOM.addDisposableListener(el, 'blur', clearHighlight));
++			this.bodyDisposables.add(DOM.addDisposableListener(el, 'click', () => selectNode(id)));
++			this.bodyDisposables.add(DOM.addDisposableListener(el, 'keydown', e => {
++				if (e.key === 'Enter' || e.key === ' ') {
++					e.preventDefault();
++					selectNode(id);
++				}
++			}));
++		}
++
++		const initial = this.storyboardSelectedId && chaptersById.has(this.storyboardSelectedId)
++			? this.storyboardSelectedId
++			: chapters[0]?.id;
++		if (initial) {
++			selectNode(initial);
++		} else {
++			renderDetail(undefined);
++		}
++	}
++
+ 	private renderError(kind: string, message: string, hint: string): void {
+ 		this.titleElement.textContent = localize('krt.pr.errorTitle', "Couldn't load this PR");
+ 		this.statePillElement.textContent = '';
+-- 
+2.52.0
+
