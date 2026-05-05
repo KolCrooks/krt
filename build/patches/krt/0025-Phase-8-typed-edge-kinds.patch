@@ -1,0 +1,672 @@
+From b52cba5a104cb35297b3149b6ded5bf6ed69db47 Mon Sep 17 00:00:00 2001
+From: Kol Crooks <kol.crooks@datadoghq.com>
+Date: Tue, 5 May 2026 11:25:54 -0400
+Subject: [PATCH] Phase 8: typed edge kinds (depends/extends/gates/verifies)
+
+Chapter.dependsOn becomes an array of { id, kind } edges; the
+prompt asks the model to pick the most specific relationship
+kind for each dependency:
+
+  - depends  - generic 'needs to land first' (neutral, solid)
+  - extends  - builds on a primitive the other introduces (green)
+  - gates    - hidden behind a flag/config (yellow, dashed 5 4)
+  - verifies - tests / observability for the other (purple, dotted)
+
+Storyboard renders each kind with its own stroke colour, dash
+pattern, arrowhead colour, and label pill text. The header
+gains a 4-entry legend; the detail-rail Connections section
+shows the per-edge kind in each '<- gated by' / '-> verified by'
+row.
+
+Cache version bumped to v2 so v1 string-array caches are
+silently dropped (next tour regenerates with typed edges). The
+parser also accepts the old string form as a fallback, mapping
+unknown shapes to kind='depends'.
+---
+ .../krt/browser/ai/krtStoryboardLayout.ts     |  44 +++---
+ .../contrib/krt/browser/ai/krtTourCache.ts    |   4 +-
+ .../krt/browser/ai/krtTourGenerator.ts        |  49 +++++-
+ .../contrib/krt/browser/ai/krtTourTypes.ts    |  36 ++++-
+ .../browser/pr/krtPullRequestEditorPane.css   |  46 +++++-
+ .../browser/pr/krtPullRequestEditorPane.ts    | 143 ++++++++++++------
+ 6 files changed, 237 insertions(+), 85 deletions(-)
+
+diff --git a/src/vs/workbench/contrib/krt/browser/ai/krtStoryboardLayout.ts b/src/vs/workbench/contrib/krt/browser/ai/krtStoryboardLayout.ts
+index dfa0b189e32..39306c432d4 100644
+--- a/src/vs/workbench/contrib/krt/browser/ai/krtStoryboardLayout.ts
++++ b/src/vs/workbench/contrib/krt/browser/ai/krtStoryboardLayout.ts
+@@ -3,7 +3,7 @@
+  *  Licensed under the MIT License. See License.txt in the project root for license information.
+  *--------------------------------------------------------------------------------------------*/
+ 
+-import { Chapter } from './krtTourTypes.js';
++import { Chapter, EdgeKind } from './krtTourTypes.js';
+ 
+ /**
+  * Storyboard layout — pure function over `Chapter[]`. No DOM
+@@ -35,6 +35,7 @@ export interface StoryboardNode {
+ export interface StoryboardEdge {
+ 	readonly from: string;
+ 	readonly to: string;
++	readonly kind: EdgeKind;
+ 	/** SVG path `d` attribute (Manhattan with rounded corners). */
+ 	readonly path: string;
+ 	/** Suggested label anchor (midpoint of vertical channel). */
+@@ -79,10 +80,10 @@ export function layoutStoryboard(
+ 
+ 	const ids = new Set(chapters.map(c => c.id));
+ 	// Filter dependsOn to known ids (model occasionally references
+-	// nonexistent chapters).
+-	const deps = new Map<string, string[]>();
++	// nonexistent chapters or itself).
++	const deps = new Map<string, { id: string; kind: EdgeKind }[]>();
+ 	for (const c of chapters) {
+-		deps.set(c.id, c.dependsOn.filter(d => ids.has(d) && d !== c.id));
++		deps.set(c.id, c.dependsOn.filter(d => ids.has(d.id) && d.id !== c.id).map(d => ({ id: d.id, kind: d.kind })));
+ 	}
+ 
+ 	const tiers = assignTiers(chapters, deps);
+@@ -107,7 +108,7 @@ export function layoutStoryboard(
+ 	for (const c of chapters) {
+ 		const targetTier = tiers.get(c.id) ?? 0;
+ 		for (const dep of deps.get(c.id) ?? []) {
+-			const sourceTier = tiers.get(dep) ?? 0;
++			const sourceTier = tiers.get(dep.id) ?? 0;
+ 			if (targetTier - sourceTier >= 2) {
+ 				multiTierEdgeCount++;
+ 			}
+@@ -170,7 +171,7 @@ export function layoutStoryboard(
+  */
+ function assignTiers(
+ 	chapters: readonly Chapter[],
+-	deps: Map<string, string[]>,
++	deps: Map<string, { id: string; kind: EdgeKind }[]>,
+ ): Map<string, number> {
+ 	const tier = new Map<string, number>();
+ 	const visiting = new Set<string>();
+@@ -187,7 +188,7 @@ function assignTiers(
+ 		const ds = deps.get(id) ?? [];
+ 		let max = -1;
+ 		for (const d of ds) {
+-			max = Math.max(max, visit(d));
++			max = Math.max(max, visit(d.id));
+ 		}
+ 		visiting.delete(id);
+ 		const t = max + 1;
+@@ -203,6 +204,7 @@ function assignTiers(
+ interface RoutingEdge {
+ 	readonly from: string;
+ 	readonly to: string;
++	readonly kind: EdgeKind;
+ 	readonly sourceTier: number;
+ 	readonly targetTier: number;
+ 	readonly sx: number;
+@@ -213,7 +215,7 @@ interface RoutingEdge {
+ 
+ function routeEdges(
+ 	chapters: readonly Chapter[],
+-	deps: Map<string, string[]>,
++	deps: Map<string, { id: string; kind: EdgeKind }[]>,
+ 	tiers: Map<string, number>,
+ 	positions: Map<string, StoryboardNode>,
+ 	cornerRadius: number,
+@@ -223,8 +225,8 @@ function routeEdges(
+ 	nodeWidth: number,
+ 	columnGap: number,
+ ): StoryboardEdge[] {
+-	const incoming = new Map<string, string[]>();
+-	const outgoing = new Map<string, string[]>();
++	const incoming = new Map<string, { id: string; kind: EdgeKind }[]>();
++	const outgoing = new Map<string, { id: string; kind: EdgeKind }[]>();
+ 	const push = <K, V>(map: Map<K, V[]>, key: K, value: V) => {
+ 		const existing = map.get(key);
+ 		if (existing) {
+@@ -235,8 +237,8 @@ function routeEdges(
+ 	};
+ 	for (const c of chapters) {
+ 		for (const d of deps.get(c.id) ?? []) {
+-			push(incoming, c.id, d);
+-			push(outgoing, d, c.id);
++			push(incoming, c.id, { id: d.id, kind: d.kind });
++			push(outgoing, d.id, { id: c.id, kind: d.kind });
+ 		}
+ 	}
+ 
+@@ -272,10 +274,10 @@ function routeEdges(
+ 		return span >= 2 ? FAR_TOP + sy : sy;
+ 	};
+ 	for (const [src, list] of outgoing) {
+-		list.sort((a, b) => outDirectionY(src, a) - outDirectionY(src, b));
++		list.sort((a, b) => outDirectionY(src, a.id) - outDirectionY(src, b.id));
+ 	}
+ 	for (const [tgt, list] of incoming) {
+-		list.sort((a, b) => inDirectionY(a, tgt) - inDirectionY(b, tgt));
++		list.sort((a, b) => inDirectionY(a.id, tgt) - inDirectionY(b.id, tgt));
+ 	}
+ 
+ 	const portY = (count: number, index: number, top: number, height: number): number => {
+@@ -301,19 +303,19 @@ function routeEdges(
+ 		}
+ 		const targetTier = tiers.get(c.id) ?? 0;
+ 		for (const dep of ds) {
+-			const source = positions.get(dep);
++			const source = positions.get(dep.id);
+ 			if (!source) {
+ 				continue;
+ 			}
+-			const sourceTier = tiers.get(dep) ?? 0;
+-			const outList = outgoing.get(dep) ?? [];
+-			const sourceIdx = outList.indexOf(c.id);
+-			const targetIdx = inList.indexOf(dep);
++			const sourceTier = tiers.get(dep.id) ?? 0;
++			const outList = outgoing.get(dep.id) ?? [];
++			const sourceIdx = outList.findIndex(o => o.id === c.id);
++			const targetIdx = inList.findIndex(o => o.id === dep.id);
+ 			const sx = source.x + source.width;
+ 			const sy = portY(outList.length, sourceIdx, source.y, source.height);
+ 			const tx = target.x;
+ 			const ty = portY(inList.length, targetIdx, target.y, target.height);
+-			routing.push({ from: dep, to: c.id, sourceTier, targetTier, sx, sy, tx, ty });
++			routing.push({ from: dep.id, to: c.id, kind: dep.kind, sourceTier, targetTier, sx, sy, tx, ty });
+ 		}
+ 	}
+ 
+@@ -408,7 +410,7 @@ function routeEdges(
+ 			labelX = midX;
+ 			labelY = Math.abs(e.sy - e.ty) < 1 ? e.sy - 8 : (e.sy + e.ty) / 2;
+ 		}
+-		edges.push({ from: e.from, to: e.to, path, labelX, labelY });
++		edges.push({ from: e.from, to: e.to, kind: e.kind, path, labelX, labelY });
+ 	}
+ 	return edges;
+ }
+diff --git a/src/vs/workbench/contrib/krt/browser/ai/krtTourCache.ts b/src/vs/workbench/contrib/krt/browser/ai/krtTourCache.ts
+index 7cb368f5801..36a4cf3e1de 100644
+--- a/src/vs/workbench/contrib/krt/browser/ai/krtTourCache.ts
++++ b/src/vs/workbench/contrib/krt/browser/ai/krtTourCache.ts
+@@ -17,7 +17,9 @@ import { Chapter } from './krtTourTypes.js';
+  * persistence; Tour output is user-specific and not portable.
+  */
+ 
+-const CACHE_VERSION = 1;
++// v2: dependsOn is now an array of `{ id, kind }` edges (Phase 8
++// typed-edge labelling). Old v1 caches are silently dropped.
++const CACHE_VERSION = 2;
+ 
+ interface CacheEnvelope {
+ 	readonly v: number;
+diff --git a/src/vs/workbench/contrib/krt/browser/ai/krtTourGenerator.ts b/src/vs/workbench/contrib/krt/browser/ai/krtTourGenerator.ts
+index e4e6e431a16..ff7c09458c7 100644
+--- a/src/vs/workbench/contrib/krt/browser/ai/krtTourGenerator.ts
++++ b/src/vs/workbench/contrib/krt/browser/ai/krtTourGenerator.ts
+@@ -15,7 +15,7 @@ import {
+ 	readModel,
+ 	readPromptCaching,
+ } from './krtAiSettings.js';
+-import { Chapter } from './krtTourTypes.js';
++import { Chapter, DependsOnEdge, EdgeKind, EDGE_KINDS } from './krtTourTypes.js';
+ import { readCachedChapters, writeCachedChapters } from './krtTourCache.js';
+ 
+ /**
+@@ -166,17 +166,26 @@ const SYSTEM_PROMPT = [
+ 	'      "sensitive": false,                 // true for migrations, auth, secrets, money, deletions of safety code',
+ 	'      "sensitiveReason": "",              // required when sensitive=true; otherwise empty string',
+ 	'      "diffFile": "path/to/main.ts",     // the most representative file (must be in `files`)',
+-	'      "dependsOn": []                     // ids of other chapters this one logically follows',
++	'      "dependsOn": [                       // typed edges to other chapters this one follows',
++	'        { "id": "earlier-chapter-id", "kind": "depends" }',
++	'      ]',
+ 	'    }',
+ 	'  ]',
+ 	'}',
+ 	'```',
+ 	'',
++	'`dependsOn[].kind` values (pick the most specific one that applies):',
++	'- "depends"  — generic "this needs to land first".',
++	'- "extends"  — this chapter builds on a primitive / abstraction the other chapter introduces.',
++	'- "gates"    — this chapter is hidden behind a config / feature flag the other chapter sets up.',
++	'- "verifies" — this chapter is tests / observability that exercises the other chapter.',
++	'',
+ 	'Rules:',
+ 	'- Cover every changed file at least once across the chapters; do not invent files that are not in the input.',
+ 	'- Aim for 3-8 chapters for a typical PR. Very small PRs may have 1-2 chapters; very large PRs should not exceed 12.',
+ 	'- Be specific: prefer "Adds the `--retry` flag to `cli.ts`" over "Updates the CLI".',
+ 	'- `sensitive` should be true sparingly — only for changes a reviewer must look at carefully (security, data migrations, money flows, destructive operations, removal of validation).',
++	'- `dependsOn[].id` must reference another chapter id in this PR; "kind" must be one of the four values above.',
+ ].join('\n');
+ 
+ function buildUserPrompt(pr: PullRequest, files: readonly PullRequestFile[]): string {
+@@ -312,9 +321,7 @@ function parseChaptersJson(text: string, files: readonly PullRequestFile[]): rea
+ 			: filesArr[0];
+ 		const plus = typeof obj.plus === 'number' && Number.isFinite(obj.plus) ? Math.max(0, Math.trunc(obj.plus)) : 0;
+ 		const minus = typeof obj.minus === 'number' && Number.isFinite(obj.minus) ? Math.max(0, Math.trunc(obj.minus)) : 0;
+-		const dependsOn = Array.isArray(obj.dependsOn)
+-			? obj.dependsOn.filter((d): d is string => typeof d === 'string')
+-			: [];
++		const dependsOn = parseDependsOn(obj.dependsOn);
+ 		out.push({
+ 			id,
+ 			title,
+@@ -335,3 +342,35 @@ function parseChaptersJson(text: string, files: readonly PullRequestFile[]): rea
+ function truncate(s: string, n: number): string {
+ 	return s.length <= n ? s : s.slice(0, n) + '…';
+ }
++
++/**
++ * Accept either the new typed shape `[{id, kind}]` or the older
++ * string-array form (in case the model regresses, or we hit a v1
++ * cache that somehow slipped through). Unknown kinds collapse to
++ * `'depends'` so we never drop edges silently.
++ */
++function parseDependsOn(value: unknown): readonly DependsOnEdge[] {
++	if (!Array.isArray(value)) {
++		return [];
++	}
++	const knownKinds = new Set<string>(EDGE_KINDS);
++	const out: DependsOnEdge[] = [];
++	for (const entry of value) {
++		if (typeof entry === 'string' && entry.trim()) {
++			out.push({ id: entry.trim(), kind: 'depends' });
++			continue;
++		}
++		if (entry && typeof entry === 'object') {
++			const e = entry as { id?: unknown; kind?: unknown };
++			const id = typeof e.id === 'string' ? e.id.trim() : '';
++			if (!id) {
++				continue;
++			}
++			const kind: EdgeKind = typeof e.kind === 'string' && knownKinds.has(e.kind)
++				? e.kind as EdgeKind
++				: 'depends';
++			out.push({ id, kind });
++		}
++	}
++	return out;
++}
+diff --git a/src/vs/workbench/contrib/krt/browser/ai/krtTourTypes.ts b/src/vs/workbench/contrib/krt/browser/ai/krtTourTypes.ts
+index 3e05bb07f75..185179f2089 100644
+--- a/src/vs/workbench/contrib/krt/browser/ai/krtTourTypes.ts
++++ b/src/vs/workbench/contrib/krt/browser/ai/krtTourTypes.ts
+@@ -4,12 +4,36 @@
+  *--------------------------------------------------------------------------------------------*/
+ 
+ /**
+- * AI-generated narrative chapter for the Tour view. Shape matches
+- * PLAN.md Phase 7. Each chapter groups one or more files into
+- * a unit the reviewer can absorb at a glance.
++ * Relationship kind on a chapter dependency edge. The Storyboard
++ * view colour-codes and labels edges by kind so the reviewer can
++ * see at a glance which dependencies are "this builds on that"
++ * vs "this is gated by that" vs "this verifies that".
+  *
+- * `dependsOn` is a list of chapter ids — the Storyboard view in
+- * Phase 8 walks this graph to lay out tier-by-tier columns.
++ * - `depends`  — generic "needs to land first" dependency.
++ * - `extends`  — the dependent chapter builds on a primitive the
++ *                source chapter introduces.
++ * - `gates`    — the dependent chapter is hidden behind a flag /
++ *                config introduced by the source chapter.
++ * - `verifies` — the dependent chapter is tests / observability
++ *                covering the source chapter.
++ */
++export type EdgeKind = 'depends' | 'extends' | 'gates' | 'verifies';
++
++export const EDGE_KINDS: readonly EdgeKind[] = ['depends', 'extends', 'gates', 'verifies'];
++
++export interface DependsOnEdge {
++	readonly id: string;
++	readonly kind: EdgeKind;
++}
++
++/**
++ * AI-generated narrative chapter for the Tour view. Each chapter
++ * groups one or more files into a unit the reviewer can absorb
++ * at a glance.
++ *
++ * `dependsOn` is a list of typed edges to other chapters — the
++ * Storyboard view walks this graph to lay out tier-by-tier
++ * columns and colour-codes edges by `kind`.
+  */
+ export interface Chapter {
+ 	readonly id: string;
+@@ -29,7 +53,7 @@ export interface Chapter {
+ 	 * or unknown.
+ 	 */
+ 	readonly diffFile?: string;
+-	readonly dependsOn: readonly string[];
++	readonly dependsOn: readonly DependsOnEdge[];
+ }
+ 
+ export type TourVariant = 'chapters' | 'reading';
+diff --git a/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.css b/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.css
+index 07e1c8710f3..c7403e0d6a0 100644
+--- a/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.css
++++ b/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.css
+@@ -1549,14 +1549,35 @@
+ 	stroke-width: 1.5;
+ 	stroke-linecap: round;
+ 	stroke-linejoin: round;
+-	opacity: 0.65;
++	opacity: 0.7;
+ 	transition: stroke 120ms ease, opacity 120ms ease, stroke-width 120ms ease;
+ }
+ 
++.krt-pr-storyboard-edge.depends {
++	stroke: var(--vscode-editorLineNumber-foreground, rgba(127, 127, 127, 0.7));
++}
++
++.krt-pr-storyboard-edge.extends {
++	stroke: var(--vscode-charts-green, #89d185);
++}
++
++.krt-pr-storyboard-edge.gates {
++	stroke: var(--vscode-charts-yellow, #ffcb6b);
++}
++
++.krt-pr-storyboard-edge.verifies {
++	stroke: var(--vscode-charts-purple, #b180d7);
++}
++
+ .krt-pr-storyboard-arrowhead {
+-	fill: var(--vscode-editorLineNumber-foreground, rgba(127, 127, 127, 0.65));
++	fill: var(--vscode-editorLineNumber-foreground, rgba(127, 127, 127, 0.7));
+ }
+ 
++.krt-pr-storyboard-arrowhead.depends { fill: var(--vscode-editorLineNumber-foreground, rgba(127, 127, 127, 0.7)); }
++.krt-pr-storyboard-arrowhead.extends { fill: var(--vscode-charts-green, #89d185); }
++.krt-pr-storyboard-arrowhead.gates { fill: var(--vscode-charts-yellow, #ffcb6b); }
++.krt-pr-storyboard-arrowhead.verifies { fill: var(--vscode-charts-purple, #b180d7); }
++
+ .krt-pr-storyboard-arrowhead.hot {
+ 	fill: var(--krt-accent, var(--vscode-focusBorder, #007acc));
+ }
+@@ -1589,6 +1610,27 @@
+ 	letter-spacing: 0.01em;
+ }
+ 
++.krt-pr-storyboard-edge-label.extends .krt-pr-storyboard-edge-label-rect {
++	stroke: var(--vscode-charts-green, #89d185);
++}
++.krt-pr-storyboard-edge-label.extends .krt-pr-storyboard-edge-label-text {
++	fill: var(--vscode-charts-green, #89d185);
++}
++
++.krt-pr-storyboard-edge-label.gates .krt-pr-storyboard-edge-label-rect {
++	stroke: var(--vscode-charts-yellow, #ffcb6b);
++}
++.krt-pr-storyboard-edge-label.gates .krt-pr-storyboard-edge-label-text {
++	fill: var(--vscode-charts-yellow, #ffcb6b);
++}
++
++.krt-pr-storyboard-edge-label.verifies .krt-pr-storyboard-edge-label-rect {
++	stroke: var(--vscode-charts-purple, #b180d7);
++}
++.krt-pr-storyboard-edge-label.verifies .krt-pr-storyboard-edge-label-text {
++	fill: var(--vscode-charts-purple, #b180d7);
++}
++
+ .krt-pr-storyboard-canvas.hovering .krt-pr-storyboard-edge-label.dimmed {
+ 	opacity: 0.18;
+ }
+diff --git a/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.ts b/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.ts
+index 36f7d096e75..8eb74e705d2 100644
+--- a/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.ts
++++ b/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.ts
+@@ -20,7 +20,7 @@ import { IThemeService } from '../../../../../platform/theme/common/themeService
+ import { ILogService } from '../../../../../platform/log/common/log.js';
+ import { IOpenerService } from '../../../../../platform/opener/common/opener.js';
+ import { isKrtError } from '../../../../../platform/krt/common/errors.js';
+-import { Chapter, TourVariant } from '../ai/krtTourTypes.js';
++import { Chapter, EdgeKind, EDGE_KINDS, TourVariant } from '../ai/krtTourTypes.js';
+ import { ITourGenerator, TourGenerationStatus } from '../ai/krtTourGenerator.js';
+ import { layoutStoryboard } from '../ai/krtStoryboardLayout.js';
+ import {
+@@ -1475,21 +1475,29 @@ export class KrtPullRequestEditorPane extends EditorPane {
+ 		const spacer = DOM.append(headerBar, DOM.$('span.krt-pr-storyboard-spacer'));
+ 		spacer.textContent = '';
+ 		const legend = DOM.append(headerBar, DOM.$('.krt-pr-storyboard-legend'));
+-		const legendItem = DOM.append(legend, DOM.$('span.krt-pr-storyboard-legend-item'));
+-		const legendSwatch = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+-		legendSwatch.setAttribute('width', '20');
+-		legendSwatch.setAttribute('height', '6');
+-		legendSwatch.setAttribute('class', 'krt-pr-storyboard-legend-swatch');
+-		const legendLine = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+-		legendLine.setAttribute('x1', '0');
+-		legendLine.setAttribute('y1', '3');
+-		legendLine.setAttribute('x2', '20');
+-		legendLine.setAttribute('y2', '3');
+-		legendLine.setAttribute('stroke-width', '1.6');
+-		legendSwatch.appendChild(legendLine);
+-		legendItem.appendChild(legendSwatch);
+-		const legendLabel = DOM.append(legendItem, DOM.$('span'));
+-		legendLabel.textContent = localize('krt.pr.storyboard.dependsOn', "depends on");
++		for (const kind of EDGE_KINDS) {
++			const item = DOM.append(legend, DOM.$('span.krt-pr-storyboard-legend-item'));
++			item.setAttribute('data-kind', kind);
++			const swatch = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
++			swatch.setAttribute('width', '20');
++			swatch.setAttribute('height', '6');
++			swatch.setAttribute('class', 'krt-pr-storyboard-legend-swatch');
++			const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
++			line.setAttribute('x1', '0');
++			line.setAttribute('y1', '3');
++			line.setAttribute('x2', '20');
++			line.setAttribute('y2', '3');
++			line.setAttribute('stroke-width', '1.6');
++			line.setAttribute('class', `krt-pr-storyboard-edge ${kind}`);
++			const dash = edgeKindDash(kind);
++			if (dash) {
++				line.setAttribute('stroke-dasharray', dash);
++			}
++			swatch.appendChild(line);
++			item.appendChild(swatch);
++			const label = DOM.append(item, DOM.$('span'));
++			label.textContent = edgeKindLabel(kind);
++		}
+ 
+ 		const body = DOM.append(this.bodyElement, DOM.$('.krt-pr-storyboard-body'));
+ 
+@@ -1561,7 +1569,12 @@ export class KrtPullRequestEditorPane extends EditorPane {
+ 			m.appendChild(p);
+ 			return m;
+ 		};
+-		defs.appendChild(makeMarker('krt-storyboard-arrow', 'krt-pr-storyboard-arrowhead'));
++		// One arrowhead marker per edge kind so each inherits the
++		// kind's stroke colour via CSS. Plus a 'hot' marker the
++		// hover-spotlight swaps in.
++		for (const kind of EDGE_KINDS) {
++			defs.appendChild(makeMarker(`krt-storyboard-arrow-${kind}`, `krt-pr-storyboard-arrowhead ${kind}`));
++		}
+ 		defs.appendChild(makeMarker('krt-storyboard-arrow-hot', 'krt-pr-storyboard-arrowhead hot'));
+ 		svg.appendChild(defs);
+ 
+@@ -1570,21 +1583,25 @@ export class KrtPullRequestEditorPane extends EditorPane {
+ 		const edgeKey = (from: string, to: string) => `${from}->${to}`;
+ 		for (const edge of layout.edges) {
+ 			const path = document.createElementNS(SVG_NS, 'path');
+-			path.setAttribute('class', 'krt-pr-storyboard-edge');
++			path.setAttribute('class', `krt-pr-storyboard-edge ${edge.kind}`);
+ 			path.setAttribute('d', edge.path);
+-			path.setAttribute('marker-end', 'url(#krt-storyboard-arrow)');
++			path.setAttribute('marker-end', `url(#krt-storyboard-arrow-${edge.kind})`);
+ 			path.setAttribute('data-from', edge.from);
+ 			path.setAttribute('data-to', edge.to);
++			const dash = edgeKindDash(edge.kind);
++			if (dash) {
++				path.setAttribute('stroke-dasharray', dash);
++			}
+ 			svg.appendChild(path);
+ 			edgeEls.set(edgeKey(edge.from, edge.to), path);
+ 		}
+ 		// Edge labels layered on top of paths so they are readable.
+-		const labelText = localize('krt.pr.storyboard.dependsOn', "depends on");
+-		const labelWidth = labelText.length * 5.6 + 14;
+ 		const labelHeight = 14;
+ 		for (const edge of layout.edges) {
++			const text = edgeKindLabel(edge.kind);
++			const labelWidth = text.length * 5.6 + 14;
+ 			const g = document.createElementNS(SVG_NS, 'g');
+-			g.setAttribute('class', 'krt-pr-storyboard-edge-label');
++			g.setAttribute('class', `krt-pr-storyboard-edge-label ${edge.kind}`);
+ 			const rect = document.createElementNS(SVG_NS, 'rect');
+ 			rect.setAttribute('x', String(edge.labelX - labelWidth / 2));
+ 			rect.setAttribute('y', String(edge.labelY - labelHeight / 2));
+@@ -1592,14 +1609,14 @@ export class KrtPullRequestEditorPane extends EditorPane {
+ 			rect.setAttribute('height', String(labelHeight));
+ 			rect.setAttribute('rx', '3');
+ 			rect.setAttribute('class', 'krt-pr-storyboard-edge-label-rect');
+-			const text = document.createElementNS(SVG_NS, 'text');
+-			text.setAttribute('x', String(edge.labelX));
+-			text.setAttribute('y', String(edge.labelY + 3));
+-			text.setAttribute('text-anchor', 'middle');
+-			text.setAttribute('class', 'krt-pr-storyboard-edge-label-text');
+-			text.textContent = labelText;
++			const textEl = document.createElementNS(SVG_NS, 'text');
++			textEl.setAttribute('x', String(edge.labelX));
++			textEl.setAttribute('y', String(edge.labelY + 3));
++			textEl.setAttribute('text-anchor', 'middle');
++			textEl.setAttribute('class', 'krt-pr-storyboard-edge-label-text');
++			textEl.textContent = text;
+ 			g.appendChild(rect);
+-			g.appendChild(text);
++			g.appendChild(textEl);
+ 			svg.appendChild(g);
+ 			edgeLabelEls.set(edgeKey(edge.from, edge.to), g);
+ 		}
+@@ -1609,9 +1626,9 @@ export class KrtPullRequestEditorPane extends EditorPane {
+ 		const indexById = new Map(chapters.map((c, i) => [c.id, i] as const));
+ 		const nodeEls = new Map<string, HTMLElement>();
+ 		const nodeReviewedBoxes = new Map<string, HTMLInputElement>();
+-		const incoming = new Map<string, string[]>();
+-		const outgoing = new Map<string, string[]>();
+-		const pushTo = (map: Map<string, string[]>, key: string, value: string) => {
++		const incoming = new Map<string, { id: string; kind: EdgeKind }[]>();
++		const outgoing = new Map<string, { id: string; kind: EdgeKind }[]>();
++		const pushTo = <V>(map: Map<string, V[]>, key: string, value: V) => {
+ 			const existing = map.get(key);
+ 			if (existing) {
+ 				existing.push(value);
+@@ -1621,11 +1638,11 @@ export class KrtPullRequestEditorPane extends EditorPane {
+ 		};
+ 		for (const c of chapters) {
+ 			for (const d of c.dependsOn) {
+-				if (!chaptersById.has(d) || d === c.id) {
++				if (!chaptersById.has(d.id) || d.id === c.id) {
+ 					continue;
+ 				}
+-				pushTo(incoming, c.id, d);
+-				pushTo(outgoing, d, c.id);
++				pushTo(incoming, c.id, { id: d.id, kind: d.kind });
++				pushTo(outgoing, d.id, { id: c.id, kind: d.kind });
+ 			}
+ 		}
+ 
+@@ -1738,23 +1755,24 @@ export class KrtPullRequestEditorPane extends EditorPane {
+ 				const section = DOM.append(scroll, DOM.$('.krt-pr-storyboard-connections'));
+ 				const heading = DOM.append(section, DOM.$('span.krt-pr-storyboard-connections-heading'));
+ 				heading.textContent = localize('krt.pr.storyboard.connections', "Connections");
+-				const renderRow = (arrow: string, otherId: string) => {
+-					const other = chaptersById.get(otherId);
+-					if (!other) {
++				const renderRow = (arrow: string, other: { id: string; kind: EdgeKind }) => {
++					const otherChapter = chaptersById.get(other.id);
++					if (!otherChapter) {
+ 						return;
+ 					}
+ 					const row = DOM.append(section, DOM.$('.krt-pr-storyboard-connection-row'));
++					row.setAttribute('data-kind', other.kind);
+ 					const arr = DOM.append(row, DOM.$('span.krt-pr-storyboard-connection-arrow'));
+-					arr.textContent = `${arrow} ${labelText}`;
++					arr.textContent = `${arrow} ${edgeKindLabel(other.kind)}`;
+ 					const titleSpan = DOM.append(row, DOM.$('span.krt-pr-storyboard-connection-title'));
+-					titleSpan.textContent = other.title;
+-					this.bodyDisposables.add(DOM.addDisposableListener(row, 'click', () => selectNodeRef.fn(otherId)));
++					titleSpan.textContent = otherChapter.title;
++					this.bodyDisposables.add(DOM.addDisposableListener(row, 'click', () => selectNodeRef.fn(other.id)));
+ 				};
+-				for (const inId of ins) {
+-					renderRow('->', inId);
++				for (const inEdge of ins) {
++					renderRow('->', inEdge);
+ 				}
+-				for (const outId of outs) {
+-					renderRow('<-', outId);
++				for (const outEdge of outs) {
++					renderRow('<-', outEdge);
+ 				}
+ 			}
+ 
+@@ -1797,15 +1815,21 @@ export class KrtPullRequestEditorPane extends EditorPane {
+ 			}));
+ 		};
+ 
++		// Map from edge key to its kind so the highlight pass can
++		// restore the kind-specific arrowhead marker on un-hover.
++		const edgeKindByKey = new Map<string, EdgeKind>();
++		for (const edge of layout.edges) {
++			edgeKindByKey.set(edgeKey(edge.from, edge.to), edge.kind);
++		}
+ 		const clearHighlight = () => {
+ 			canvas.classList.remove('hovering');
+ 			for (const el of nodeEls.values()) {
+ 				el.classList.remove('highlight', 'dimmed');
+ 			}
+-			for (const el of edgeEls.values()) {
++			for (const [k, el] of edgeEls) {
+ 				el.classList.remove('highlight', 'dimmed');
+-				el.removeAttribute('marker-end');
+-				el.setAttribute('marker-end', 'url(#krt-storyboard-arrow)');
++				const kind = edgeKindByKey.get(k) ?? 'depends';
++				el.setAttribute('marker-end', `url(#krt-storyboard-arrow-${kind})`);
+ 			}
+ 			for (const el of edgeLabelEls.values()) {
+ 				el.classList.remove('highlight', 'dimmed');
+@@ -1815,7 +1839,7 @@ export class KrtPullRequestEditorPane extends EditorPane {
+ 			canvas.classList.add('hovering');
+ 			const ins = incoming.get(id) ?? [];
+ 			const outs = outgoing.get(id) ?? [];
+-			const related = new Set<string>([id, ...ins, ...outs]);
++			const related = new Set<string>([id, ...ins.map(e => e.id), ...outs.map(e => e.id)]);
+ 			for (const [nid, el] of nodeEls) {
+ 				el.classList.toggle('highlight', nid === id);
+ 				el.classList.toggle('dimmed', !related.has(nid));
+@@ -1823,9 +1847,10 @@ export class KrtPullRequestEditorPane extends EditorPane {
+ 			for (const [k, el] of edgeEls) {
+ 				const [from, to] = k.split('->');
+ 				const involved = from === id || to === id;
++				const kind = edgeKindByKey.get(k) ?? 'depends';
+ 				el.classList.toggle('highlight', involved);
+ 				el.classList.toggle('dimmed', !involved);
+-				el.setAttribute('marker-end', involved ? 'url(#krt-storyboard-arrow-hot)' : 'url(#krt-storyboard-arrow)');
++				el.setAttribute('marker-end', involved ? 'url(#krt-storyboard-arrow-hot)' : `url(#krt-storyboard-arrow-${kind})`);
+ 			}
+ 			for (const [k, el] of edgeLabelEls) {
+ 				const [from, to] = k.split('->');
+@@ -1990,6 +2015,24 @@ function countLabel(n: number | undefined): string {
+ 	return String(n);
+ }
+ 
++function edgeKindLabel(kind: EdgeKind): string {
++	switch (kind) {
++		case 'extends': return localize('krt.pr.storyboard.kind.extends', "extends");
++		case 'gates': return localize('krt.pr.storyboard.kind.gates', "gated by");
++		case 'verifies': return localize('krt.pr.storyboard.kind.verifies', "verified by");
++		case 'depends':
++		default: return localize('krt.pr.storyboard.kind.depends', "depends on");
++	}
++}
++
++function edgeKindDash(kind: EdgeKind): string | undefined {
++	switch (kind) {
++		case 'gates': return '5 4';
++		case 'verifies': return '2 3';
++		default: return undefined;
++	}
++}
++
+ function statusGlyph(status: PullRequestFile['status']): string {
+ 	switch (status) {
+ 		case 'added': return 'A';
+-- 
+2.52.0
+
