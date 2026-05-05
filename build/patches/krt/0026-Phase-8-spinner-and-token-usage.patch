@@ -1,0 +1,277 @@
+From db93eaf6e5e6120d8f14b6dde1faf450560320bf Mon Sep 17 00:00:00 2001
+From: Kol Crooks <kol.crooks@datadoghq.com>
+Date: Tue, 5 May 2026 11:32:37 -0400
+Subject: [PATCH] Phase 8: spinner during tour generation + token in/out usage
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Tour and Storyboard 'Generating chapters…' / 'Preparing…'
+states now show an animated SVG spinner using the KRT accent.
+Once generation completes, the live response's
+`usage.input_tokens` (incl. cache read/creation) and
+`usage.output_tokens` are surfaced in the Tour subheading
+('· N in / M out') and the Storyboard header. Cached results
+keep the existing '· cached' suffix instead — usage is a
+property of the live API call, not the cached chapters.
+---
+ .../krt/browser/ai/krtTourGenerator.ts        | 33 +++++++++-
+ .../browser/pr/krtPullRequestEditorPane.css   | 41 ++++++++++++
+ .../browser/pr/krtPullRequestEditorPane.ts    | 65 ++++++++++++++++---
+ 3 files changed, 128 insertions(+), 11 deletions(-)
+
+diff --git a/src/vs/workbench/contrib/krt/browser/ai/krtTourGenerator.ts b/src/vs/workbench/contrib/krt/browser/ai/krtTourGenerator.ts
+index ff7c09458c7..26d4f113bb6 100644
+--- a/src/vs/workbench/contrib/krt/browser/ai/krtTourGenerator.ts
++++ b/src/vs/workbench/contrib/krt/browser/ai/krtTourGenerator.ts
+@@ -30,10 +30,19 @@ import { readCachedChapters, writeCachedChapters } from './krtTourCache.js';
+  */
+ export const ITourGenerator = createDecorator<ITourGenerator>('krtTourGenerator');
+ 
++export interface TourTokenUsage {
++	readonly inputTokens: number;
++	readonly outputTokens: number;
++	readonly cacheReadTokens?: number;
++	readonly cacheCreationTokens?: number;
++}
++
+ export interface TourGenerationResult {
+ 	readonly chapters: readonly Chapter[];
+ 	readonly model: string;
+ 	readonly fromCache: boolean;
++	/** Only present for live generations; cached chapters do not carry usage. */
++	readonly usage?: TourTokenUsage;
+ }
+ 
+ export type TourGenerationStatus =
+@@ -139,7 +148,8 @@ export class TourGenerator implements ITourGenerator {
+ 				return { kind: 'error', message: localize('krt.tour.parseError', "Couldn't parse chapters from the model response.") };
+ 			}
+ 			writeCachedChapters(this.storageService, pr.owner, pr.repo, pr.number, pr.head.sha, chapters, model);
+-			return { kind: 'ok', result: { chapters, model, fromCache: false } };
++			const usage = extractUsage(json);
++			return { kind: 'ok', result: { chapters, model, fromCache: false, usage } };
+ 		} catch (e) {
+ 			this.logService.error('[krt] tour-generator request failed', e);
+ 			return { kind: 'error', message: e instanceof Error ? e.message : String(e) };
+@@ -235,6 +245,27 @@ function buildUserPrompt(pr: PullRequest, files: readonly PullRequestFile[]): st
+ 	return lines.join('\n');
+ }
+ 
++function extractUsage(json: unknown): TourTokenUsage | undefined {
++	if (!json || typeof json !== 'object') {
++		return undefined;
++	}
++	const usage = (json as { usage?: unknown }).usage;
++	if (!usage || typeof usage !== 'object') {
++		return undefined;
++	}
++	const u = usage as Record<string, unknown>;
++	const num = (v: unknown): number | undefined =>
++		typeof v === 'number' && Number.isFinite(v) ? Math.max(0, Math.trunc(v)) : undefined;
++	const inputTokens = num(u.input_tokens) ?? 0;
++	const outputTokens = num(u.output_tokens) ?? 0;
++	return {
++		inputTokens,
++		outputTokens,
++		cacheReadTokens: num(u.cache_read_input_tokens),
++		cacheCreationTokens: num(u.cache_creation_input_tokens),
++	};
++}
++
+ function extractText(json: unknown): string | undefined {
+ 	if (!json || typeof json !== 'object') {
+ 		return undefined;
+diff --git a/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.css b/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.css
+index c7403e0d6a0..e0ef64013ea 100644
+--- a/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.css
++++ b/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.css
+@@ -1435,6 +1435,47 @@
+ 	color: var(--vscode-foreground);
+ }
+ 
++/* ---------- Loading spinner (Tour + Storyboard) ---------- */
++
++.krt-pr-tour-loading {
++	display: flex;
++	align-items: center;
++	gap: 12px;
++	padding: 16px 20px;
++	color: var(--vscode-descriptionForeground);
++	font-size: 13px;
++}
++
++.krt-pr-tour-loading-text {
++	color: var(--vscode-foreground);
++}
++
++.krt-pr-spinner {
++	flex-shrink: 0;
++	display: inline-block;
++}
++
++.krt-pr-spinner-track {
++	fill: none;
++	stroke: var(--vscode-widget-border, rgba(127, 127, 127, 0.25));
++	stroke-width: 2.5;
++}
++
++.krt-pr-spinner-arc {
++	fill: none;
++	stroke: var(--krt-accent, var(--vscode-focusBorder, #007acc));
++	stroke-width: 2.5;
++	stroke-linecap: round;
++	stroke-dasharray: 14 60;
++	transform-origin: 12px 12px;
++	animation: krt-pr-spinner-rotate 0.9s linear infinite;
++}
++
++@keyframes krt-pr-spinner-rotate {
++	from { transform: rotate(0deg); }
++	to   { transform: rotate(360deg); }
++}
++
+ /* ---------- Storyboard sub-mode ---------- */
+ 
+ .krt-pr-editor-body.storyboard {
+diff --git a/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.ts b/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.ts
+index 8eb74e705d2..fed676d7de9 100644
+--- a/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.ts
++++ b/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.ts
+@@ -21,7 +21,7 @@ import { ILogService } from '../../../../../platform/log/common/log.js';
+ import { IOpenerService } from '../../../../../platform/opener/common/opener.js';
+ import { isKrtError } from '../../../../../platform/krt/common/errors.js';
+ import { Chapter, EdgeKind, EDGE_KINDS, TourVariant } from '../ai/krtTourTypes.js';
+-import { ITourGenerator, TourGenerationStatus } from '../ai/krtTourGenerator.js';
++import { ITourGenerator, TourGenerationStatus, TourTokenUsage } from '../ai/krtTourGenerator.js';
+ import { layoutStoryboard } from '../ai/krtStoryboardLayout.js';
+ import {
+ 	readReviewedChapters,
+@@ -55,6 +55,7 @@ interface TourState {
+ 	readonly chapters: readonly Chapter[];
+ 	readonly model: string;
+ 	readonly fromCache: boolean;
++	readonly usage?: TourTokenUsage;
+ }
+ 
+ interface PatchLine {
+@@ -1069,8 +1070,7 @@ export class KrtPullRequestEditorPane extends EditorPane {
+ 			return;
+ 		}
+ 		if (this.tourLoading) {
+-			const loading = DOM.append(body, DOM.$('.krt-pr-empty'));
+-			loading.textContent = localize('krt.pr.tour.loading', "Generating chapters with the Anthropic API…");
++			renderTourLoadingState(body, localize('krt.pr.tour.loading', "Generating chapters with the Anthropic API…"));
+ 			return;
+ 		}
+ 		if (this.tourError) {
+@@ -1086,8 +1086,7 @@ export class KrtPullRequestEditorPane extends EditorPane {
+ 			return;
+ 		}
+ 		if (!this.tourState) {
+-			const loading = DOM.append(body, DOM.$('.krt-pr-empty'));
+-			loading.textContent = localize('krt.pr.tour.starting', "Preparing tour…");
++			renderTourLoadingState(body, localize('krt.pr.tour.starting', "Preparing tour…"));
+ 			void this.loadTour(pr, /* forceRefresh */ false);
+ 			return;
+ 		}
+@@ -1384,13 +1383,16 @@ export class KrtPullRequestEditorPane extends EditorPane {
+ 		}
+ 		const reviewedCount = this.tourState.chapters.filter(c => this.reviewedChapters.has(c.id)).length;
+ 		const total = this.tourState.chapters.length;
++		const suffix = this.tourState.fromCache
++			? localize('krt.pr.tour.cached', " · cached")
++			: formatUsageSuffix(this.tourState.usage);
+ 		sub.textContent = localize(
+ 			'krt.pr.tour.progress',
+ 			"{0}/{1} chapters reviewed · model {2}{3}",
+ 			reviewedCount,
+ 			total,
+ 			this.tourState.model,
+-			this.tourState.fromCache ? localize('krt.pr.tour.cached', " · cached") : '',
++			suffix,
+ 		);
+ 	}
+ 
+@@ -1471,6 +1473,13 @@ export class KrtPullRequestEditorPane extends EditorPane {
+ 		if (this.tourState) {
+ 			const chip = DOM.append(headerBar, DOM.$('span.krt-pr-storyboard-chip'));
+ 			chip.textContent = localize('krt.pr.storyboard.reviewedChip', "{0}/{1} reviewed", reviewedCount, totalChapters);
++			const usageSuffix = this.tourState.fromCache
++				? localize('krt.pr.tour.cached', " · cached").trim()
++				: formatUsageSuffix(this.tourState.usage).trim();
++			if (usageSuffix) {
++				const usage = DOM.append(headerBar, DOM.$('span.krt-pr-storyboard-subheading'));
++				usage.textContent = usageSuffix;
++			}
+ 		}
+ 		const spacer = DOM.append(headerBar, DOM.$('span.krt-pr-storyboard-spacer'));
+ 		spacer.textContent = '';
+@@ -1506,8 +1515,7 @@ export class KrtPullRequestEditorPane extends EditorPane {
+ 			return;
+ 		}
+ 		if (this.tourLoading) {
+-			const loading = DOM.append(body, DOM.$('.krt-pr-empty'));
+-			loading.textContent = localize('krt.pr.storyboard.loading', "Generating chapters with the Anthropic API…");
++			renderTourLoadingState(body, localize('krt.pr.storyboard.loading', "Generating chapters with the Anthropic API…"));
+ 			return;
+ 		}
+ 		if (this.tourError) {
+@@ -1523,8 +1531,7 @@ export class KrtPullRequestEditorPane extends EditorPane {
+ 			return;
+ 		}
+ 		if (!this.tourState) {
+-			const loading = DOM.append(body, DOM.$('.krt-pr-empty'));
+-			loading.textContent = localize('krt.pr.storyboard.starting', "Preparing storyboard…");
++			renderTourLoadingState(body, localize('krt.pr.storyboard.starting', "Preparing storyboard…"));
+ 			void this.loadTour(pr, /* forceRefresh */ false);
+ 			return;
+ 		}
+@@ -2015,6 +2022,44 @@ function countLabel(n: number | undefined): string {
+ 	return String(n);
+ }
+ 
++function formatUsageSuffix(usage: TourTokenUsage | undefined): string {
++	if (!usage) {
++		return '';
++	}
++	const inTotal = usage.inputTokens + (usage.cacheReadTokens ?? 0) + (usage.cacheCreationTokens ?? 0);
++	return localize('krt.pr.tour.usageSuffix', " · {0} in / {1} out", inTotal.toLocaleString(), usage.outputTokens.toLocaleString());
++}
++
++function appendSpinner(parent: HTMLElement): SVGSVGElement {
++	const SVG_NS = 'http://www.w3.org/2000/svg';
++	const svg = document.createElementNS(SVG_NS, 'svg');
++	svg.setAttribute('class', 'krt-pr-spinner');
++	svg.setAttribute('viewBox', '0 0 24 24');
++	svg.setAttribute('width', '20');
++	svg.setAttribute('height', '20');
++	const track = document.createElementNS(SVG_NS, 'circle');
++	track.setAttribute('cx', '12');
++	track.setAttribute('cy', '12');
++	track.setAttribute('r', '9');
++	track.setAttribute('class', 'krt-pr-spinner-track');
++	const arc = document.createElementNS(SVG_NS, 'circle');
++	arc.setAttribute('cx', '12');
++	arc.setAttribute('cy', '12');
++	arc.setAttribute('r', '9');
++	arc.setAttribute('class', 'krt-pr-spinner-arc');
++	svg.appendChild(track);
++	svg.appendChild(arc);
++	parent.appendChild(svg);
++	return svg;
++}
++
++function renderTourLoadingState(parent: HTMLElement, text: string): void {
++	const wrap = DOM.append(parent, DOM.$('.krt-pr-tour-loading'));
++	appendSpinner(wrap);
++	const label = DOM.append(wrap, DOM.$('span.krt-pr-tour-loading-text'));
++	label.textContent = text;
++}
++
+ function edgeKindLabel(kind: EdgeKind): string {
+ 	switch (kind) {
+ 		case 'extends': return localize('krt.pr.storyboard.kind.extends', "extends");
+-- 
+2.52.0
+
