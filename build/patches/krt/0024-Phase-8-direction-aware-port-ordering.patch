@@ -1,0 +1,86 @@
+From f96c596ba15467e7b327ec429634bff8e9b1563a Mon Sep 17 00:00:00 2001
+From: Kol Crooks <kol.crooks@datadoghq.com>
+Date: Tue, 5 May 2026 11:17:09 -0400
+Subject: [PATCH] Phase 8: order ports by routing direction, not raw target y
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Sorting outgoing edges by raw target-y was wrong because a
+multi-tier edge whose target sits low on the canvas still
+routes up first (over the top rail) before going across — its
+wire leaves the source going up, so its source-port belongs
+at the top of the source. Raw-target-y put it at the bottom
+and forced its wire to cross every adjacent edge that was
+actually going down.
+
+Outgoing edges now sort by an effective direction-y: multi-tier
+edges anchor at FAR_TOP (always top of stack), adjacent edges
+use their target's y. Same fix on the incoming side. The wire
+that heads up leaves from the topmost port; the wire that
+heads down leaves from the bottommost port; nothing crosses.
+---
+ .../krt/browser/ai/krtStoryboardLayout.ts     | 43 ++++++++++++++-----
+ 1 file changed, 32 insertions(+), 11 deletions(-)
+
+diff --git a/src/vs/workbench/contrib/krt/browser/ai/krtStoryboardLayout.ts b/src/vs/workbench/contrib/krt/browser/ai/krtStoryboardLayout.ts
+index ede82934e36..dfa0b189e32 100644
+--- a/src/vs/workbench/contrib/krt/browser/ai/krtStoryboardLayout.ts
++++ b/src/vs/workbench/contrib/krt/browser/ai/krtStoryboardLayout.ts
+@@ -240,21 +240,42 @@ function routeEdges(
+ 		}
+ 	}
+ 
+-	// Sort each node's outgoing edge list by the *target's* y, and
+-	// each incoming list by the *source's* y. This makes the order
+-	// in which ports are stacked on a node's edge follow the visual
+-	// order of the other endpoints — the topmost target's edge
+-	// leaves from the topmost source-port, etc. — so sibling edges
+-	// fan out cleanly instead of crossing each other.
+-	const otherY = (id: string): number => {
++	// Sort each node's outgoing/incoming edge list by the y the
++	// wire actually heads toward as it leaves the node, NOT by the
++	// raw target y. A multi-tier edge whose target sits low on the
++	// canvas still routes UP to the top rail before going across,
++	// so its source-port belongs at the top of the source. Sorting
++	// by raw target-y would put it at the bottom and force its wire
++	// to cross every adjacent edge that's actually going down.
++	//
++	// "Direction-y" for an outgoing edge:
++	//   - multi-tier (over top rail):   FAR_TOP + target.y  (always top)
++	//   - adjacent:                     target.y
++	// And symmetrically on the incoming side.
++	const FAR_TOP = -1e9;
++	const centerY = (id: string): number => {
+ 		const p = positions.get(id);
+ 		return p ? p.y + p.height / 2 : 0;
+ 	};
+-	for (const list of outgoing.values()) {
+-		list.sort((a, b) => otherY(a) - otherY(b));
++	const outDirectionY = (sourceId: string, targetId: string): number => {
++		const span = (tiers.get(targetId) ?? 0) - (tiers.get(sourceId) ?? 0);
++		const ty = centerY(targetId);
++		// Multi-tier edges all anchor at FAR_TOP; the target's y is
++		// added as a tiebreaker so multiple multi-tier edges from the
++		// same source still have a stable, meaningful order among
++		// themselves.
++		return span >= 2 ? FAR_TOP + ty : ty;
++	};
++	const inDirectionY = (sourceId: string, targetId: string): number => {
++		const span = (tiers.get(targetId) ?? 0) - (tiers.get(sourceId) ?? 0);
++		const sy = centerY(sourceId);
++		return span >= 2 ? FAR_TOP + sy : sy;
++	};
++	for (const [src, list] of outgoing) {
++		list.sort((a, b) => outDirectionY(src, a) - outDirectionY(src, b));
+ 	}
+-	for (const list of incoming.values()) {
+-		list.sort((a, b) => otherY(a) - otherY(b));
++	for (const [tgt, list] of incoming) {
++		list.sort((a, b) => inDirectionY(a, tgt) - inDirectionY(b, tgt));
+ 	}
+ 
+ 	const portY = (count: number, index: number, top: number, height: number): number => {
+-- 
+2.52.0
+
