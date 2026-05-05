@@ -363,6 +363,22 @@ Rules:
 - **Demo**: switch any PR to Storyboard, see the chapter graph, hover to
   highlight relationships.
 
+### Phase 8.5 — Monaco-backed diff views (1 week)
+- Replace the hand-rolled `<div>`-based unified-diff renderer used by the
+  Diff sub-mode and the Tour mini-diffs with embedded Monaco diff editors.
+- Hosts on `IModelService` text models created from the PR file's
+  base/head content (or unified-diff-derived virtual models when full
+  content isn't easily available).
+- Wire language detection via VS Code's existing language detection so
+  syntax highlighting "just works" for Rust/Go/TS/Python/etc.
+- **LSP "go to definition" / hover / references inside the diff**:
+  enable command-click on tokens. This requires the file's text model to
+  be language-server-aware, which means feeding it through the same
+  `ITextModelService` path Editor view (Phase 9) uses. Sequencing:
+  this phase lands first (read-only Monaco views), Phase 9 adds editing.
+- **Demo**: open a Rust PR, click a function name in the diff, jump to
+  its definition, see hover docs.
+
 ### Phase 9 — Editor view (1 week)
 - Mostly stock Monaco. Custom: file tree styled to match the design, status
   bar minimized, AI context panel.
