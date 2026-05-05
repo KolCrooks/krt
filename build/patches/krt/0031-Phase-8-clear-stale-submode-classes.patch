@@ -1,0 +1,50 @@
+From fb8f16ab380b02e99b364ffe3dcb2da226ef8eef Mon Sep 17 00:00:00 2001
+From: Kol Crooks <kol.crooks@datadoghq.com>
+Date: Tue, 5 May 2026 12:53:39 -0400
+Subject: [PATCH] Phase 8: clear all stale sub-mode classes when switching
+ views
+
+renderPrView / renderDiffView / renderTourView each only removed
+a subset of the sibling sub-mode classes from the body element.
+Switching from Storyboard -> Tour left .storyboard on the body,
+which kept its 'overflow: hidden' active and made the Tour view
+appear unscrollable. Each renderer now removes all three sibling
+classes before adding its own.
+---
+ .../contrib/krt/browser/pr/krtPullRequestEditorPane.ts      | 6 +++---
+ 1 file changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.ts b/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.ts
+index 16af53dbbe1..080c6ff16f1 100644
+--- a/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.ts
++++ b/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.ts
+@@ -268,7 +268,7 @@ export class KrtPullRequestEditorPane extends EditorPane {
+ 	}
+ 
+ 	private renderPrView(pr: PullRequest): void {
+-		this.bodyElement.classList.remove('diff');
++		this.bodyElement.classList.remove('diff', 'tour', 'storyboard');
+ 		this.bodyElement.classList.add('pr');
+ 		const grid = DOM.append(this.bodyElement, DOM.$('.krt-pr-grid'));
+ 		const main = DOM.append(grid, DOM.$('.krt-pr-main'));
+@@ -638,7 +638,7 @@ export class KrtPullRequestEditorPane extends EditorPane {
+ 	// ---------- Diff sub-mode ----------
+ 
+ 	private renderDiffView(pr: PullRequest): void {
+-		this.bodyElement.classList.remove('pr');
++		this.bodyElement.classList.remove('pr', 'tour', 'storyboard');
+ 		this.bodyElement.classList.add('diff');
+ 		const wrap = DOM.append(this.bodyElement, DOM.$('.krt-pr-diff'));
+ 		const tree = DOM.append(wrap, DOM.$('.krt-pr-diff-tree'));
+@@ -1062,7 +1062,7 @@ export class KrtPullRequestEditorPane extends EditorPane {
+ 	// ---------- Tour sub-mode ----------
+ 
+ 	private renderTourView(pr: PullRequest): void {
+-		this.bodyElement.classList.remove('pr', 'diff');
++		this.bodyElement.classList.remove('pr', 'diff', 'storyboard');
+ 		this.bodyElement.classList.add('tour');
+ 
+ 		// Header bar with variant toggle.
+-- 
+2.52.0
+
