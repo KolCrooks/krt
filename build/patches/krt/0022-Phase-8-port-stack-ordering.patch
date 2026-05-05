@@ -1,0 +1,47 @@
+From 51fae987379685d513262568ae2201f1ea7c5dc1 Mon Sep 17 00:00:00 2001
+From: Kol Crooks <kol.crooks@datadoghq.com>
+Date: Tue, 5 May 2026 11:08:00 -0400
+Subject: [PATCH] Phase 8: order port stacks by other-endpoint y
+
+Each node's outgoing edges are now stacked top-to-bottom in the
+order of their target's y; incoming edges are stacked by their
+source's y. So an edge to a higher target leaves from a higher
+source-port, and an edge from a higher source enters at a higher
+target-port. Sibling edges leaving the same node fan out
+cleanly along the right edge instead of converging on a shared
+horizontal stub before splitting.
+---
+ .../krt/browser/ai/krtStoryboardLayout.ts       | 17 +++++++++++++++++
+ 1 file changed, 17 insertions(+)
+
+diff --git a/src/vs/workbench/contrib/krt/browser/ai/krtStoryboardLayout.ts b/src/vs/workbench/contrib/krt/browser/ai/krtStoryboardLayout.ts
+index d6d50ef8ad1..751808eb2e7 100644
+--- a/src/vs/workbench/contrib/krt/browser/ai/krtStoryboardLayout.ts
++++ b/src/vs/workbench/contrib/krt/browser/ai/krtStoryboardLayout.ts
+@@ -240,6 +240,23 @@ function routeEdges(
+ 		}
+ 	}
+ 
++	// Sort each node's outgoing edge list by the *target's* y, and
++	// each incoming list by the *source's* y. This makes the order
++	// in which ports are stacked on a node's edge follow the visual
++	// order of the other endpoints — the topmost target's edge
++	// leaves from the topmost source-port, etc. — so sibling edges
++	// fan out cleanly instead of crossing each other.
++	const otherY = (id: string): number => {
++		const p = positions.get(id);
++		return p ? p.y + p.height / 2 : 0;
++	};
++	for (const list of outgoing.values()) {
++		list.sort((a, b) => otherY(a) - otherY(b));
++	}
++	for (const list of incoming.values()) {
++		list.sort((a, b) => otherY(a) - otherY(b));
++	}
++
+ 	const portY = (count: number, index: number, top: number, height: number): number => {
+ 		// Distribute `count` ports evenly along the node's vertical
+ 		// edge across the central 40% so corners don't crowd.
+-- 
+2.52.0
+
