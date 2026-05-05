@@ -366,18 +366,55 @@ Rules:
 ### Phase 8.5 — Monaco-backed diff views (1 week)
 - Replace the hand-rolled `<div>`-based unified-diff renderer used by the
   Diff sub-mode and the Tour mini-diffs with embedded Monaco diff editors.
-- Hosts on `IModelService` text models created from the PR file's
-  base/head content (or unified-diff-derived virtual models when full
-  content isn't easily available).
+- Hosts on `IModelService` text models created from unified-diff-derived
+  virtual models with blank-line padding for unknown context. Real
+  base/head content (and the LSP that comes with it) lands in Phase 8.6.
 - Wire language detection via VS Code's existing language detection so
   syntax highlighting "just works" for Rust/Go/TS/Python/etc.
-- **LSP "go to definition" / hover / references inside the diff**:
-  enable command-click on tokens. This requires the file's text model to
-  be language-server-aware, which means feeding it through the same
-  `ITextModelService` path Editor view (Phase 9) uses. Sequencing:
-  this phase lands first (read-only Monaco views), Phase 9 adds editing.
-- **Demo**: open a Rust PR, click a function name in the diff, jump to
-  its definition, see hover docs.
+- **Demo**: Diff / Tour Chapters / Tour Reading / Storyboard all render
+  Monaco side-by-side diffs with syntax colours. Inline review-comment
+  threads + composer attach as Monaco view zones.
+
+### Phase 8.6 — Workspace registry + LSP via real file URIs (1 week)
+- Workspace registry: an explicit list of local repository folders KRT
+  is allowed to surface PRs from. Add / remove via Settings → KRT or
+  the PR Search overlay. Stored in `IStorageService` (application
+  scope).
+- PR Search filters to those repos: GraphQL query gets `repo:o/n`
+  filters per registered workspace.
+- `KrtMonacoDiffView` switches URI strategy when the PR's repo matches
+  a workspace: head model uses the real `file://` URI of the working
+  copy, base model uses a `krt-git://` URI backed by
+  `git -C <workspace> show ${baseSha}:${path}`. Models go through
+  `ITextModelService.createModelReference` so language extensions
+  activate the normal way.
+- Empty state when no workspaces registered: "Add a workspace to start
+  finding PRs" CTA.
+- **Demo**: add a Cargo repo as a workspace, search shows that repo's
+  PRs, open one, command-click a function name in the diff → jump to
+  its definition via rust-analyzer.
+
+### Phase 8.7 — Auto-switch on review (jj + git, 1 week)
+- When opening a PR for a registered workspace, prompt to switch the
+  workspace's working copy to the PR's head commit.
+  - **jj-managed workspace**: `git fetch +refs/pull/N/head:refs/remotes/origin/krt-pr/N`
+    → `jj git import` → `jj new ${headSha}` (the fetch+import is
+    required for forks and any PR head the local clone hasn't pulled
+    yet). Non-destructive — KRT captures the pre-switch op id and
+    returns via `jj op restore <opId>`, which works even when the
+    previous change was empty + got auto-abandoned.
+  - **plain git, clean tree**: `gh pr checkout ${n}`.
+  - **plain git, dirty tree**: strong warning dialog, then
+    `git stash push -m "krt: PR #${n}"` followed by checkout. KRT
+    reminds the user to `git stash pop` when the PR closes (manual,
+    intentionally — auto-popping is too surprising).
+- Resume token persisted to `IStorageService` so even a crash mid-review
+  is recoverable.
+- Workbench refresh after switch so the file tree, status bar, and any
+  open editors re-read.
+- **Demo**: open a PR in a registered jj-colocated repo, confirm the
+  switch dialog, files in the Editor view reflect the PR's head, close
+  the PR tab → prompted to return → working copy back where it was.
 
 ### Phase 9 — Editor view (1 week)
 - Mostly stock Monaco. Custom: file tree styled to match the design, status
@@ -426,7 +463,7 @@ Rules:
 - Tag a `v0.1.0-beta`, write a launch post, share with a small group, collect
   feedback in GitHub issues. Iterate. Ship v1.
 
-Aggregate ~16-18 weeks of work for a single engineer, less with a small team.
+Aggregate ~18-20 weeks of work for a single engineer, less with a small team.
 
 ---
 
@@ -459,6 +496,14 @@ The early-architecture questions are resolved as follows:
    a hard requirement: no Microsoft assets, no "Visual Studio" / "VSCode"
    strings in the binary, MIT LICENSE + NOTICE file crediting upstream,
    signed installers per platform, update feed on GitHub Releases.
+8. **Workspace model** — KRT is a per-repo tool. Users register a list of
+   local repository folders ("workspaces") and PR Search filters to those
+   repos only. Diff models are backed by the local clone (real `file://`
+   URI for head, `git show` for base) so language servers activate
+   normally. Reviewing a PR optionally switches the workspace's working
+   copy to the PR head — non-destructively via `jj new` when the
+   workspace is jj-managed, or via `git stash + checkout` (behind a
+   strong warning dialog) for plain git. Established in Phases 8.6 / 8.7.
 
 ---
 
