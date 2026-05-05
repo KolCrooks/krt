@@ -90,19 +90,83 @@ Smallest reversible piece first.
   pan-zoom canvas rendering, we can revisit and host a React
   island then.
 
-## Open questions
+## Post-MVP iterations (also landed in Phase 8)
 
-- Edge "kinds" / colour coding: PLAN.md says "relationship
-  colour coding". Phase 7's `Chapter.dependsOn` is a flat
-  `string[]` — no kind information. For v1 we draw a single
-  neutral edge colour. Adding kinds means extending the
-  Chapter shape and re-prompting; deferring to a future
-  iteration.
+After the demo-gate commit (`urqrlnvp`), several iterations
+hardened the experience based on review feedback:
+
+- **Channel sub-track allocation** for orthogonal edge routing
+  (Sugiyama 1981 / Graphviz dot / ELK Layered): edges in the
+  same gap get evenly-spaced sub-track x's so two wires never
+  share a vertical channel for a long stretch.
+- **Top-rail routing** for multi-tier edges so they don't cross
+  through intermediate cards.
+- **Direction-aware port stacking**: outgoing edges sort by the
+  y-coordinate the wire heads toward (multi-tier edges anchor
+  at the top because they route up-and-over) so wires fan out
+  cleanly along the right edge of a card.
+- **Typed edges**: `dependsOn` becomes `{ id, kind }[]` with
+  kinds `depends | extends | gates | verifies`. Header carries
+  a colour-coded legend; per-edge SVG labels were tried then
+  removed (too dense to read with overlapping paths).
+- **Chapter kinds**: `Chapter.kind` is one of
+  `foundation | replace | extend | glue | gate | verify`. Card
+  top-stripe + small mono kind badge are coloured by this.
+  Stronger system prompt tells the model to prefer
+  `kind=verify` for test-heavy chapters and `kind=gate` for
+  config-heavy chapters, and to be aggressive about emitting
+  `verifies` / `gates` edges.
+- **Streaming via SSE**: `IKrtAiClient.postMessagesStream` +
+  `onStreamEvent` parse Anthropic's content-block deltas in
+  the main process and emit through `ProxyChannel`. The
+  renderer pulls completed chapter objects out of the partial
+  JSON each tick (brace-balanced scanner), so chapters appear
+  one at a time in the rail / Reading view / Storyboard graph.
+- **Live token counter** in the header. Output tokens are
+  estimated client-side from `accumulatedText.length / 4`
+  because Anthropic only sends authoritative `output_tokens` in
+  the final `message_delta`.
+- **Spinner badge** in both Tour and Storyboard headers while
+  a stream is in flight.
+- **Soft re-render path** for usage-only ticks (subheading text
+  update) so streaming chunks don't clobber click / hover /
+  scroll / focus state. Structural updates capture and restore
+  scroll position on both the storyboard scroller and editor
+  root.
+- **Full markdown rendering** of chapter content via the
+  workbench's `renderMarkdown`, plus the full GitHub-style
+  emoji-shortcode table (1837 entries, generated into
+  `krtEmojiTable.ts` from `extensions/git/resources/emojis.json`
+  — code-point arrays so the source stays ASCII).
+- **Selectable chapter content**: `hasActiveSelection(target)`
+  guards on card clicks suppresses the selection-changing
+  click when the user is dragging to highlight text.
+- **Sub-mode class hygiene**: each renderer clears all sibling
+  body classes before adding its own (was leaving `.storyboard`
+  on the body when switching to Tour, breaking scroll).
+- **Variable card height** keyed off title length so long
+  titles aren't clipped.
+- **Centre-on-click** for connection-rail clicks: smooth-scroll
+  the canvas horizontally and the editor root vertically so
+  the target card lands in the middle of the viewport.
+- **Storyboard as a header section** with the full Diff
+  sub-mode layout below: file tree on the left + stacked
+  unified diffs on the right, scoped to the selected chapter.
+  Whole sub-mode shares one scroll surface (the editor root);
+  graph header and detail rail use `position: sticky`.
 
 ## Deferred to later phases
 
-- Pan/zoom and minimap — current viewport-fit layout works
-  for typical PR sizes.
-- Edge kind colour coding — needs prompt + schema change.
-- React webview migration — only if the SVG approach hits
-  scaling limits.
+- **Phase 8.5 (new) — Monaco-backed diff views**. Replace the
+  hand-rolled `<div>`-based unified-diff renderer used in the
+  Diff sub-mode AND the storyboard's chapter diff with
+  embedded Monaco diff editors so reviewers get syntax
+  highlighting + LSP hover / go-to-definition / find-
+  references inside the diff. Scoped before Phase 9 (Editor
+  view) because both phases need the same `ITextModelService`
+  + language-server plumbing.
+- Pan/zoom and minimap — current scroll model works for the
+  PR sizes we've tested. Revisit if a 30+ chapter graph hits
+  the wall.
+- React webview migration — only if the hand-rolled SVG
+  approach hits scaling limits we can't paper over.
