@@ -1,0 +1,420 @@
+From 70f428c60c7a8c014546d688a5302d30eb62f4a9 Mon Sep 17 00:00:00 2001
+From: Kol Crooks <kol.crooks@datadoghq.com>
+Date: Tue, 5 May 2026 11:51:33 -0400
+Subject: [PATCH] Phase 8: live-tick output tokens + soft re-render during
+ streaming
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Three streaming-UX fixes:
+
+1. Output-token live tick. Anthropic only sends authoritative
+   output_tokens once, in the final message_delta. Until then,
+   estimate from accumulatedText.length / 4 (Anthropic's rough
+   chars-per-token) on every text delta and surface that as
+   liveUsage.outputTokens. The number now climbs while the
+   model is still writing instead of jumping from 0 to N at
+   the end.
+
+2. Soft re-render path. The pane's onUpdate distinguishes
+   chapter-count changes (structural — needs full re-layout)
+   from usage-only ticks (cosmetic — just touch the
+   subheading text node). Soft updates no longer rebuild the
+   storyboard DOM, so clicks, hover, and focus survive token
+   ticks. Structural updates capture and restore the
+   storyboard scroller's scroll position so adding a new
+   node doesn't yank the user's view back to the top-left.
+
+3. Streaming spinner. New '.krt-pr-streaming-badge' chip in
+   both Tour and Storyboard headers. Visible (animated) while
+   tourStreaming === true, hidden once the stream completes.
+   refreshTourSubheading and refreshStoryboardSubheading both
+   call refreshStreamingBadges so the chip stays in sync with
+   every soft update.
+
+Token-emit calls inside TourGenerator are also throttled to
+~150ms so the channel doesn't spam the renderer with one
+event per text delta when only the count is changing.
+---
+ .../krt/browser/ai/krtTourGenerator.ts        |  51 ++++++--
+ .../browser/pr/krtPullRequestEditorPane.css   |  24 ++++
+ .../browser/pr/krtPullRequestEditorPane.ts    | 122 +++++++++++++++---
+ 3 files changed, 174 insertions(+), 23 deletions(-)
+
+diff --git a/src/vs/workbench/contrib/krt/browser/ai/krtTourGenerator.ts b/src/vs/workbench/contrib/krt/browser/ai/krtTourGenerator.ts
+index a3dfcaf61c7..84b0f3a0618 100644
+--- a/src/vs/workbench/contrib/krt/browser/ai/krtTourGenerator.ts
++++ b/src/vs/workbench/contrib/krt/browser/ai/krtTourGenerator.ts
+@@ -141,32 +141,63 @@ export class TourGenerator implements ITourGenerator {
+ 		let accumulatedText = '';
+ 		let liveUsage: TourTokenUsage | undefined;
+ 		let lastEmittedCount = 0;
+-		const emitUpdate = () => {
++		let throttleTimer: ReturnType<typeof setTimeout> | undefined;
++
++		const estimateOutputTokens = (): number => Math.max(0, Math.ceil(accumulatedText.length / 4));
++
++		const fireUpdate = () => {
++			if (throttleTimer) {
++				clearTimeout(throttleTimer);
++				throttleTimer = undefined;
++			}
+ 			if (!options?.onUpdate) {
+ 				return;
+ 			}
+ 			const partial = parseChaptersStreaming(accumulatedText, files);
+-			// Re-emit when either chapter list or usage moved.
+-			if (partial.length !== lastEmittedCount || liveUsage) {
+-				lastEmittedCount = partial.length;
+-				options.onUpdate({ chapters: partial, usage: liveUsage });
++			lastEmittedCount = partial.length;
++			options.onUpdate({ chapters: partial, usage: liveUsage });
++		};
++
++		const scheduleUpdate = () => {
++			if (throttleTimer || !options?.onUpdate) {
++				return;
+ 			}
++			throttleTimer = setTimeout(fireUpdate, 150);
+ 		};
++
+ 		const listener = this.aiClient.onStreamEvent(event => {
+ 			if (event.requestId !== requestId) {
+ 				return;
+ 			}
+ 			if (event.kind === 'text' && event.text) {
+ 				accumulatedText += event.text;
+-				emitUpdate();
++				// Refine the running output-token estimate from the
++				// streaming text. Anthropic only sends the authoritative
++				// output_tokens in the final message_delta, so we
++				// approximate at ~4 chars/token until then.
++				if (liveUsage) {
++					liveUsage = {
++						...liveUsage,
++						outputTokens: Math.max(liveUsage.outputTokens, estimateOutputTokens()),
++					};
++				}
++				// Fast path: a new chapter just popped out of the JSON?
++				// Fire immediately so the UI gets the chapter without
++				// waiting for the throttle. Otherwise schedule.
++				const partial = parseChaptersStreaming(accumulatedText, files);
++				if (partial.length !== lastEmittedCount) {
++					fireUpdate();
++				} else {
++					scheduleUpdate();
++				}
+ 			} else if (event.kind === 'usage') {
+ 				liveUsage = {
+ 					inputTokens: event.inputTokens ?? 0,
+-					outputTokens: event.outputTokens ?? 0,
++					outputTokens: Math.max(event.outputTokens ?? 0, estimateOutputTokens()),
+ 					cacheReadTokens: event.cacheReadTokens,
+ 					cacheCreationTokens: event.cacheCreationTokens,
+ 				};
+-				emitUpdate();
++				scheduleUpdate();
+ 			}
+ 		});
+ 
+@@ -204,6 +235,10 @@ export class TourGenerator implements ITourGenerator {
+ 			this.logService.error('[krt] tour-generator request failed', e);
+ 			return { kind: 'error', message: e instanceof Error ? e.message : String(e) };
+ 		} finally {
++			if (throttleTimer) {
++				clearTimeout(throttleTimer);
++				throttleTimer = undefined;
++			}
+ 			listener.dispose();
+ 		}
+ 	}
+diff --git a/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.css b/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.css
+index e0ef64013ea..3f9bfc126c0 100644
+--- a/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.css
++++ b/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.css
+@@ -1446,6 +1446,30 @@
+ 	font-size: 13px;
+ }
+ 
++.krt-pr-streaming-badge {
++	display: none;
++	align-items: center;
++	gap: 6px;
++	padding: 2px 8px;
++	font-size: 10.5px;
++	font-family: var(--monaco-monospace-font, monospace);
++	color: var(--krt-accent, var(--vscode-focusBorder, #007acc));
++	background: var(--krt-accent-soft, rgba(91, 91, 255, 0.12));
++	border: 1px solid var(--krt-accent-line, transparent);
++	border-radius: 3px;
++	letter-spacing: 0.04em;
++	text-transform: uppercase;
++}
++
++.krt-pr-streaming-badge.visible {
++	display: inline-flex;
++}
++
++.krt-pr-streaming-badge .krt-pr-spinner {
++	width: 12px;
++	height: 12px;
++}
++
+ .krt-pr-tour-loading-text {
+ 	color: var(--vscode-foreground);
+ }
+diff --git a/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.ts b/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.ts
+index 68fcbc236c3..28e68e093b1 100644
+--- a/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.ts
++++ b/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.ts
+@@ -114,6 +114,7 @@ export class KrtPullRequestEditorPane extends EditorPane {
+ 	// Tour sub-mode state
+ 	private tourState: TourState | undefined;
+ 	private tourLoading = false;
++	private tourStreaming = false;
+ 	private tourError: string | undefined;
+ 	private tourNoKey = false;
+ 	private tourVariant: TourVariant = 'chapters';
+@@ -121,6 +122,10 @@ export class KrtPullRequestEditorPane extends EditorPane {
+ 	private reviewedChapters: Set<string> = new Set();
+ 	private tourFetchToken = 0;
+ 	private tourSubheadingEl: HTMLElement | undefined;
++	private tourStreamingBadgeEl: HTMLElement | undefined;
++	private storyboardSubheadingEl: HTMLElement | undefined;
++	private storyboardStreamingBadgeEl: HTMLElement | undefined;
++	private storyboardScrollerEl: HTMLElement | undefined;
+ 
+ 	// Storyboard sub-mode state
+ 	private storyboardSelectedId: string | undefined;
+@@ -170,6 +175,7 @@ export class KrtPullRequestEditorPane extends EditorPane {
+ 		this.reviewedPaths = new Set(readReviewedPaths(this.krtStorageService, input.owner, input.repo, input.number));
+ 		this.tourState = undefined;
+ 		this.tourLoading = false;
++		this.tourStreaming = false;
+ 		this.tourError = undefined;
+ 		this.tourNoKey = false;
+ 		this.tourSelectedChapterId = undefined;
+@@ -211,6 +217,10 @@ export class KrtPullRequestEditorPane extends EditorPane {
+ 		this.diffTreeRowsByPath = new Map();
+ 		this.diffTreeCountEl = undefined;
+ 		this.tourSubheadingEl = undefined;
++		this.tourStreamingBadgeEl = undefined;
++		this.storyboardSubheadingEl = undefined;
++		this.storyboardStreamingBadgeEl = undefined;
++		this.storyboardScrollerEl = undefined;
+ 		this.bodyDisposables.clear();
+ 		super.clearInput();
+ 	}
+@@ -1060,6 +1070,8 @@ export class KrtPullRequestEditorPane extends EditorPane {
+ 		heading.textContent = localize('krt.pr.tour.heading', "AI Tour");
+ 		const subHeading = DOM.append(headerBar, DOM.$('.krt-pr-tour-subheading'));
+ 		this.tourSubheadingEl = subHeading;
++		const streamingBadge = DOM.append(headerBar, DOM.$('span.krt-pr-streaming-badge'));
++		this.tourStreamingBadgeEl = streamingBadge;
+ 		this.refreshTourSubheading();
+ 		this.renderTourVariantToggle(headerBar, pr);
+ 
+@@ -1069,7 +1081,7 @@ export class KrtPullRequestEditorPane extends EditorPane {
+ 			this.renderTourEmptyNoKey(body);
+ 			return;
+ 		}
+-		if (this.tourLoading) {
++		if (this.tourLoading && !this.tourState) {
+ 			renderTourLoadingState(body, localize('krt.pr.tour.loading', "Generating chapters with the Anthropic API…"));
+ 			return;
+ 		}
+@@ -1394,6 +1406,47 @@ export class KrtPullRequestEditorPane extends EditorPane {
+ 			this.tourState.model,
+ 			suffix,
+ 		);
++		this.refreshStreamingBadges();
++	}
++
++	private refreshStoryboardSubheading(): void {
++		const sub = this.storyboardSubheadingEl;
++		if (!sub) {
++			return;
++		}
++		if (!this.tourState) {
++			sub.textContent = '';
++			return;
++		}
++		const text = this.tourState.fromCache
++			? localize('krt.pr.tour.cached', " · cached").trim()
++			: formatUsageSuffix(this.tourState.usage).trim();
++		sub.textContent = text;
++		this.refreshStreamingBadges();
++	}
++
++	/**
++	 * Show / hide the small "streaming…" spinner badge in both
++	 * Tour and Storyboard headers depending on whether a stream
++	 * is currently in flight.
++	 */
++	private refreshStreamingBadges(): void {
++		const setBadge = (el: HTMLElement | undefined) => {
++			if (!el) {
++				return;
++			}
++			DOM.clearNode(el);
++			if (this.tourStreaming) {
++				el.classList.add('visible');
++				appendSpinner(el);
++				const text = DOM.append(el, DOM.$('span'));
++				text.textContent = localize('krt.pr.tour.streaming', "streaming");
++			} else {
++				el.classList.remove('visible');
++			}
++		};
++		setBadge(this.tourStreamingBadgeEl);
++		setBadge(this.storyboardStreamingBadgeEl);
+ 	}
+ 
+ 	private toggleChapterReviewed(id: string, reviewed: boolean): void {
+@@ -1409,10 +1462,11 @@ export class KrtPullRequestEditorPane extends EditorPane {
+ 	}
+ 
+ 	private async loadTour(pr: PullRequest, forceRefresh: boolean): Promise<void> {
+-		if (this.tourLoading) {
++		if (this.tourLoading || this.tourStreaming) {
+ 			return;
+ 		}
+ 		this.tourLoading = true;
++		this.tourStreaming = true;
+ 		this.tourError = undefined;
+ 		this.tourFetchToken++;
+ 		const myToken = this.tourFetchToken;
+@@ -1428,6 +1482,7 @@ export class KrtPullRequestEditorPane extends EditorPane {
+ 					return;
+ 				}
+ 				this.tourLoading = false;
++				this.tourStreaming = false;
+ 				this.tourError = isKrtError(e) ? e.message : String(e);
+ 				this.renderLoaded(pr);
+ 				return;
+@@ -1439,16 +1494,16 @@ export class KrtPullRequestEditorPane extends EditorPane {
+ 		}
+ 
+ 		const model = this.tourState?.model ?? localize('krt.pr.tour.streamingModel', "streaming…");
++		let lastChapterCount = 0;
+ 		const status: TourGenerationStatus = await this.tourGenerator.generate(pr, files, {
+ 			forceRefresh,
+ 			onUpdate: update => {
+ 				if (this.currentPr?.url !== pr.url || myToken !== this.tourFetchToken) {
+ 					return;
+ 				}
+-				// Snapshot live progress into tourState so the existing
+-				// renderers (Tour rail, Reading, Storyboard) just work.
+-				// Chapters arrive in order; selection sticks to whatever
+-				// is already selected, falling back to chapter 1.
++				const chapterCountChanged = update.chapters.length !== lastChapterCount;
++				lastChapterCount = update.chapters.length;
++				const wasEmpty = !this.tourState || this.tourState.chapters.length === 0;
+ 				this.tourState = {
+ 					chapters: update.chapters,
+ 					model,
+@@ -1459,13 +1514,28 @@ export class KrtPullRequestEditorPane extends EditorPane {
+ 				if (!this.tourSelectedChapterId && update.chapters.length > 0) {
+ 					this.tourSelectedChapterId = update.chapters[0].id;
+ 				}
+-				this.renderLoaded(pr);
++				if (chapterCountChanged || wasEmpty) {
++					// Structural change: re-render but preserve scroll
++					// position on the storyboard so the user's view
++					// stays put as new nodes appear.
++					const scrollState = this.captureStoryboardScroll();
++					this.renderLoaded(pr);
++					this.restoreStoryboardScroll(scrollState);
++				} else {
++					// Soft update: usage / output-token estimate ticked
++					// but chapter count is unchanged. Just refresh the
++					// subheading text in place — don't rebuild the DOM
++					// (would clobber selection, hover, scroll, focus).
++					this.refreshTourSubheading();
++					this.refreshStoryboardSubheading();
++				}
+ 			},
+ 		});
+ 		if (this.currentPr?.url !== pr.url || myToken !== this.tourFetchToken) {
+ 			return;
+ 		}
+ 		this.tourLoading = false;
++		this.tourStreaming = false;
+ 		if (status.kind === 'no-key') {
+ 			this.tourNoKey = true;
+ 		} else if (status.kind === 'error') {
+@@ -1477,7 +1547,29 @@ export class KrtPullRequestEditorPane extends EditorPane {
+ 				this.tourSelectedChapterId = status.result.chapters[0]?.id;
+ 			}
+ 		}
++		const scrollState = this.captureStoryboardScroll();
+ 		this.renderLoaded(pr);
++		this.restoreStoryboardScroll(scrollState);
++	}
++
++	private captureStoryboardScroll(): { left: number; top: number } | undefined {
++		const s = this.storyboardScrollerEl;
++		if (!s) {
++			return undefined;
++		}
++		return { left: s.scrollLeft, top: s.scrollTop };
++	}
++
++	private restoreStoryboardScroll(state: { left: number; top: number } | undefined): void {
++		if (!state) {
++			return;
++		}
++		const s = this.storyboardScrollerEl;
++		if (!s) {
++			return;
++		}
++		s.scrollLeft = state.left;
++		s.scrollTop = state.top;
+ 	}
+ 
+ 	// ---------- Storyboard sub-mode ----------
+@@ -1496,17 +1588,16 @@ export class KrtPullRequestEditorPane extends EditorPane {
+ 		heading.textContent = localize('krt.pr.storyboard.heading', "Storyboard");
+ 		const subHeading = DOM.append(headerBar, DOM.$('.krt-pr-storyboard-subheading'));
+ 		subHeading.textContent = localize('krt.pr.storyboard.flow', "· dependency flow");
++		const streamingBadge = DOM.append(headerBar, DOM.$('span.krt-pr-streaming-badge'));
++		this.storyboardStreamingBadgeEl = streamingBadge;
+ 		if (this.tourState) {
+ 			const chip = DOM.append(headerBar, DOM.$('span.krt-pr-storyboard-chip'));
+ 			chip.textContent = localize('krt.pr.storyboard.reviewedChip', "{0}/{1} reviewed", reviewedCount, totalChapters);
+-			const usageSuffix = this.tourState.fromCache
+-				? localize('krt.pr.tour.cached', " · cached").trim()
+-				: formatUsageSuffix(this.tourState.usage).trim();
+-			if (usageSuffix) {
+-				const usage = DOM.append(headerBar, DOM.$('span.krt-pr-storyboard-subheading'));
+-				usage.textContent = usageSuffix;
+-			}
+ 		}
++		const usageEl = DOM.append(headerBar, DOM.$('span.krt-pr-storyboard-subheading.usage'));
++		this.storyboardSubheadingEl = usageEl;
++		this.refreshStoryboardSubheading();
++		this.refreshStreamingBadges();
+ 		const spacer = DOM.append(headerBar, DOM.$('span.krt-pr-storyboard-spacer'));
+ 		spacer.textContent = '';
+ 		const legend = DOM.append(headerBar, DOM.$('.krt-pr-storyboard-legend'));
+@@ -1540,7 +1631,7 @@ export class KrtPullRequestEditorPane extends EditorPane {
+ 			this.renderTourEmptyNoKey(body);
+ 			return;
+ 		}
+-		if (this.tourLoading) {
++		if (this.tourLoading && !this.tourState) {
+ 			renderTourLoadingState(body, localize('krt.pr.storyboard.loading', "Generating chapters with the Anthropic API…"));
+ 			return;
+ 		}
+@@ -1575,6 +1666,7 @@ export class KrtPullRequestEditorPane extends EditorPane {
+ 
+ 		const wrap = DOM.append(parent, DOM.$('.krt-pr-storyboard-layout'));
+ 		const scroller = DOM.append(wrap, DOM.$('.krt-pr-storyboard-scroller'));
++		this.storyboardScrollerEl = scroller;
+ 		const canvas = DOM.append(scroller, DOM.$('.krt-pr-storyboard-canvas'));
+ 		canvas.style.width = `${layout.width}px`;
+ 		canvas.style.height = `${layout.height}px`;
+-- 
+2.52.0
+
