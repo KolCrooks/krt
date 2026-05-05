@@ -1,0 +1,206 @@
+From 1d7594a382b5b2a8548fcb5abc697b54450bd0d7 Mon Sep 17 00:00:00 2001
+From: Kol Crooks <kol.crooks@datadoghq.com>
+Date: Tue, 5 May 2026 11:03:38 -0400
+Subject: [PATCH] Phase 8: per-edge sub-track allocation in vertical channels
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Standard channel-allocation pass from layered-graph-drawing
+prior art (Sugiyama 1981; Graphviz dot; ELK Layered): each
+vertical channel between two tier columns gets its own bucket
+of edges, sorted by port-y, slotted into evenly-spaced sub-track
+x-coordinates. Two edges entering the same target node no
+longer share a vertical channel x for any meaningful stretch —
+they each have their own approach lane.
+
+Multi-tier edges still ride the top rail, but their entry and
+exit channel x's are now each allocated through the same sub-
+track machinery, so multiple long edges sharing a gap also
+stay separated. Rail y-tracks are now ordered by source-y for
+visual stability.
+---
+ .../krt/browser/ai/krtStoryboardLayout.ts     | 140 +++++++++++++-----
+ 1 file changed, 103 insertions(+), 37 deletions(-)
+
+diff --git a/src/vs/workbench/contrib/krt/browser/ai/krtStoryboardLayout.ts b/src/vs/workbench/contrib/krt/browser/ai/krtStoryboardLayout.ts
+index 9907809c7ac..d6d50ef8ad1 100644
+--- a/src/vs/workbench/contrib/krt/browser/ai/krtStoryboardLayout.ts
++++ b/src/vs/workbench/contrib/krt/browser/ai/krtStoryboardLayout.ts
+@@ -200,6 +200,17 @@ function assignTiers(
+ 	return tier;
+ }
+ 
++interface RoutingEdge {
++	readonly from: string;
++	readonly to: string;
++	readonly sourceTier: number;
++	readonly targetTier: number;
++	readonly sx: number;
++	readonly sy: number;
++	readonly tx: number;
++	readonly ty: number;
++}
++
+ function routeEdges(
+ 	chapters: readonly Chapter[],
+ 	deps: Map<string, string[]>,
+@@ -214,7 +225,7 @@ function routeEdges(
+ ): StoryboardEdge[] {
+ 	const incoming = new Map<string, string[]>();
+ 	const outgoing = new Map<string, string[]>();
+-	const push = (map: Map<string, string[]>, key: string, value: string) => {
++	const push = <K, V>(map: Map<K, V[]>, key: K, value: V) => {
+ 		const existing = map.get(key);
+ 		if (existing) {
+ 			existing.push(value);
+@@ -238,15 +249,8 @@ function routeEdges(
+ 		return top + height * (0.3 + (index / Math.max(1, count - 1)) * 0.4);
+ 	};
+ 
+-	// X-coordinate of the vertical channel inside the gap between
+-	// tier `t` and tier `t + 1`. Long edges enter the rail through
+-	// the channel after their source and exit through the channel
+-	// before their target, so they never cross tiers in-between.
+-	const channelX = (t: number): number =>
+-		padding + (t + 1) * nodeWidth + t * columnGap + columnGap / 2;
+-
+-	const edges: StoryboardEdge[] = [];
+-	let multiTierIdx = 0;
++	// Pass 1 — collect every edge with its source/target ports.
++	const routing: RoutingEdge[] = [];
+ 	for (const c of chapters) {
+ 		const ds = deps.get(c.id) ?? [];
+ 		const inList = incoming.get(c.id) ?? [];
+@@ -268,39 +272,101 @@ function routeEdges(
+ 			const sy = portY(outList.length, sourceIdx, source.y, source.height);
+ 			const tx = target.x;
+ 			const ty = portY(inList.length, targetIdx, target.y, target.height);
+-			const r = cornerRadius;
+-			let path: string;
+-			let labelX: number;
+-			let labelY: number;
++			routing.push({ from: dep, to: c.id, sourceTier, targetTier, sx, sy, tx, ty });
++		}
++	}
+ 
+-			const tierSpan = targetTier - sourceTier;
+-			if (tierSpan >= 2) {
+-				// Multi-tier edge — route up to the top rail, across,
+-				// and back down. Each long edge gets its own y-track
+-				// so they don't overlap each other either.
+-				const railY = trackMargin + multiTierIdx * trackSpacing;
+-				multiTierIdx++;
+-				const x1 = channelX(sourceTier);   // gap right after source tier
+-				const x2 = channelX(targetTier - 1); // gap right before target tier
+-				path = buildRailPath(sx, sy, x1, x2, railY, tx, ty, r);
+-				labelX = (x1 + x2) / 2;
+-				labelY = railY - 8;
+-			} else {
+-				// Adjacent-tier edge — single bend through the gap.
+-				const midX = sx + Math.max(28, (tx - sx) / 2);
+-				if (Math.abs(sy - ty) < 1) {
+-					path = `M ${sx} ${sy} L ${tx} ${ty}`;
+-				} else if (ty > sy) {
+-					path = `M ${sx} ${sy} L ${midX - r} ${sy} Q ${midX} ${sy} ${midX} ${sy + r} L ${midX} ${ty - r} Q ${midX} ${ty} ${midX + r} ${ty} L ${tx} ${ty}`;
++	// Pass 2 — assign each edge a unique sub-track x within every
++	// vertical channel it traverses. This is the standard
++	// "orthogonal connector routing with channel allocation" trick
++	// (see Sugiyama 1981; Graphviz dot; ELK Layered): bucket edges
++	// by gap, sort within the bucket, slot them into evenly-spaced
++	// sub-track x's so two edges never share the same vertical
++	// channel x for a long stretch.
++	type ChannelMember = { edgeIdx: number; sortKey: number };
++	const channelBuckets = new Map<number, ChannelMember[]>();
++	for (let i = 0; i < routing.length; i++) {
++		const e = routing[i];
++		const span = e.targetTier - e.sourceTier;
++		if (span >= 2) {
++			// Multi-tier edges use both the channel right after the
++			// source tier (entry) and the channel right before the
++			// target tier (exit).
++			push(channelBuckets, e.sourceTier, { edgeIdx: i, sortKey: e.sy });
++			push(channelBuckets, e.targetTier - 1, { edgeIdx: i, sortKey: e.ty });
++		} else if (span === 1) {
++			// Adjacent-tier edges use the single gap they cross.
++			// Sort key blends source-y and target-y so siblings
++			// converging on the same target stay nicely ordered.
++			push(channelBuckets, e.sourceTier, { edgeIdx: i, sortKey: (e.sy + e.ty) / 2 });
++		}
++	}
++
++	const entryX: number[] = new Array(routing.length).fill(NaN);
++	const exitX: number[] = new Array(routing.length).fill(NaN);
++	for (const [gap, members] of channelBuckets) {
++		members.sort((a, b) => a.sortKey - b.sortKey);
++		const gapLeft = padding + (gap + 1) * nodeWidth + gap * columnGap;
++		// Inset 14px on each side so sub-tracks never touch node edges.
++		const usable = columnGap - 28;
++		const N = members.length;
++		for (let i = 0; i < N; i++) {
++			const t = N === 1 ? 0.5 : i / (N - 1);
++			const x = gapLeft + 14 + usable * t;
++			const e = routing[members[i].edgeIdx];
++			const span = e.targetTier - e.sourceTier;
++			if (span >= 2) {
++				if (gap === e.sourceTier) {
++					entryX[members[i].edgeIdx] = x;
+ 				} else {
+-					path = `M ${sx} ${sy} L ${midX - r} ${sy} Q ${midX} ${sy} ${midX} ${sy - r} L ${midX} ${ty + r} Q ${midX} ${ty} ${midX + r} ${ty} L ${tx} ${ty}`;
++					exitX[members[i].edgeIdx] = x;
+ 				}
+-				labelX = midX;
+-				labelY = Math.abs(sy - ty) < 1 ? sy - 8 : (sy + ty) / 2;
++			} else {
++				entryX[members[i].edgeIdx] = x;
+ 			}
++		}
++	}
+ 
+-			edges.push({ from: dep, to: c.id, path, labelX, labelY });
++	// Pass 3 — build SVG paths using the assigned sub-track x's.
++	// Multi-tier edges still ride the top rail; each gets its own
++	// y-track in rail-order (top-to-bottom by source-y).
++	const multiTierOrder = routing
++		.map((e, i) => ({ e, i }))
++		.filter(({ e }) => e.targetTier - e.sourceTier >= 2)
++		.sort((a, b) => a.e.sy - b.e.sy);
++	const railTrackY = new Map<number, number>();
++	multiTierOrder.forEach(({ i }, k) => {
++		railTrackY.set(i, trackMargin + k * trackSpacing);
++	});
++
++	const edges: StoryboardEdge[] = [];
++	const r = cornerRadius;
++	for (let i = 0; i < routing.length; i++) {
++		const e = routing[i];
++		const tierSpan = e.targetTier - e.sourceTier;
++		let path: string;
++		let labelX: number;
++		let labelY: number;
++		if (tierSpan >= 2) {
++			const railY = railTrackY.get(i)!;
++			const x1 = entryX[i];
++			const x2 = exitX[i];
++			path = buildRailPath(e.sx, e.sy, x1, x2, railY, e.tx, e.ty, r);
++			labelX = (x1 + x2) / 2;
++			labelY = railY - 8;
++		} else {
++			const midX = entryX[i];
++			if (Math.abs(e.sy - e.ty) < 1) {
++				path = `M ${e.sx} ${e.sy} L ${midX} ${e.sy} L ${e.tx} ${e.ty}`;
++			} else if (e.ty > e.sy) {
++				path = `M ${e.sx} ${e.sy} L ${midX - r} ${e.sy} Q ${midX} ${e.sy} ${midX} ${e.sy + r} L ${midX} ${e.ty - r} Q ${midX} ${e.ty} ${midX + r} ${e.ty} L ${e.tx} ${e.ty}`;
++			} else {
++				path = `M ${e.sx} ${e.sy} L ${midX - r} ${e.sy} Q ${midX} ${e.sy} ${midX} ${e.sy - r} L ${midX} ${e.ty + r} Q ${midX} ${e.ty} ${midX + r} ${e.ty} L ${e.tx} ${e.ty}`;
++			}
++			labelX = midX;
++			labelY = Math.abs(e.sy - e.ty) < 1 ? e.sy - 8 : (e.sy + e.ty) / 2;
+ 		}
++		edges.push({ from: e.from, to: e.to, path, labelX, labelY });
+ 	}
+ 	return edges;
+ }
+-- 
+2.52.0
+
