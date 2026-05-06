@@ -1,0 +1,890 @@
+From f58c2bae1b9e851ab069d68905b4e69ae83603c1 Mon Sep 17 00:00:00 2001
+From: Kol Crooks <kol.crooks@datadoghq.com>
+Date: Wed, 6 May 2026 18:09:30 -0400
+Subject: [PATCH] Phase 9.5 Session A: KrtPrCommentController surfaces existing
+ review comments natively
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Foundation for the comments-API migration laid out in
+docs/phases/phase-09-5-native-comments.md. Adds:
+
+- krtPrCommentRegistry.ts: per-URI metadata (side, path, realLines,
+  PR identity) populated by KrtMonacoDiffView on construct.
+- krtPrCommentThread.ts: minimal CommentThread<IRange> impl.
+- krtPrCommentController.ts: ICommentController + IKrtPrCommentController
+  decorator. Maps the per-URI registry through to native threads on
+  setCommentsForPr; computes commentingRanges from realLines so the
+  workbench's CommentController contribution renders the native '+'
+  gutter affordance.
+- KrtMonacoDiffView: registers base/head URIs on construct and
+  allow-lists 'editor.contrib.review' on the inner editors so the
+  workbench's CommentController attaches.
+- KrtPullRequestEditorPane: pushes loaded review comments through the
+  controller after loadReviewComments / on cache hit / on
+  postReviewComment success; clears on PR switch.
+
+Custom .krt-pr-diff-thread view zones still render below the native
+threads — duplicate UI is the accepted intermediate. Session B
+(native +-click → post via IPullRequestProvider) and Session C
+(remove the custom overlay) come next.
+---
+ .../contrib/krt/browser/pr/krtMonacoDiff.ts   |  70 +++-
+ .../krt/browser/pr/krtPrCommentController.ts  | 360 ++++++++++++++++++
+ .../krt/browser/pr/krtPrCommentRegistry.ts    |  73 ++++
+ .../krt/browser/pr/krtPrCommentThread.ts      | 153 ++++++++
+ .../pr/krtPullRequestEditor.contribution.ts   |   7 +
+ .../browser/pr/krtPullRequestEditorPane.ts    |  30 ++
+ 6 files changed, 691 insertions(+), 2 deletions(-)
+ create mode 100644 src/vs/workbench/contrib/krt/browser/pr/krtPrCommentController.ts
+ create mode 100644 src/vs/workbench/contrib/krt/browser/pr/krtPrCommentRegistry.ts
+ create mode 100644 src/vs/workbench/contrib/krt/browser/pr/krtPrCommentThread.ts
+
+diff --git a/src/vs/workbench/contrib/krt/browser/pr/krtMonacoDiff.ts b/src/vs/workbench/contrib/krt/browser/pr/krtMonacoDiff.ts
+index 627ac5bd8a4..e3e32ea5022 100644
+--- a/src/vs/workbench/contrib/krt/browser/pr/krtMonacoDiff.ts
++++ b/src/vs/workbench/contrib/krt/browser/pr/krtMonacoDiff.ts
+@@ -7,6 +7,7 @@ import * as DOM from '../../../../../base/browser/dom.js';
+ import { Disposable, DisposableStore, IDisposable, toDisposable } from '../../../../../base/common/lifecycle.js';
+ import { URI } from '../../../../../base/common/uri.js';
+ import { ICodeEditor, MouseTargetType } from '../../../../../editor/browser/editorBrowser.js';
++import { EditorExtensionsRegistry } from '../../../../../editor/browser/editorExtensions.js';
+ import { DiffEditorWidget } from '../../../../../editor/browser/widget/diffEditor/diffEditorWidget.js';
+ import { RefCounted } from '../../../../../editor/browser/widget/diffEditor/utils.js';
+ import { ILanguageService } from '../../../../../editor/common/languages/language.js';
+@@ -16,8 +17,18 @@ import { IInstantiationService } from '../../../../../platform/instantiation/com
+ import { PullRequestFile } from '../../../../../platform/krt/common/krt.js';
+ import { encodeKrtGit } from '../workspace/krtGitContentProvider.js';
+ import { KrtWorkspace } from '../workspace/krtWorkspaceRegistry.js';
++import { registerKrtPrResource } from './krtPrCommentRegistry.js';
+ import { reconstructFromPatch } from './krtPatchReconstruct.js';
+ 
++/**
++ * Editor contributions we want to live on the diff editor's two inner
++ * code editors, on top of the otherwise-empty list KRT uses for diff
++ * embeds. `editor.contrib.review` is the workbench's
++ * `CommentController` — without it, the native gutter affordances and
++ * comment-thread zone widgets never attach.
++ */
++const KRT_DIFF_EDITOR_CONTRIBUTIONS = ['editor.contrib.review'];
++
+ export type DiffSide = 'LEFT' | 'RIGHT';
+ 
+ export interface IKrtMonacoDiffViewOptions {
+@@ -43,6 +54,19 @@ export interface IKrtMonacoDiffViewOptions {
+ 	 * syntax highlighting + intra-line diff colours but no LSP.
+ 	 */
+ 	readonly workspace?: KrtWorkspace;
++	/**
++	 * Phase 9.5 — identity passed through to
++	 * `KrtPrCommentController` via the per-URI registry so review
++	 * comments loaded by the pane can be matched back to the right
++	 * diff editor (and the right side of it). Optional: when omitted,
++	 * the diff renders without registering, so the native commenting
++	 * gutter stays inactive (used by historical callers / tests that
++	 * don't surface comments).
++	 */
++	readonly pr?: {
++		readonly url: string;
++		readonly number: number;
++	};
+ }
+ 
+ interface ILineZoneOptions {
+@@ -134,6 +158,15 @@ export class KrtMonacoDiffView extends Disposable {
+ 		// `automaticLayout: true` watching the wrapper's CSS-driven width.
+ 		this.container.style.height = `${estimateEditorHeight(opts.file.patch)}px`;
+ 
++		// Inner-editor contributions are otherwise stripped — diff cards
++		// don't need most of the editor surface. But the native review-
++		// comments controller (`editor.contrib.review`) IS needed: it
++		// owns the `+` gutter affordance, the comment-thread zone
++		// widgets, and the data wiring to `ICommentService`. We
++		// allow-list it explicitly rather than the default-everything
++		// path the stock VSCode uses to keep the diff embeds light.
++		const innerContributions = EditorExtensionsRegistry.getSomeEditorContributions(KRT_DIFF_EDITOR_CONTRIBUTIONS);
++
+ 		this.widget = this._register(instantiationService.createInstance(
+ 			DiffEditorWidget,
+ 			this.container,
+@@ -158,8 +191,8 @@ export class KrtMonacoDiffView extends Disposable {
+ 				lineNumbersMinChars: 4,
+ 			},
+ 			{
+-				originalEditor: { contributions: [] },
+-				modifiedEditor: { contributions: [] },
++				originalEditor: { contributions: innerContributions },
++				modifiedEditor: { contributions: innerContributions },
+ 			},
+ 		));
+ 
+@@ -230,6 +263,39 @@ export class KrtMonacoDiffView extends Disposable {
+ 		this.baseRealLines = reconstructed.base.realLines;
+ 		this.headRealLines = reconstructed.head.realLines;
+ 
++		// Phase 9.5 — let `KrtPrCommentController` find this URI when it
++		// looks up "all diff URIs for this PR" so it can fan out review
++		// comments. Skipped when `opts.pr` isn't passed (legacy callers
++		// or non-PR diff embeds).
++		if (opts.pr) {
++			this._register(registerKrtPrResource(baseModel.uri, {
++				side: 'LEFT',
++				path,
++				previousPath,
++				realLines: this.baseRealLines,
++				pr: {
++					url: opts.pr.url,
++					owner: opts.owner,
++					repo: opts.repo,
++					number: opts.pr.number,
++					headSha: opts.headSha,
++				},
++			}));
++			this._register(registerKrtPrResource(headModel.uri, {
++				side: 'RIGHT',
++				path,
++				previousPath,
++				realLines: this.headRealLines,
++				pr: {
++					url: opts.pr.url,
++					owner: opts.owner,
++					repo: opts.repo,
++					number: opts.pr.number,
++					headSha: opts.headSha,
++				},
++			}));
++		}
++
+ 		// Phase 8.5/8.6 — view-model refcount workaround. The public
+ 		// `setModel({original, modified})` path goes through
+ 		// `RefCounted.create(...)` once and `createNewRef` once, leaving
+diff --git a/src/vs/workbench/contrib/krt/browser/pr/krtPrCommentController.ts b/src/vs/workbench/contrib/krt/browser/pr/krtPrCommentController.ts
+new file mode 100644
+index 00000000000..a0f75c2aaab
+--- /dev/null
++++ b/src/vs/workbench/contrib/krt/browser/pr/krtPrCommentController.ts
+@@ -0,0 +1,360 @@
++/*---------------------------------------------------------------------------------------------
++ *  Copyright (c) Microsoft Corporation. All rights reserved.
++ *  Licensed under the MIT License. See License.txt in the project root for license information.
++ *--------------------------------------------------------------------------------------------*/
++
++import { CancellationToken } from '../../../../../base/common/cancellation.js';
++import { Disposable, toDisposable } from '../../../../../base/common/lifecycle.js';
++import { URI, UriComponents } from '../../../../../base/common/uri.js';
++import { IRange } from '../../../../../editor/common/core/range.js';
++import {
++	Comment as LanguageComment,
++	CommentReaction,
++	CommentThread,
++	CommentThreadCollapsibleState,
++} from '../../../../../editor/common/languages.js';
++import { createDecorator } from '../../../../../platform/instantiation/common/instantiation.js';
++import {
++	ICommentController,
++	ICommentInfo,
++	ICommentService,
++	INotebookCommentInfo,
++} from '../../../comments/browser/commentService.js';
++import { Comment as KrtComment } from '../../../../../platform/krt/common/krt.js';
++import {
++	findKrtPrResourcesByPrUrl,
++	IKrtPrResource,
++	lookupKrtPrResource,
++	onDidChangeKrtPrResources,
++} from './krtPrCommentRegistry.js';
++import { KrtPrCommentThread } from './krtPrCommentThread.js';
++
++export const KRT_PR_COMMENT_OWNER = 'krt-pr';
++
++/**
++ * Internal-to-KRT facet of the controller — the pane uses this to push
++ * GitHub review comments through after `loadReviewComments` resolves,
++ * keyed by PR url so the controller can fan out to whichever diff
++ * URIs are currently mounted for that PR.
++ *
++ * The `ICommentController` facet (consumed by the workbench's
++ * `ICommentService`) is implemented on the same singleton so that
++ * registration is automatic on workbench startup.
++ */
++export interface IKrtPrCommentController {
++	readonly _serviceBrand: undefined;
++	setCommentsForPr(prUrl: string, comments: readonly KrtComment[]): void;
++	clearCommentsForPr(prUrl: string): void;
++}
++
++export const IKrtPrCommentController = createDecorator<IKrtPrCommentController>('krtPrCommentController');
++
++export class KrtPrCommentController extends Disposable implements ICommentController, IKrtPrCommentController {
++
++	declare readonly _serviceBrand: undefined;
++
++	readonly id = KRT_PR_COMMENT_OWNER;
++	readonly label = 'KRT';
++	readonly owner = KRT_PR_COMMENT_OWNER;
++	readonly features = {};
++	activeComment: { thread: CommentThread; comment?: LanguageComment } | undefined;
++
++	/** uri.toString() → owned threads at that URI. */
++	private readonly threadsByUri = new Map<string, KrtPrCommentThread[]>();
++	/** PR URL → set of URIs currently owned (for fast clearCommentsForPr). */
++	private readonly urisByPr = new Map<string, Set<string>>();
++	/** Last-known KRT comments for a PR — replayed when a diff URI mounts late. */
++	private readonly cachedCommentsByPr = new Map<string, readonly KrtComment[]>();
++
++	private nextHandle = 1;
++
++	constructor(
++		@ICommentService private readonly commentService: ICommentService,
++	) {
++		super();
++		commentService.registerCommentController(KRT_PR_COMMENT_OWNER, this);
++		this._register(toDisposable(() => commentService.unregisterCommentController(KRT_PR_COMMENT_OWNER)));
++
++		// When a diff view mounts (registry adds a URI), replay any
++		// cached comments so the editor's freshly-attached
++		// CommentController contribution sees populated threads on its
++		// first `getDocumentComments` call. Without this, comments
++		// loaded before the diff was rendered would stay invisible
++		// until the next pane re-render.
++		this._register(onDidChangeKrtPrResources(() => this.replayCached()));
++	}
++
++	setCommentsForPr(prUrl: string, comments: readonly KrtComment[]): void {
++		this.cachedCommentsByPr.set(prUrl, comments);
++		this.applyForPr(prUrl);
++	}
++
++	clearCommentsForPr(prUrl: string): void {
++		this.cachedCommentsByPr.delete(prUrl);
++		const owned = this.urisByPr.get(prUrl);
++		if (!owned) {
++			return;
++		}
++		for (const key of owned) {
++			const previousThreads = this.threadsByUri.get(key);
++			if (previousThreads && previousThreads.length > 0) {
++				this.threadsByUri.delete(key);
++				this.commentService.updateComments(KRT_PR_COMMENT_OWNER, {
++					added: [],
++					removed: previousThreads,
++					changed: [],
++					pending: [],
++				});
++				this.commentService.setDocumentComments(URI.parse(key), this.commentInfosForUri(URI.parse(key)));
++				for (const t of previousThreads) {
++					t.dispose();
++				}
++			}
++		}
++		this.urisByPr.delete(prUrl);
++	}
++
++	async getDocumentComments(resource: URI, _token: CancellationToken): Promise<ICommentInfo<IRange>> {
++		const meta = lookupKrtPrResource(resource);
++		const threads = this.threadsByUri.get(resource.toString()) ?? [];
++		const ranges: IRange[] = [];
++		if (meta) {
++			for (let i = 0; i < meta.realLines.length; i++) {
++				if (meta.realLines[i] !== undefined) {
++					const ln = i + 1;
++					ranges.push({ startLineNumber: ln, startColumn: 1, endLineNumber: ln, endColumn: 1 });
++				}
++			}
++		}
++		return {
++			uniqueOwner: KRT_PR_COMMENT_OWNER,
++			label: this.label,
++			threads,
++			commentingRanges: { resource, ranges, fileComments: false },
++		};
++	}
++
++	async getNotebookComments(_resource: URI, _token: CancellationToken): Promise<INotebookCommentInfo> {
++		return { uniqueOwner: KRT_PR_COMMENT_OWNER, label: this.label, threads: [] };
++	}
++
++	// Session B will implement these. Until then they're no-ops so the
++	// `ICommentController` interface is satisfied without falsely
++	// claiming the user can post via the native `+`.
++	async createCommentThreadTemplate(_resource: UriComponents, _range: IRange | undefined, _editorId?: string): Promise<void> {
++		return;
++	}
++
++	async updateCommentThreadTemplate(_threadHandle: number, _range: IRange): Promise<void> {
++		return;
++	}
++
++	deleteCommentThreadMain(_commentThreadId: string): void {
++		return;
++	}
++
++	async toggleReaction(_uri: URI, _thread: CommentThread, _comment: LanguageComment, _reaction: CommentReaction, _token: CancellationToken): Promise<void> {
++		return;
++	}
++
++	async setActiveCommentAndThread(commentInfo: { thread: CommentThread; comment?: LanguageComment } | undefined): Promise<void> {
++		this.activeComment = commentInfo;
++	}
++
++	private replayCached(): void {
++		for (const prUrl of this.cachedCommentsByPr.keys()) {
++			this.applyForPr(prUrl);
++		}
++	}
++
++	private applyForPr(prUrl: string): void {
++		const comments = this.cachedCommentsByPr.get(prUrl) ?? [];
++		const resources = findKrtPrResourcesByPrUrl(prUrl);
++		const previouslyOwned = this.urisByPr.get(prUrl) ?? new Set<string>();
++		const nextOwned = new Set<string>();
++
++		// Group comments by (side, path) once — we look up per-URI by
++		// matching against `resource.side` and either `previousPath`
++		// (LEFT) or `path` (RIGHT). Skipping non-review (issue) comments.
++		type Bucket = { readonly comments: KrtComment[] };
++		const buckets = new Map<string, Bucket>();
++		for (const c of comments) {
++			if (c.location.kind !== 'review') {
++				continue;
++			}
++			const key = `${c.location.side}|${c.location.path}`;
++			const existing = buckets.get(key);
++			if (existing) {
++				existing.comments.push(c);
++			} else {
++				buckets.set(key, { comments: [c] });
++			}
++		}
++
++		for (const { uri, resource } of resources) {
++			const key = uri.toString();
++			const bucketKey = `${resource.side}|${resource.side === 'LEFT' ? resource.previousPath : resource.path}`;
++			const bucket = buckets.get(bucketKey);
++			const previousThreads = this.threadsByUri.get(key) ?? [];
++
++			if (!bucket || bucket.comments.length === 0) {
++				if (previousThreads.length > 0) {
++					this.threadsByUri.delete(key);
++					this.commentService.updateComments(KRT_PR_COMMENT_OWNER, {
++						added: [],
++						removed: previousThreads,
++						changed: [],
++						pending: [],
++					});
++					this.commentService.setDocumentComments(uri, this.commentInfosForUri(uri));
++					for (const t of previousThreads) {
++						t.dispose();
++					}
++				}
++				continue;
++			}
++
++			// One thread per real-file line. GitHub returns one comment
++			// per anchor row, but multiple comments can stack on the
++			// same line — we collapse them into a single thread.
++			const byLine = new Map<number, KrtComment[]>();
++			for (const c of bucket.comments) {
++				if (c.location.kind !== 'review') {
++					continue;
++				}
++				const arr = byLine.get(c.location.line);
++				if (arr) {
++					arr.push(c);
++				} else {
++					byLine.set(c.location.line, [c]);
++				}
++			}
++
++			const previousById = new Map(previousThreads.map(t => [t.threadId, t] as const));
++			const nextThreads: KrtPrCommentThread[] = [];
++			const added: KrtPrCommentThread[] = [];
++			const changed: KrtPrCommentThread[] = [];
++
++			for (const [realLine, lineComments] of byLine) {
++				const modelLine = realLineToModelLine(resource, realLine);
++				if (modelLine === undefined) {
++					continue;
++				}
++				const sorted = [...lineComments].sort(
++					(a, b) => a.createdAt < b.createdAt ? -1 : a.createdAt > b.createdAt ? 1 : 0,
++				);
++				const range: IRange = {
++					startLineNumber: modelLine,
++					startColumn: 1,
++					endLineNumber: modelLine,
++					endColumn: 1,
++				};
++				const threadId = `krt-pr|${prUrl}|${resource.side}|${resource.path}|${realLine}`;
++				const languageComments = sorted.map((c, i) => krtCommentToLanguageComment(c, i + 1));
++
++				const existing = previousById.get(threadId);
++				if (existing) {
++					existing.range = range;
++					existing.comments = languageComments;
++					changed.push(existing);
++					nextThreads.push(existing);
++					previousById.delete(threadId);
++				} else {
++					const fresh = new KrtPrCommentThread({
++						commentThreadHandle: this.nextHandle++,
++						controllerHandle: 0,
++						threadId,
++						resource: key,
++						range,
++						comments: languageComments,
++						canReply: false,
++						collapsibleState: CommentThreadCollapsibleState.Expanded,
++					});
++					nextThreads.push(fresh);
++					added.push(fresh);
++				}
++			}
++
++			const removed = [...previousById.values()];
++			this.threadsByUri.set(key, nextThreads);
++			nextOwned.add(key);
++
++			if (added.length > 0 || removed.length > 0 || changed.length > 0) {
++				this.commentService.updateComments(KRT_PR_COMMENT_OWNER, {
++					added,
++					removed,
++					changed,
++					pending: [],
++				});
++			}
++			// Always re-fire `setDocumentComments` so the editor's
++			// CommentController picks up our new state even on its very
++			// first attach (where `_commentInfos` doesn't yet contain
++			// anything for our owner, so the granular `updateComments`
++			// path would no-op).
++			this.commentService.setDocumentComments(uri, this.commentInfosForUri(uri));
++			for (const t of removed) {
++				t.dispose();
++			}
++		}
++
++		// URIs that were previously owned by this PR but no longer have
++		// any matching bucket → clear them.
++		for (const stale of previouslyOwned) {
++			if (nextOwned.has(stale)) {
++				continue;
++			}
++			const previousThreads = this.threadsByUri.get(stale);
++			if (previousThreads && previousThreads.length > 0) {
++				this.threadsByUri.delete(stale);
++				this.commentService.updateComments(KRT_PR_COMMENT_OWNER, {
++					added: [],
++					removed: previousThreads,
++					changed: [],
++					pending: [],
++				});
++				this.commentService.setDocumentComments(URI.parse(stale), this.commentInfosForUri(URI.parse(stale)));
++				for (const t of previousThreads) {
++					t.dispose();
++				}
++			}
++		}
++
++		this.urisByPr.set(prUrl, nextOwned);
++	}
++
++	private commentInfosForUri(uri: URI): ICommentInfo[] {
++		const meta = lookupKrtPrResource(uri);
++		const threads = this.threadsByUri.get(uri.toString()) ?? [];
++		const ranges: IRange[] = [];
++		if (meta) {
++			for (let i = 0; i < meta.realLines.length; i++) {
++				if (meta.realLines[i] !== undefined) {
++					const ln = i + 1;
++					ranges.push({ startLineNumber: ln, startColumn: 1, endLineNumber: ln, endColumn: 1 });
++				}
++			}
++		}
++		return [{
++			uniqueOwner: KRT_PR_COMMENT_OWNER,
++			label: this.label,
++			threads,
++			commentingRanges: { resource: uri, ranges, fileComments: false },
++		}];
++	}
++}
++
++function realLineToModelLine(resource: IKrtPrResource, realLine: number): number | undefined {
++	const idx = resource.realLines.indexOf(realLine);
++	return idx === -1 ? undefined : idx + 1;
++}
++
++function krtCommentToLanguageComment(c: KrtComment, uniqueIdInThread: number): LanguageComment {
++	return {
++		uniqueIdInThread,
++		body: c.body,
++		userName: c.author.login,
++		userIconPath: c.author.avatarUrl ? URI.parse(c.author.avatarUrl) : undefined,
++		timestamp: c.createdAt,
++	};
++}
+diff --git a/src/vs/workbench/contrib/krt/browser/pr/krtPrCommentRegistry.ts b/src/vs/workbench/contrib/krt/browser/pr/krtPrCommentRegistry.ts
+new file mode 100644
+index 00000000000..80d65cf419c
+--- /dev/null
++++ b/src/vs/workbench/contrib/krt/browser/pr/krtPrCommentRegistry.ts
+@@ -0,0 +1,73 @@
++/*---------------------------------------------------------------------------------------------
++ *  Copyright (c) Microsoft Corporation. All rights reserved.
++ *  Licensed under the MIT License. See License.txt in the project root for license information.
++ *--------------------------------------------------------------------------------------------*/
++
++import { Emitter, Event } from '../../../../../base/common/event.js';
++import { IDisposable, toDisposable } from '../../../../../base/common/lifecycle.js';
++import { URI } from '../../../../../base/common/uri.js';
++
++export type DiffSide = 'LEFT' | 'RIGHT';
++
++/**
++ * Per-side metadata for a diff-editor model URI mounted by
++ * `KrtMonacoDiffView`. The native comments controller reads this to:
++ *   1. translate GitHub's real-file-line anchors into the model's
++ *      compact 1..N line numbers, and
++ *   2. compute commenting ranges (every model line that maps to a real
++ *      file line is commentable).
++ *
++ * `previousPath` differs from `path` only on renames. For LEFT-side
++ * comments GitHub keys on the pre-rename path, so the controller uses
++ * `previousPath` when matching; RIGHT-side uses `path`.
++ */
++export interface IKrtPrResource {
++	readonly side: DiffSide;
++	readonly path: string;
++	readonly previousPath: string;
++	readonly realLines: ReadonlyArray<number | undefined>;
++	readonly pr: {
++		readonly url: string;
++		readonly owner: string;
++		readonly repo: string;
++		readonly number: number;
++		readonly headSha: string;
++	};
++}
++
++const registry = new Map<string, IKrtPrResource>();
++const _onDidChange = new Emitter<void>();
++export const onDidChangeKrtPrResources: Event<void> = _onDidChange.event;
++
++/**
++ * Called by `KrtMonacoDiffView` once per model URI it mounts. The
++ * returned disposable removes the entry — but only if it still points
++ * at the same `resource` instance, so a later registration on the
++ * same URI (overlapping diff views during re-render) doesn't get
++ * clobbered when the previous one disposes.
++ */
++export function registerKrtPrResource(uri: URI, resource: IKrtPrResource): IDisposable {
++	const key = uri.toString();
++	registry.set(key, resource);
++	_onDidChange.fire();
++	return toDisposable(() => {
++		if (registry.get(key) === resource) {
++			registry.delete(key);
++			_onDidChange.fire();
++		}
++	});
++}
++
++export function lookupKrtPrResource(uri: URI): IKrtPrResource | undefined {
++	return registry.get(uri.toString());
++}
++
++export function findKrtPrResourcesByPrUrl(prUrl: string): ReadonlyArray<{ readonly uri: URI; readonly resource: IKrtPrResource }> {
++	const out: { uri: URI; resource: IKrtPrResource }[] = [];
++	for (const [key, resource] of registry) {
++		if (resource.pr.url === prUrl) {
++			out.push({ uri: URI.parse(key), resource });
++		}
++	}
++	return out;
++}
+diff --git a/src/vs/workbench/contrib/krt/browser/pr/krtPrCommentThread.ts b/src/vs/workbench/contrib/krt/browser/pr/krtPrCommentThread.ts
+new file mode 100644
+index 00000000000..d8b17a78f0f
+--- /dev/null
++++ b/src/vs/workbench/contrib/krt/browser/pr/krtPrCommentThread.ts
+@@ -0,0 +1,153 @@
++/*---------------------------------------------------------------------------------------------
++ *  Copyright (c) Microsoft Corporation. All rights reserved.
++ *  Licensed under the MIT License. See License.txt in the project root for license information.
++ *--------------------------------------------------------------------------------------------*/
++
++import { Emitter, Event } from '../../../../../base/common/event.js';
++import { IRange } from '../../../../../editor/common/core/range.js';
++import {
++	Comment,
++	CommentAuthorInformation,
++	CommentInput,
++	CommentThread,
++	CommentThreadCollapsibleState,
++	CommentThreadState,
++	CommentThreadApplicability,
++} from '../../../../../editor/common/languages.js';
++
++/**
++ * Minimal `CommentThread<IRange>` implementation used by
++ * `KrtPrCommentController`. Mirrors `MainThreadCommentThread` but
++ * without the extension-host plumbing — KRT's threads come from
++ * GitHub via `gh`, not from an extension RPC.
++ *
++ * The thread's `range` is in *model* line numbers (1..N), not real
++ * file lines, because that's what the editor positions zone widgets
++ * by. Translation happens at construction time in the controller.
++ */
++export class KrtPrCommentThread implements CommentThread<IRange> {
++
++	readonly commentThreadHandle: number;
++	readonly controllerHandle: number;
++	readonly threadId: string;
++	readonly resource: string;
++	extensionId?: string;
++
++	private _range: IRange | undefined;
++	get range(): IRange | undefined { return this._range; }
++	set range(value: IRange | undefined) { this._range = value; }
++
++	private _comments: ReadonlyArray<Comment> | undefined;
++	get comments(): ReadonlyArray<Comment> | undefined { return this._comments; }
++	set comments(value: ReadonlyArray<Comment> | undefined) {
++		this._comments = value;
++		this._onDidChangeComments.fire(value);
++	}
++
++	private readonly _onDidChangeComments = new Emitter<readonly Comment[] | undefined>();
++	readonly onDidChangeComments: Event<readonly Comment[] | undefined> = this._onDidChangeComments.event;
++
++	private _label: string | undefined;
++	get label(): string | undefined { return this._label; }
++	set label(value: string | undefined) {
++		this._label = value;
++		this._onDidChangeLabel.fire(value);
++	}
++
++	private readonly _onDidChangeLabel = new Emitter<string | undefined>();
++	readonly onDidChangeLabel: Event<string | undefined> = this._onDidChangeLabel.event;
++
++	contextValue: string | undefined;
++
++	private _collapsibleState: CommentThreadCollapsibleState | undefined;
++	get collapsibleState(): CommentThreadCollapsibleState | undefined { return this._collapsibleState; }
++	set collapsibleState(value: CommentThreadCollapsibleState | undefined) {
++		if (this._initialCollapsibleState === undefined) {
++			this._initialCollapsibleState = value;
++			this._onDidChangeInitialCollapsibleState.fire(value);
++		}
++		if (value !== this._collapsibleState) {
++			this._collapsibleState = value;
++			this._onDidChangeCollapsibleState.fire(value);
++		}
++	}
++	private readonly _onDidChangeCollapsibleState = new Emitter<CommentThreadCollapsibleState | undefined>();
++	readonly onDidChangeCollapsibleState: Event<CommentThreadCollapsibleState | undefined> = this._onDidChangeCollapsibleState.event;
++
++	private _initialCollapsibleState: CommentThreadCollapsibleState | undefined;
++	get initialCollapsibleState(): CommentThreadCollapsibleState | undefined { return this._initialCollapsibleState; }
++	private readonly _onDidChangeInitialCollapsibleState = new Emitter<CommentThreadCollapsibleState | undefined>();
++	readonly onDidChangeInitialCollapsibleState: Event<CommentThreadCollapsibleState | undefined> = this._onDidChangeInitialCollapsibleState.event;
++
++	private _state: CommentThreadState | undefined;
++	get state(): CommentThreadState | undefined { return this._state; }
++	set state(value: CommentThreadState | undefined) {
++		this._state = value;
++		this._onDidChangeState.fire(value);
++	}
++	private readonly _onDidChangeState = new Emitter<CommentThreadState | undefined>();
++	readonly onDidChangeState: Event<CommentThreadState | undefined> = this._onDidChangeState.event;
++
++	applicability: CommentThreadApplicability | undefined;
++
++	private _canReply: boolean | CommentAuthorInformation;
++	get canReply(): boolean | CommentAuthorInformation { return this._canReply; }
++	set canReply(value: boolean | CommentAuthorInformation) {
++		this._canReply = value;
++		this._onDidChangeCanReply.fire(!!value);
++	}
++	private readonly _onDidChangeCanReply = new Emitter<boolean>();
++	readonly onDidChangeCanReply: Event<boolean> = this._onDidChangeCanReply.event;
++
++	private _input: CommentInput | undefined;
++	get input(): CommentInput | undefined { return this._input; }
++	set input(value: CommentInput | undefined) {
++		this._input = value;
++		this._onDidChangeInput.fire(value);
++	}
++	private readonly _onDidChangeInput = new Emitter<CommentInput | undefined>();
++	readonly onDidChangeInput: Event<CommentInput | undefined> = this._onDidChangeInput.event;
++
++	isDisposed = false;
++	isTemplate: boolean;
++
++	constructor(args: {
++		commentThreadHandle: number;
++		controllerHandle: number;
++		threadId: string;
++		resource: string;
++		range: IRange | undefined;
++		comments: readonly Comment[];
++		isTemplate?: boolean;
++		canReply?: boolean | CommentAuthorInformation;
++		state?: CommentThreadState;
++		collapsibleState?: CommentThreadCollapsibleState;
++	}) {
++		this.commentThreadHandle = args.commentThreadHandle;
++		this.controllerHandle = args.controllerHandle;
++		this.threadId = args.threadId;
++		this.resource = args.resource;
++		this._range = args.range;
++		this._comments = args.comments;
++		this.isTemplate = args.isTemplate ?? false;
++		this._canReply = args.canReply ?? false;
++		this._state = args.state ?? CommentThreadState.Unresolved;
++		this._collapsibleState = args.collapsibleState ?? CommentThreadCollapsibleState.Expanded;
++		this._initialCollapsibleState = this._collapsibleState;
++	}
++
++	isDocumentCommentThread(): this is CommentThread<IRange> {
++		return true;
++	}
++
++	dispose(): void {
++		this.isDisposed = true;
++		this._onDidChangeComments.dispose();
++		this._onDidChangeLabel.dispose();
++		this._onDidChangeCollapsibleState.dispose();
++		this._onDidChangeInitialCollapsibleState.dispose();
++		this._onDidChangeState.dispose();
++		this._onDidChangeCanReply.dispose();
++		this._onDidChangeInput.dispose();
++	}
++}
+diff --git a/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditor.contribution.ts b/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditor.contribution.ts
+index 22921703154..cf0d29863a6 100644
+--- a/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditor.contribution.ts
++++ b/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditor.contribution.ts
+@@ -5,10 +5,12 @@
+ 
+ import { localize } from '../../../../../nls.js';
+ import { SyncDescriptor } from '../../../../../platform/instantiation/common/descriptors.js';
++import { InstantiationType, registerSingleton } from '../../../../../platform/instantiation/common/extensions.js';
+ import { IInstantiationService } from '../../../../../platform/instantiation/common/instantiation.js';
+ import { Registry } from '../../../../../platform/registry/common/platform.js';
+ import { EditorPaneDescriptor, IEditorPaneRegistry } from '../../../../browser/editor.js';
+ import { EditorExtensions, IEditorFactoryRegistry, IEditorSerializer } from '../../../../common/editor.js';
++import { IKrtPrCommentController, KrtPrCommentController } from './krtPrCommentController.js';
+ import { KrtPullRequestEditorInput } from './krtPullRequestEditorInput.js';
+ import { KrtPullRequestEditorPane } from './krtPullRequestEditorPane.js';
+ 
+@@ -47,6 +49,11 @@ class KrtPullRequestEditorInputSerializer implements IEditorSerializer {
+ 	}
+ }
+ 
++// Register the native review-comments controller eagerly so it's
++// already attached to `ICommentService` by the time the first PR
++// diff editor mounts and asks for comments.
++registerSingleton(IKrtPrCommentController, KrtPrCommentController, InstantiationType.Eager);
++
+ Registry.as<IEditorFactoryRegistry>(EditorExtensions.EditorFactory)
+ 	.registerEditorSerializer(KrtPullRequestEditorInput.ID, KrtPullRequestEditorInputSerializer);
+ 
+diff --git a/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.ts b/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.ts
+index 5d7f989003e..d9dfb726cb9 100644
+--- a/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.ts
++++ b/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.ts
+@@ -29,6 +29,7 @@ import { getWorkspacePreFlight, KrtPreFlight } from '../workspace/krtVcs.js';
+ import { switchTo } from '../workspace/krtSwitchOps.js';
+ import { IKrtSwitchResumeService } from '../workspace/krtSwitchResume.js';
+ import { KrtMonacoDiffView } from './krtMonacoDiff.js';
++import { IKrtPrCommentController } from './krtPrCommentController.js';
+ import { isKrtError } from '../../../../../platform/krt/common/errors.js';
+ import { Chapter, EdgeKind, EDGE_KINDS, TourVariant } from '../ai/krtTourTypes.js';
+ import { expandEmojiShortcodes } from '../ai/krtEmoji.js';
+@@ -176,6 +177,7 @@ export class KrtPullRequestEditorPane extends EditorPane {
+ 		@IDialogService private readonly dialogService: IDialogService,
+ 		@INotificationService private readonly notificationService: INotificationService,
+ 		@IFileService private readonly fileService: IFileService,
++		@IKrtPrCommentController private readonly krtCommentController: IKrtPrCommentController,
+ 	) {
+ 		super(KrtPullRequestEditorPane.ID, group, telemetryService, themeService, krtStorageService);
+ 		// Re-check the workspace's HEAD whenever the resume token
+@@ -474,6 +476,14 @@ export class KrtPullRequestEditorPane extends EditorPane {
+ 
+ 	override async setInput(input: KrtPullRequestEditorInput, options: IEditorOptions | undefined, context: IEditorOpenContext, token: CancellationToken): Promise<void> {
+ 		await super.setInput(input, options, context, token);
++		// Drop any native review-comment threads owned by the PR we're
++		// navigating away from — otherwise the `ICommentService` keeps
++		// pointing them at stale URIs once the diff editors get rebuilt
++		// for the new PR.
++		const previousPrUrl = this.currentInput?.url;
++		if (previousPrUrl && previousPrUrl !== input.url) {
++			this.krtCommentController.clearCommentsForPr(previousPrUrl);
++		}
+ 		this.currentInput = input;
+ 		this.currentPr = undefined;
+ 		this.automationEvents = undefined;
+@@ -525,6 +535,7 @@ export class KrtPullRequestEditorPane extends EditorPane {
+ 			}
+ 			if (cached.reviewComments !== undefined) {
+ 				this.reviewComments = cached.reviewComments;
++				this.pushReviewCommentsToController(input.url);
+ 			}
+ 			if (cached.activity !== undefined) {
+ 				this.automationEvents = cached.activity;
+@@ -1264,6 +1275,7 @@ export class KrtPullRequestEditorPane extends EditorPane {
+ 				renderSideBySide: this.diffRenderMode === 'side-by-side',
+ 				file,
+ 				workspace,
++				pr: { url: pr.url, number: pr.number },
+ 			},
+ 		);
+ 		this.bodyDisposables.add(view);
+@@ -1410,6 +1422,7 @@ export class KrtPullRequestEditorPane extends EditorPane {
+ 				invalidatePrCache(this.currentPr.url);
+ 				this.liveReviewComments = [...this.liveReviewComments, created];
+ 				this.composingAt = undefined;
++				this.pushReviewCommentsToController(this.currentPr.url);
+ 				this.renderLoaded(this.currentPr);
+ 			} catch (e) {
+ 				errorEl.hidden = false;
+@@ -1476,16 +1489,33 @@ export class KrtPullRequestEditorPane extends EditorPane {
+ 			this.reviewComments = comments;
+ 			this.reviewCommentsLoading = false;
+ 			putReviewComments(pr.url, comments);
++			this.pushReviewCommentsToController(pr.url);
+ 			if (this.subMode === 'diff') {
+ 				this.renderLoaded(pr);
+ 			}
+ 		} catch (e) {
+ 			this.reviewCommentsLoading = false;
+ 			this.reviewComments = [];
++			this.pushReviewCommentsToController(pr.url);
+ 			this.logService.warn('[krt] pr-pane review-comments fetch failed', e);
+ 		}
+ 	}
+ 
++	/**
++	 * Phase 9.5 — fan out the merged review-comments set
++	 * (`reviewComments` + `liveReviewComments`) to
++	 * `IKrtPrCommentController`. The controller looks up which diff
++	 * URIs are currently registered for this PR and pushes
++	 * `CommentThread` instances to the workbench's `ICommentService`,
++	 * which renders them as native thread widgets in the diff
++	 * editors. Safe to call any time after the comments resolve;
++	 * registry-side mounts trigger a replay.
++	 */
++	private pushReviewCommentsToController(prUrl: string): void {
++		const merged = [...(this.reviewComments ?? []), ...this.liveReviewComments];
++		this.krtCommentController.setCommentsForPr(prUrl, merged);
++	}
++
+ 	// ---------- Tour sub-mode ----------
+ 
+ 	private renderTourView(pr: PullRequest): void {
+-- 
+2.52.0
+

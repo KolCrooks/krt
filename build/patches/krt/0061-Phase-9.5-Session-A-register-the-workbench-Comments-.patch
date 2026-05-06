@@ -1,0 +1,111 @@
+From 47450490f74481a3979c6ddc289965cf2c601454 Mon Sep 17 00:00:00 2001
+From: Kol Crooks <kol.crooks@datadoghq.com>
+Date: Thu, 7 May 2026 09:55:52 -0400
+Subject: [PATCH] Phase 9.5 Session A: register the workbench Comments view
+ ourselves
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Upstream's Comments view (the panel listing all comment threads on
+all files) is registered by MainThreadComments only when an extension
+declares the 'comments' contribution. KRT routes review comments
+through KrtPrCommentController directly, with no extension in the
+loop, so the view never showed up — the user couldn't browse threads
+via the panel.
+
+Add a KRT contribution that registers the same ViewContainer + View
+descriptors at boot. hideIfEmpty: true keeps it hidden until the
+controller pushes its first batch of comments via updateComments.
+---
+ .../pr/krtCommentsView.contribution.ts        | 65 +++++++++++++++++++
+ .../pr/krtPullRequestEditor.contribution.ts   |  1 +
+ 2 files changed, 66 insertions(+)
+ create mode 100644 src/vs/workbench/contrib/krt/browser/pr/krtCommentsView.contribution.ts
+
+diff --git a/src/vs/workbench/contrib/krt/browser/pr/krtCommentsView.contribution.ts b/src/vs/workbench/contrib/krt/browser/pr/krtCommentsView.contribution.ts
+new file mode 100644
+index 00000000000..53b3ab91098
+--- /dev/null
++++ b/src/vs/workbench/contrib/krt/browser/pr/krtCommentsView.contribution.ts
+@@ -0,0 +1,65 @@
++/*---------------------------------------------------------------------------------------------
++ *  Copyright (c) Microsoft Corporation. All rights reserved.
++ *  Licensed under the MIT License. See License.txt in the project root for license information.
++ *--------------------------------------------------------------------------------------------*/
++
++import { Codicon } from '../../../../../base/common/codicons.js';
++import { localize } from '../../../../../nls.js';
++import { SyncDescriptor } from '../../../../../platform/instantiation/common/descriptors.js';
++import { Registry } from '../../../../../platform/registry/common/platform.js';
++import { registerIcon } from '../../../../../platform/theme/common/iconRegistry.js';
++import { ViewPaneContainer } from '../../../../browser/parts/views/viewPaneContainer.js';
++import {
++	Extensions as ViewExtensions,
++	IViewContainersRegistry,
++	IViewsRegistry,
++	ViewContainerLocation,
++} from '../../../../common/views.js';
++import { CommentsPanel } from '../../../comments/browser/commentsView.js';
++import {
++	COMMENTS_VIEW_ID,
++	COMMENTS_VIEW_STORAGE_ID,
++	COMMENTS_VIEW_TITLE,
++} from '../../../comments/browser/commentsTreeViewer.js';
++
++/**
++ * Phase 9.5 — register the workbench's standard Comments view at
++ * boot. Upstream's `MainThreadComments` is the only thing that
++ * normally registers this view, and it only runs when an extension
++ * declares the `comments` contribution. KRT has no such extension —
++ * its review-comment data flows through `KrtPrCommentController`
++ * directly — so without this contribution the Comments view never
++ * shows up in the panel and the user has no aggregated thread list.
++ *
++ * `hideIfEmpty: true` keeps the view out of the panel when there are
++ * no threads anywhere; it appears as soon as `KrtPrCommentController`
++ * pushes its first batch of review comments through `updateComments`.
++ */
++
++const commentsViewIcon = registerIcon(
++	'krt-comments-view-icon',
++	Codicon.commentDiscussion,
++	localize('krt.commentsViewIcon', "View icon of the comments view."),
++);
++
++const VIEW_CONTAINER = Registry.as<IViewContainersRegistry>(ViewExtensions.ViewContainersRegistry).registerViewContainer({
++	id: COMMENTS_VIEW_ID,
++	title: COMMENTS_VIEW_TITLE,
++	ctorDescriptor: new SyncDescriptor(ViewPaneContainer, [COMMENTS_VIEW_ID, { mergeViewWithContainerWhenSingleView: true }]),
++	storageId: COMMENTS_VIEW_STORAGE_ID,
++	hideIfEmpty: true,
++	icon: commentsViewIcon,
++	order: 10,
++}, ViewContainerLocation.Panel);
++
++Registry.as<IViewsRegistry>(ViewExtensions.ViewsRegistry).registerViews([{
++	id: COMMENTS_VIEW_ID,
++	name: COMMENTS_VIEW_TITLE,
++	canToggleVisibility: false,
++	ctorDescriptor: new SyncDescriptor(CommentsPanel),
++	canMoveView: true,
++	containerIcon: commentsViewIcon,
++	focusCommand: {
++		id: 'workbench.action.focusCommentsPanel',
++	},
++}], VIEW_CONTAINER);
+diff --git a/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditor.contribution.ts b/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditor.contribution.ts
+index cf0d29863a6..b8e044fbb60 100644
+--- a/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditor.contribution.ts
++++ b/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditor.contribution.ts
+@@ -10,6 +10,7 @@ import { IInstantiationService } from '../../../../../platform/instantiation/com
+ import { Registry } from '../../../../../platform/registry/common/platform.js';
+ import { EditorPaneDescriptor, IEditorPaneRegistry } from '../../../../browser/editor.js';
+ import { EditorExtensions, IEditorFactoryRegistry, IEditorSerializer } from '../../../../common/editor.js';
++import './krtCommentsView.contribution.js';
+ import { IKrtPrCommentController, KrtPrCommentController } from './krtPrCommentController.js';
+ import { KrtPullRequestEditorInput } from './krtPullRequestEditorInput.js';
+ import { KrtPullRequestEditorPane } from './krtPullRequestEditorPane.js';
+-- 
+2.52.0
+

@@ -1,0 +1,235 @@
+From d236728a53b825ece63257446f9682b48cdb04ed Mon Sep 17 00:00:00 2001
+From: Kol Crooks <kol.crooks@datadoghq.com>
+Date: Wed, 6 May 2026 15:23:31 -0400
+Subject: [PATCH] PR search: scope to registered workspaces, empty-state CTA
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Re-applying the Phase 8.6 search-filter work that got reverted.
+
+- IPullRequestProvider.search gains an optional `repos: { owner, repo
+  }[]` arg. When non-empty, the gh search query gets a leading
+  `(repo:o/n OR repo:o/n …)` filter so results stay within registered
+  workspaces.
+- KrtSearchService injects IKrtWorkspaceRegistry + ICommandService,
+  plumbs them through to the overlay.
+- Overlay short-circuits `runSearch` when the registry is empty —
+  KRT's search is workspace-scoped by design, so we don't issue a
+  wide-open `gh` search and return random PRs from across GitHub.
+- Empty-registry render: "No workspaces yet — add one to start
+  finding PRs." with a primary "Add a workspace" button that runs
+  `krt.workspace.add`. The overlay also subscribes to
+  `IKrtWorkspaceRegistry.onDidChange` while open, so adding a
+  workspace mid-overlay re-runs the search without a close/reopen.
+---
+ src/vs/platform/krt/common/krt.ts             |  8 ++-
+ .../pullRequestProviderMainService.ts         | 15 ++++--
+ .../krt/browser/search/krtSearchOverlay.css   | 18 +++++++
+ .../krt/browser/search/krtSearchOverlay.ts    | 49 ++++++++++++++++++-
+ 4 files changed, 83 insertions(+), 7 deletions(-)
+
+diff --git a/src/vs/platform/krt/common/krt.ts b/src/vs/platform/krt/common/krt.ts
+index fbbb716ad7f..6d4bac079a9 100644
+--- a/src/vs/platform/krt/common/krt.ts
++++ b/src/vs/platform/krt/common/krt.ts
+@@ -203,8 +203,14 @@ export interface IPullRequestProvider {
+ 	 * (filtered to PRs by `is:pr`). Up to 25 results, sorted by
+ 	 * `updated` desc. Throws `KrtError` on auth/rate-limit failures
+ 	 * (see `errors.ts`).
++	 *
++	 * `repos` (Phase 8.6) restricts the search to the listed
++	 * `owner/repo` pairs. When non-empty, the search becomes
++	 * `(repo:o/n OR repo:o/n …) <existing query>` so results never
++	 * include PRs from repos the user hasn't registered. Empty array
++	 * (or omitted) is unrestricted.
+ 	 */
+-	search(query: string, scope: SearchScope): Promise<readonly PullRequestSummary[]>;
++	search(query: string, scope: SearchScope, repos?: readonly { owner: string; repo: string }[]): Promise<readonly PullRequestSummary[]>;
+ 	/**
+ 	 * Lazy fetch of the PR's automation events (commits, label
+ 	 * changes, review requests, merges, force pushes …) — Phase 5
+diff --git a/src/vs/platform/krt/electron-main/pullRequestProviderMainService.ts b/src/vs/platform/krt/electron-main/pullRequestProviderMainService.ts
+index 1a1a65300bc..d493cfeb1d7 100644
+--- a/src/vs/platform/krt/electron-main/pullRequestProviderMainService.ts
++++ b/src/vs/platform/krt/electron-main/pullRequestProviderMainService.ts
+@@ -163,8 +163,8 @@ export class PullRequestProviderMainService implements IPullRequestProvider {
+ 		return mapPullRequest(parsed, data, issueComments, reviews, checks.check_runs ?? []);
+ 	}
+ 
+-	async search(query: string, scope: SearchScope): Promise<readonly PullRequestSummary[]> {
+-		const q = buildSearchQuery(query, scope);
++	async search(query: string, scope: SearchScope, repos?: readonly { owner: string; repo: string }[]): Promise<readonly PullRequestSummary[]> {
++		const q = buildSearchQuery(query, scope, repos);
+ 		const path = `search/issues?per_page=${SEARCH_PER_PAGE}&sort=updated&order=desc&q=${encodeURIComponent(q)}`;
+ 		const data = await this.ghClient.apiJson<GhSearchResponse>(path);
+ 		const items = Array.isArray(data?.items) ? data.items : [];
+@@ -274,7 +274,7 @@ export class PullRequestProviderMainService implements IPullRequestProvider {
+ 	}
+ }
+ 
+-function buildSearchQuery(query: string, scope: SearchScope): string {
++function buildSearchQuery(query: string, scope: SearchScope, repos?: readonly { owner: string; repo: string }[]): string {
+ 	const trimmed = query.trim();
+ 	const qualifiers: string[] = ['is:pr', 'archived:false'];
+ 	switch (scope) {
+@@ -288,7 +288,14 @@ function buildSearchQuery(query: string, scope: SearchScope): string {
+ 			qualifiers.push('review-requested:@me');
+ 			break;
+ 	}
+-	return trimmed ? `${trimmed} ${qualifiers.join(' ')}` : qualifiers.join(' ');
++	// Workspace filter — restrict to the listed repos. GitHub search
++	// supports OR with parens, so multiple workspaces become
++	// `(repo:o/n OR repo:o/n …)`. The qualifiers/text follow.
++	const repoFilter = (repos && repos.length > 0)
++		? `(${repos.map(r => `repo:${r.owner}/${r.repo}`).join(' OR ')})`
++		: '';
++	const parts = [repoFilter, trimmed, qualifiers.join(' ')].filter(s => s.length > 0);
++	return parts.join(' ');
+ }
+ 
+ function deriveSummaryState(item: GhSearchItem): PullRequestState {
+diff --git a/src/vs/workbench/contrib/krt/browser/search/krtSearchOverlay.css b/src/vs/workbench/contrib/krt/browser/search/krtSearchOverlay.css
+index c0512f2be2b..58e53f4b644 100644
+--- a/src/vs/workbench/contrib/krt/browser/search/krtSearchOverlay.css
++++ b/src/vs/workbench/contrib/krt/browser/search/krtSearchOverlay.css
+@@ -195,6 +195,24 @@
+ 	opacity: 0.75;
+ }
+ 
++.krt-search-add-workspace {
++	display: block;
++	margin: 0 auto 24px;
++	font: inherit;
++	font-size: 12px;
++	font-weight: 500;
++	color: var(--vscode-button-foreground, white);
++	background: var(--krt-accent, var(--vscode-button-background));
++	border: none;
++	border-radius: 6px;
++	padding: 6px 14px;
++	cursor: pointer;
++}
++
++.krt-search-add-workspace:hover {
++	background: var(--krt-accent-2, var(--vscode-button-hoverBackground));
++}
++
+ .krt-search-loading {
+ 	font-style: italic;
+ }
+diff --git a/src/vs/workbench/contrib/krt/browser/search/krtSearchOverlay.ts b/src/vs/workbench/contrib/krt/browser/search/krtSearchOverlay.ts
+index 0bcec2a661f..f11b9a262df 100644
+--- a/src/vs/workbench/contrib/krt/browser/search/krtSearchOverlay.ts
++++ b/src/vs/workbench/contrib/krt/browser/search/krtSearchOverlay.ts
+@@ -15,8 +15,10 @@ import { IGhClient, IPullRequestProvider, parsePullRequestUrl, PullRequestSummar
+ import { ILayoutService } from '../../../../../platform/layout/browser/layoutService.js';
+ import { ILogService } from '../../../../../platform/log/common/log.js';
+ import { IStorageService } from '../../../../../platform/storage/common/storage.js';
++import { ICommandService } from '../../../../../platform/commands/common/commands.js';
+ import { IEditorService } from '../../../../services/editor/common/editorService.js';
+ import { readRecentPullRequests } from '../krtRecentPullRequests.js';
++import { IKrtWorkspaceRegistry } from '../workspace/krtWorkspaceRegistry.js';
+ import { KrtPullRequestEditorInput } from '../pr/krtPullRequestEditorInput.js';
+ import { IKrtSearchService } from './krtSearchService.js';
+ 
+@@ -47,6 +49,8 @@ export class KrtSearchService extends Disposable implements IKrtSearchService {
+ 		@IEditorService private readonly editorService: IEditorService,
+ 		@IStorageService private readonly storageService: IStorageService,
+ 		@ILogService private readonly logService: ILogService,
++		@IKrtWorkspaceRegistry private readonly workspaceRegistry: IKrtWorkspaceRegistry,
++		@ICommandService private readonly commandService: ICommandService,
+ 	) {
+ 		super();
+ 	}
+@@ -72,6 +76,8 @@ export class KrtSearchService extends Disposable implements IKrtSearchService {
+ 				this.editorService,
+ 				this.storageService,
+ 				this.logService,
++				this.workspaceRegistry,
++				this.commandService,
+ 			));
+ 		}
+ 		return this.overlay;
+@@ -106,6 +112,8 @@ class KrtSearchOverlay extends Disposable {
+ 		private readonly editorService: IEditorService,
+ 		private readonly storageService: IStorageService,
+ 		private readonly logService: ILogService,
++		private readonly workspaceRegistry: IKrtWorkspaceRegistry,
++		private readonly commandService: ICommandService,
+ 	) {
+ 		super();
+ 		this.root = DOM.append(host, DOM.$('.krt-search-overlay'));
+@@ -148,6 +156,16 @@ class KrtSearchOverlay extends Disposable {
+ 		this.root.hidden = false;
+ 		this.refreshGh();
+ 		this.refreshRecents();
++		// Re-run when the registry changes (user adds a workspace from
++		// the empty-state CTA), so results update without closing the
++		// overlay. Listener is `_register`'d on the overlay instance,
++		// but we attach lazily on open + clear on close so we don't
++		// keep firing while hidden.
++		this.listeners.add(this.workspaceRegistry.onDidChange(() => {
++			if (this.isOpen) {
++				void this.runSearch();
++			}
++		}));
+ 		this.renderResults();
+ 		this.inputElement.focus();
+ 		this.inputElement.select();
+@@ -240,12 +258,21 @@ class KrtSearchOverlay extends Disposable {
+ 			this.renderResults();
+ 			return;
+ 		}
++		const repos = this.workspaceRegistry.getAll().map(w => ({ owner: w.owner, repo: w.repo }));
++		if (repos.length === 0) {
++			// No workspaces → no scope to search. Show the add-workspace
++			// CTA instead of issuing a wide-open `gh` search.
++			this.results = [];
++			this.selectedIndex = -1;
++			this.renderResults();
++			return;
++		}
+ 		this.cancelInflight();
+ 		const cts = new CancellationTokenSource();
+ 		this.inflight = cts;
+ 		this.renderResults({ loading: true });
+ 		try {
+-			const items = await this.pullRequestProvider.search(this.query, this.scope);
++			const items = await this.pullRequestProvider.search(this.query, this.scope, repos);
+ 			if (cts.token.isCancellationRequested) {
+ 				return;
+ 			}
+@@ -295,10 +322,28 @@ class KrtSearchOverlay extends Disposable {
+ 			return;
+ 		}
+ 		if (this.results.length === 0) {
++			const hasWorkspaces = this.workspaceRegistry.getAll().length > 0;
++			if (!hasWorkspaces) {
++				// Empty registry → results would have to be unrestricted
++				// (which we deliberately don't do — KRT's search is
++				// always workspace-scoped). Instead, prompt to add one.
++				const empty = DOM.append(this.resultsElement, DOM.$('.krt-search-empty'));
++				empty.textContent = localize(
++					'krt.search.noWorkspaces',
++					"No workspaces yet — add one to start finding PRs.",
++				);
++				const addBtn = DOM.append(this.resultsElement, DOM.$('button.krt-search-add-workspace')) as HTMLButtonElement;
++				addBtn.type = 'button';
++				addBtn.textContent = localize('krt.search.addWorkspace', "Add a workspace");
++				this.listeners.add(DOM.addDisposableListener(addBtn, 'click', () => {
++					void this.commandService.executeCommand('krt.workspace.add');
++				}));
++				return;
++			}
+ 			const el = DOM.append(this.resultsElement, DOM.$('.krt-search-empty'));
+ 			el.textContent = this.query
+ 				? localize('krt.search.noMatches', "No PRs match.")
+-				: localize('krt.search.startTyping', "Type to search PRs across GitHub.");
++				: localize('krt.search.startTyping', "Type to search PRs in your registered workspaces.");
+ 			return;
+ 		}
+ 		this.resultRowElements = [];
+-- 
+2.52.0
+

@@ -149,13 +149,15 @@ Smallest reversible piece first.
 ### Settings panel
 
 - [~] Workspaces section under Settings → KRT —
-      **deferred to Phase 10 (Tweaks panel)**, matching the
-      Phase 7 precedent where the AI configuration UI was
-      also deferred. Discoverability today: Command Palette
-      `KRT: Add Workspace…` / `KRT: Remove Workspace…`, plus
-      the "Add a workspace" CTA in the empty PR Search
-      overlay. Phase 10 will host all KRT-specific
-      configuration in one place.
+      **deferred to a later phase**. Originally pointed at
+      a Tweaks panel (old Phase 10), but Phase 10 has been
+      retargeted to review mode + comment fidelity and the
+      Tweaks panel idea was dropped (its accent + density
+      bits became Phase 9 defaults). Discoverability today:
+      Command Palette `KRT: Add Workspace…` / `KRT: Remove
+      Workspace…`, plus the "Add a workspace" CTA in the
+      empty PR Search overlay. A KRT settings UI lands
+      with the polish pass in Phase 12 if not sooner.
 
 ### Demo gate
 
@@ -219,9 +221,23 @@ Smallest reversible piece first.
   flow: launch KRT in the same folder you registered as
   the workspace. Phase 8.7 will close this gap by
   switching the workbench's working tree to the PR head.
-- **Settings panel deferred to Phase 10** — Command
-  Palette commands cover the use cases for now (Phase 7
-  precedent).
+- **Settings panel deferred** — Command Palette commands
+  cover the use cases for now (Phase 7 precedent).
+  Originally targeted at an old Phase 10 Tweaks panel
+  that's since been retargeted; will likely live with
+  the Phase 12 polish pass.
+
+## Phase 9 follow-ups (patches 0037, 0054)
+
+- **Re-landed** as patch 0037 after the working tree reset.
+  Workspace registry, krt-git:// content provider, workspace-
+  aware Monaco diff URI strategy, KrtGitMainService extensions.
+- **Workspace-scoped search re-applied** (patch 0054):
+  `IPullRequestProvider.search` accepts
+  `repos: { owner, repo }[]`; the overlay reads
+  `IKrtWorkspaceRegistry.getAll()` on each search. Empty
+  registry → "Add a workspace" CTA inline; registry change
+  fires `runSearch` automatically while the overlay is open.
 
 ## Post-MVP polish
 

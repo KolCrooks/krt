@@ -209,6 +209,48 @@ After the demo-gate, one fix landed:
   inner thread keeps its natural `offsetHeight`. Stable
   on first refit.
 
+### Phase 9 follow-ups (patches 0036, 0038-0048, 0055-0056)
+
+The Phase-8.5 implementation got revisited during Phase 9. Major
+changes:
+
+- **Re-landed** as patch 0036 after the working tree reset.
+- **`DiffEditorWidget` view-model leak workaround** (patch 0038):
+  switched from `setModel({original, modified})` to
+  `createViewModel(...)` + `RefCounted.create(viewModel)` +
+  `setDiffModel(ref)`. The public path leaves refcount = 2 with
+  no holder for the base ref → leaked-disposable warnings + the
+  diff failed to render at all on some Electron versions.
+- **`getOrCreate` for cached models** (patch 0038): re-rendering
+  the same diff threw "Cannot add model because it already exists"
+  because the URI was stable across re-renders. `getModel(uri)`
+  first; only `createModel` on miss.
+- **Patch-direct reconstruction** (patch 0055): replaced the
+  blank-padded reconstruction with a compact text + per-side
+  `realLines: (number | undefined)[]` map. Disabled
+  `hideUnchangedRegions` (no padding to fold), set
+  `lineNumbers` callbacks per editor so the gutter still shows
+  real file line numbers. Eliminates the "expand → blank rows"
+  bug.
+- **Static height estimate** (patches 0040-0045): one-shot
+  `style.height` from `max(baseLines, headLines) * 19 + chrome`
+  computed up-front from the patch. No more `getContentHeight()`
+  polling races against `hideUnchangedRegions`'s autorun.
+- **Lazy composer mount** (patch 0055): click-to-comment uses
+  `KrtMonacoDiffView.mountComposer` / `dismountComposer` to
+  toggle a single view zone in place. No full `renderLoaded`
+  rebuild.
+- **Mouse-wheel passthrough** (patches 0046-0047): vertical
+  wheel bubbles to the outer pane when there's nothing to
+  scroll; horizontal still hits Monaco for shift+wheel.
+- **Sticky section headers + collapse** (patches 0048-0050):
+  `position: sticky` on `.krt-pr-diff-section-head` (with
+  `clip-path` on section so sticky escapes the rounding), per-
+  file collapse, scroll-on-collapse anchors at the header.
+- **Inline / side-by-side toggle** (patch 0048): persisted in
+  `IStorageService` under `krt.pr.diffMode.v1`; toggling
+  re-renders the diff sub-mode.
+
 ## Open questions
 
 - _(filled in during execution)_

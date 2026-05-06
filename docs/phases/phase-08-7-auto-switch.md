@@ -264,6 +264,25 @@ Smallest reversible piece first.
   The refs are remote-tracking, so `jj git import`
   treats them as branches on `origin` — fine.
 
+## Phase 9 follow-ups (patches 0051, 0053, 0056)
+
+- **Re-landed** as patch 0051 after the working tree reset.
+  IKrtGitService extensions, krtVcs / krtSwitchResume /
+  krtSwitchOps modules, Check Out button + dialog, Forget
+  Active PR Switch action.
+- **Always-show button** (patch 0053): hiding the button when
+  no workspace was registered for the repo made the feature
+  invisible. Click without a matching workspace now prompts
+  the Add Workspace flow inline.
+- **Checked-out grey state** (patch 0056): button compares
+  `getHeadSha(workspace)` to `pr.head.sha`; flips label to
+  "Checked out" + disables when matching. Re-runs on
+  `IKrtSwitchResumeService.onDidChange`.
+
+Status pill, close-PR cleanup prompt, and `gh pr checkout`
+helper from the original spec are still deferred — Phase 10's
+review-mode wrapper will subsume them.
+
 ## Post-MVP polish
 
 - _(none captured during this pass — the immediate gaps

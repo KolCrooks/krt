@@ -1,0 +1,73 @@
+From cd41cd76e5d6f95dcd0d3c4a9282aa3ac87d7d5f Mon Sep 17 00:00:00 2001
+From: Kol Crooks <kol.crooks@datadoghq.com>
+Date: Thu, 7 May 2026 10:34:32 -0400
+Subject: [PATCH] Phase 9.5 Session A: push full snapshot via
+ setWorkspaceComments
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The granular updateComments path the inline editors consume only
+mutates commentsModel when a resource entry already exists. If the
+first applyForPr ran before any URI was registered (the common
+order: setCommentsForPr fires from the cache-hit branch in setInput,
+which runs before renderLoaded mounts the diff views), no 'added'
+event ever fires, no resource entry gets created, and every
+subsequent 'changed' silently drops on the floor. The Comments
+panel reads from commentsModel and stays empty.
+
+After per-URI work in applyForPr (and clearCommentsForPr), push the
+full snapshot via setWorkspaceComments. setWorkspaceComments
+replaces the owner's threads wholesale — no diff bookkeeping
+required — so the panel mirrors KRT's threadsByUri exactly.
+---
+ .../krt/browser/pr/krtPrCommentController.ts  | 26 +++++++++++++++++++
+ 1 file changed, 26 insertions(+)
+
+diff --git a/src/vs/workbench/contrib/krt/browser/pr/krtPrCommentController.ts b/src/vs/workbench/contrib/krt/browser/pr/krtPrCommentController.ts
+index 75d58072a29..65b955b4055 100644
+--- a/src/vs/workbench/contrib/krt/browser/pr/krtPrCommentController.ts
++++ b/src/vs/workbench/contrib/krt/browser/pr/krtPrCommentController.ts
+@@ -136,6 +136,14 @@ export class KrtPrCommentController extends Disposable implements ICommentContro
+ 			}
+ 		}
+ 		this.urisByPr.delete(prUrl);
++		// Mirror the post-applyForPr snapshot push so the model stays
++		// in sync — clearing only one PR shouldn't drop other PRs'
++		// threads from the panel.
++		const allThreads: KrtPrCommentThread[] = [];
++		for (const threads of this.threadsByUri.values()) {
++			allThreads.push(...threads);
++		}
++		this.commentService.setWorkspaceComments(KRT_PR_COMMENT_OWNER, allThreads);
+ 	}
+ 
+ 	async getDocumentComments(resource: URI, _token: CancellationToken): Promise<ICommentInfo<IRange>> {
+@@ -348,6 +356,24 @@ export class KrtPrCommentController extends Disposable implements ICommentContro
+ 		}
+ 
+ 		this.urisByPr.set(prUrl, nextOwned);
++
++		// After per-URI work, push the full owner snapshot to
++		// `setWorkspaceComments`. The granular `updateComments` path
++		// the inline editors consume only mutates `commentsModel`
++		// when a resource entry already exists; if the model lost an
++		// entry (most often because the FIRST `applyForPr` ran before
++		// any URI was registered, so no `added` fired and no entry
++		// got created), every subsequent `changed` event silently
++		// drops on the floor and the workbench's Comments view stays
++		// empty. `setWorkspaceComments` replaces the model wholesale
++		// from the source of truth — KRT's own `threadsByUri` —
++		// which sidesteps the diff-bookkeeping fragility entirely.
++		const allThreads: KrtPrCommentThread[] = [];
++		for (const threads of this.threadsByUri.values()) {
++			allThreads.push(...threads);
++		}
++		this.commentService.setWorkspaceComments(KRT_PR_COMMENT_OWNER, allThreads);
++		this.logService.info(`[krt] setWorkspaceComments: ${allThreads.length} threads across ${this.threadsByUri.size} URIs`);
+ 	}
+ 
+ 	private commentInfosForUri(uri: URI): ICommentInfo[] {
+-- 
+2.52.0
+
