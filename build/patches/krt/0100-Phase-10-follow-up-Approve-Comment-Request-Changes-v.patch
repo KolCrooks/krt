@@ -1,0 +1,169 @@
+From e4f13af2fe02d1ec6dba672c7ba4433a04a65ec7 Mon Sep 17 00:00:00 2001
+From: Kol Crooks <kol.crooks@datadoghq.com>
+Date: Fri, 8 May 2026 15:16:21 -0400
+Subject: [PATCH] Phase 10 follow-up: Approve / Comment / Request Changes
+ verdicts on submit
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Submit Review now opens a two-step dialog: first a three-button
+prompt for the verdict (Comment, Approve, Request changes) and then
+an input dialog for the optional summary body. The dialog primitives
+don't support input + multi-button in one pass, so we lean on prompt
+for verdict selection and follow up with input for the body.
+
+The chosen `ReviewSubmissionEvent` flows through the existing draft
+service → provider path; `submitReview` already accepted all three
+events. Notification copy adapts to the verdict ("Approved",
+"Requested changes", "Review posted"). Body-input dialog message and
+primary button copy adapt too so the user can confirm the verdict
+before committing.
+---
+ .../browser/pr/krtPullRequestEditorPane.ts    | 87 ++++++++++++++++---
+ 1 file changed, 76 insertions(+), 11 deletions(-)
+
+diff --git a/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.ts b/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.ts
+index 6e217ca046a..389073abd35 100644
+--- a/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.ts
++++ b/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.ts
+@@ -54,6 +54,7 @@ import {
+ 	PullRequestState,
+ 	Reviewer,
+ 	ReviewerState,
++	ReviewSubmissionEvent,
+ } from '../../../../../platform/krt/common/krt.js';
+ import { EditorPane } from '../../../../browser/parts/editor/editorPane.js';
+ import { IEditorOpenContext } from '../../../../common/editor.js';
+@@ -551,11 +552,11 @@ export class KrtPullRequestEditorPane extends EditorPane {
+ 		if (!draft) {
+ 			return;
+ 		}
+-		// Per the open question in the phase doc: lean on a single
+-		// Submit (= COMMENT) entry point; Approve / Request Changes
+-		// are rare and can land as a follow-up. The optional summary
+-		// body is the input here.
+-		const result = await this.dialogService.input({
++		// Two-step submit dialog (the workbench's native dialog
++		// primitives don't support an input + multi-button shape in a
++		// single pass): first the verdict via a three-button prompt,
++		// then an optional summary body via an input dialog.
++		const eventPrompt = await this.dialogService.prompt<ReviewSubmissionEvent | undefined>({
+ 			type: 'info',
+ 			message: localize(
+ 				'krt.pr.review.submit.confirm',
+@@ -564,26 +565,54 @@ export class KrtPullRequestEditorPane extends EditorPane {
+ 			),
+ 			detail: localize(
+ 				'krt.pr.review.submit.detail',
+-				"{0} inline comment(s) will post to GitHub as a single review.",
++				"{0} inline comment(s) will post to GitHub. Pick a verdict — comment is the default.",
++				draft.comments.length,
++			),
++			buttons: [
++				{
++					label: localize('krt.pr.review.submit.comment', "&&Comment"),
++					run: () => 'COMMENT' as const,
++				},
++				{
++					label: localize('krt.pr.review.submit.approve', "&&Approve"),
++					run: () => 'APPROVE' as const,
++				},
++				{
++					label: localize('krt.pr.review.submit.requestChanges', "Request &&changes"),
++					run: () => 'REQUEST_CHANGES' as const,
++				},
++			],
++			cancelButton: true,
++		});
++		const event = eventPrompt.result;
++		if (!event) {
++			return;
++		}
++		const bodyResult = await this.dialogService.input({
++			type: 'info',
++			message: this.submitBodyDialogMessage(event, pr.number),
++			detail: localize(
++				'krt.pr.review.submit.body.detail',
++				"Add a brief summary if you want — the {0} inline comment(s) will post regardless.",
+ 				draft.comments.length,
+ 			),
+ 			inputs: [{
+ 				type: 'text',
+ 				placeholder: localize('krt.pr.review.submit.bodyPlaceholder', "Optional summary (markdown)"),
+ 			}],
+-			primaryButton: localize('krt.pr.review.submit.primary', "Submit"),
++			primaryButton: this.submitBodyPrimaryLabel(event),
+ 			cancelButton: localize('krt.pr.review.submit.cancel', "Cancel"),
+ 		});
+-		if (!result.confirmed) {
++		if (!bodyResult.confirmed) {
+ 			return;
+ 		}
+-		const summary = result.values?.[0]?.trim() ?? '';
++		const summary = bodyResult.values?.[0]?.trim() ?? '';
+ 		try {
+ 			this.reviewBtnElement.disabled = true;
+ 			this.discardBtnElement.disabled = true;
+ 			await this.reviewDraftService.submit({
+ 				prUrl: pr.url,
+-				event: 'COMMENT',
++				event,
+ 				body: summary.length > 0 ? summary : undefined,
+ 			});
+ 			// Refetch review comments so the freshly-posted batch
+@@ -593,7 +622,7 @@ export class KrtPullRequestEditorPane extends EditorPane {
+ 			await this.loadReviewComments(pr);
+ 			this.notificationService.notify({
+ 				severity: Severity.Info,
+-				message: localize('krt.pr.review.submit.success', "Review posted to PR #{0}.", pr.number),
++				message: this.submitSuccessMessage(event, pr.number),
+ 			});
+ 		} catch (err) {
+ 			const message = isKrtError(err) ? `${err.message} — ${err.hint}` : String(err);
+@@ -604,6 +633,42 @@ export class KrtPullRequestEditorPane extends EditorPane {
+ 		}
+ 	}
+ 
++	private submitBodyDialogMessage(event: ReviewSubmissionEvent, prNumber: number): string {
++		switch (event) {
++			case 'APPROVE':
++				return localize('krt.pr.review.submit.body.approve', "Approve PR #{0}?", prNumber);
++			case 'REQUEST_CHANGES':
++				return localize('krt.pr.review.submit.body.requestChanges', "Request changes on PR #{0}?", prNumber);
++			case 'COMMENT':
++			default:
++				return localize('krt.pr.review.submit.body.comment', "Comment on PR #{0}?", prNumber);
++		}
++	}
++
++	private submitBodyPrimaryLabel(event: ReviewSubmissionEvent): string {
++		switch (event) {
++			case 'APPROVE':
++				return localize('krt.pr.review.submit.primary.approve', "Approve");
++			case 'REQUEST_CHANGES':
++				return localize('krt.pr.review.submit.primary.requestChanges', "Request Changes");
++			case 'COMMENT':
++			default:
++				return localize('krt.pr.review.submit.primary.comment', "Submit Comment");
++		}
++	}
++
++	private submitSuccessMessage(event: ReviewSubmissionEvent, prNumber: number): string {
++		switch (event) {
++			case 'APPROVE':
++				return localize('krt.pr.review.submit.success.approve', "Approved PR #{0}.", prNumber);
++			case 'REQUEST_CHANGES':
++				return localize('krt.pr.review.submit.success.requestChanges', "Requested changes on PR #{0}.", prNumber);
++			case 'COMMENT':
++			default:
++				return localize('krt.pr.review.submit.success.comment', "Review posted to PR #{0}.", prNumber);
++		}
++	}
++
+ 	private async handleDiscardReview(): Promise<void> {
+ 		const pr = this.currentPr;
+ 		if (!pr) {
+-- 
+2.52.0
+

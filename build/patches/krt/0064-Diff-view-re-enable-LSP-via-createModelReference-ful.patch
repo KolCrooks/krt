@@ -1,0 +1,600 @@
+From 54bf2dc2c7b9a75c29425d2636c6aa7607259fe8 Mon Sep 17 00:00:00 2001
+From: Kol Crooks <kol.crooks@datadoghq.com>
+Date: Thu, 7 May 2026 11:02:49 -0400
+Subject: [PATCH] Diff view: re-enable LSP via createModelReference + full
+ inner-editor contributions
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Phase 8.6's LSP path was working pre-rollback, but the re-landed series
+(patches 0036-0037) lost two pieces. This patch restores both.
+
+1) Inner-editor contributions filter dropped. Phase 9.5 (0058) allow-
+listed only `editor.contrib.review` so the native comment controller
+attaches. That filter also stripped hover, goto-definition, peek, find-
+references, etc. — none of which are individually obvious because they
+register themselves into the global list and only instantiate when the
+field is left undefined. Pass `{}` for both inner editor option blocks
+so the diff editor picks up the full registered-contribution set, same
+as a regular file editor. Comments still attach because
+`editor.contrib.review` is part of the default set.
+
+2) file:// upgrade for the head model. The previous code only used the
+file:// URI when `IModelService.getModel(headFileUri)` returned an
+existing model — i.e. only when the user had already opened the file in
+another editor. Typical flow (open PR, working tree on PR head, file
+not previously opened) hit the virtual `krt-pr-head://` URI instead, and
+language extensions don't activate against KRT-internal schemes.
+
+Restored the original async-resolution path: render synchronously with
+virtual models for instant visibility, then asynchronously call
+`ITextModelService.createModelReference(file://...)` once `getHeadSha`
+confirms the working tree is on the PR head SHA. The reference goes
+through the workbench's normal file-loading path, which triggers
+language-extension activation. Base side upgrades to `krt-git://` via
+the existing content provider so both sides become full-content; flip
+`hideUnchangedRegions` on so the visual stays focused on the changed
+regions plus a few lines of real surrounding context. realLines becomes
+identity for full-content sides; line-numbers fall back to Monaco's
+built-in numbering. Comment-resource registry re-registers at the new
+URIs so `KrtPrCommentController` sees the right set.
+
+Plus: register passthrough providers for `krt-pr-base://` and
+`krt-pr-head://` schemes in `KrtGitContentProviderContribution` so
+downstream `createModelReference` calls (peek, hover, language services)
+don't error with "Unable to resolve resource" on the virtual URIs.
+
+When the working tree isn't on the PR head, the upgrade logs "(no LSP).
+Check out the PR head SHA to enable LSP." and stays on virtuals.
+
+Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+---
+ .../contrib/krt/browser/pr/krtMonacoDiff.ts   | 395 +++++++++++-------
+ .../workspace/krtGitContentProvider.ts        |  32 ++
+ 2 files changed, 281 insertions(+), 146 deletions(-)
+
+diff --git a/src/vs/workbench/contrib/krt/browser/pr/krtMonacoDiff.ts b/src/vs/workbench/contrib/krt/browser/pr/krtMonacoDiff.ts
+index 0ea89a0d02b..e443ab8b8fa 100644
+--- a/src/vs/workbench/contrib/krt/browser/pr/krtMonacoDiff.ts
++++ b/src/vs/workbench/contrib/krt/browser/pr/krtMonacoDiff.ts
+@@ -4,32 +4,24 @@
+  *--------------------------------------------------------------------------------------------*/
+ 
+ import * as DOM from '../../../../../base/browser/dom.js';
+-import { Disposable, DisposableStore, IDisposable, toDisposable } from '../../../../../base/common/lifecycle.js';
++import { Disposable, DisposableStore, IDisposable, IReference, toDisposable } from '../../../../../base/common/lifecycle.js';
+ import { URI } from '../../../../../base/common/uri.js';
+ import { ICodeEditor, MouseTargetType } from '../../../../../editor/browser/editorBrowser.js';
+-import { EditorExtensionsRegistry } from '../../../../../editor/browser/editorExtensions.js';
+ import { DiffEditorWidget } from '../../../../../editor/browser/widget/diffEditor/diffEditorWidget.js';
+ import { RefCounted } from '../../../../../editor/browser/widget/diffEditor/utils.js';
+ import { ILanguageService } from '../../../../../editor/common/languages/language.js';
+ import { ITextModel } from '../../../../../editor/common/model.js';
+ import { IModelService } from '../../../../../editor/common/services/model.js';
++import { IResolvedTextEditorModel, ITextModelService } from '../../../../../editor/common/services/resolverService.js';
+ import { IInstantiationService } from '../../../../../platform/instantiation/common/instantiation.js';
++import { IKrtGitService } from '../../../../../platform/krt/common/krtGit.js';
+ import { PullRequestFile } from '../../../../../platform/krt/common/krt.js';
+ import { ILogService } from '../../../../../platform/log/common/log.js';
+ import { encodeKrtGit } from '../workspace/krtGitContentProvider.js';
+ import { KrtWorkspace } from '../workspace/krtWorkspaceRegistry.js';
+-import { registerKrtPrResource } from './krtPrCommentRegistry.js';
++import { IKrtPrResource, registerKrtPrResource } from './krtPrCommentRegistry.js';
+ import { reconstructFromPatch } from './krtPatchReconstruct.js';
+ 
+-/**
+- * Editor contributions we want to live on the diff editor's two inner
+- * code editors, on top of the otherwise-empty list KRT uses for diff
+- * embeds. `editor.contrib.review` is the workbench's
+- * `CommentController` — without it, the native gutter affordances and
+- * comment-thread zone widgets never attach.
+- */
+-const KRT_DIFF_EDITOR_CONTRIBUTIONS = ['editor.contrib.review'];
+-
+ export type DiffSide = 'LEFT' | 'RIGHT';
+ 
+ export interface IKrtMonacoDiffViewOptions {
+@@ -140,16 +132,19 @@ export class KrtMonacoDiffView extends Disposable {
+ 	private readonly widget: DiffEditorWidget;
+ 	private readonly container: HTMLElement;
+ 	private readonly zoneDisposables = this._register(new DisposableStore());
++	private readonly resourceRegistrations = this._register(new DisposableStore());
+ 	private baseRealLines: ReadonlyArray<number | undefined> = [];
+ 	private headRealLines: ReadonlyArray<number | undefined> = [];
+ 	private activeComposerZone: IDisposable | undefined;
+ 
+ 	constructor(
+ 		parent: HTMLElement,
+-		opts: IKrtMonacoDiffViewOptions,
++		private readonly opts: IKrtMonacoDiffViewOptions,
+ 		@IInstantiationService instantiationService: IInstantiationService,
+-		@IModelService modelService: IModelService,
+-		@ILanguageService languageService: ILanguageService,
++		@IModelService private readonly modelService: IModelService,
++		@ILanguageService private readonly languageService: ILanguageService,
++		@ITextModelService private readonly textModelService: ITextModelService,
++		@IKrtGitService private readonly gitService: IKrtGitService,
+ 		@ILogService private readonly logService: ILogService,
+ 	) {
+ 		super();
+@@ -160,15 +155,15 @@ export class KrtMonacoDiffView extends Disposable {
+ 		// `automaticLayout: true` watching the wrapper's CSS-driven width.
+ 		this.container.style.height = `${estimateEditorHeight(opts.file.patch)}px`;
+ 
+-		// Inner-editor contributions are otherwise stripped — diff cards
+-		// don't need most of the editor surface. But the native review-
+-		// comments controller (`editor.contrib.review`) IS needed: it
+-		// owns the `+` gutter affordance, the comment-thread zone
+-		// widgets, and the data wiring to `ICommentService`. We
+-		// allow-list it explicitly rather than the default-everything
+-		// path the stock VSCode uses to keep the diff embeds light.
+-		const innerContributions = EditorExtensionsRegistry.getSomeEditorContributions(KRT_DIFF_EDITOR_CONTRIBUTIONS);
+-
++		// Pass `{}` (no `contributions` field) for the per-editor widget
++		// options so the diff editor's inner CodeEditorWidgets fall back
++		// to the full registered-contribution set — same as a regular
++		// file editor. Filtering to a subset here suppresses the hover /
++		// goto-definition feature stack — those contributions register
++		// themselves into the global list and the widget only instantiates
++		// them when the field is left undefined. The native review-
++		// comment controller (`editor.contrib.review`) is part of the
++		// default set, so comments still attach.
+ 		this.widget = this._register(instantiationService.createInstance(
+ 			DiffEditorWidget,
+ 			this.container,
+@@ -177,10 +172,10 @@ export class KrtMonacoDiffView extends Disposable {
+ 				originalEditable: false,
+ 				renderSideBySide: opts.renderSideBySide ?? true,
+ 				useInlineViewWhenSpaceIsLimited: true,
+-				// Patch-direct rendering only includes context+changes,
+-				// so there are no large unchanged regions for Monaco to
+-				// fold. Disabling avoids the "+ N hidden lines" widget
+-				// that, when expanded, used to reveal padded blanks.
++				// Initial render uses patch-direct virtual models with no
++				// large unchanged regions to fold; if the async upgrade
++				// swaps to full-content workspace-backed models, we flip
++				// this on so the unchanged context collapses.
+ 				hideUnchangedRegions: { enabled: false },
+ 				renderOverviewRuler: false,
+ 				automaticLayout: true,
+@@ -193,112 +188,81 @@ export class KrtMonacoDiffView extends Disposable {
+ 				lineNumbersMinChars: 4,
+ 			},
+ 			{
+-				originalEditor: { contributions: innerContributions },
+-				modifiedEditor: { contributions: innerContributions },
++				originalEditor: {},
++				modifiedEditor: {},
+ 			},
+ 		));
+ 
+-		const path = opts.file.path;
+-		const previousPath = opts.file.previousPath ?? path;
+-		const file = opts.file;
+-
+-		// Per-side URI strategy:
+-		//   1. If a workspace is registered for this PR's repo:
+-		//      - head: file://<workspace>/<path>   (LSP-eligible)
+-		//      - base: krt-git://<workspace>/<baseSha>/<previousPath>  (`git show`)
+-		//      But: added files have no base; removed files have no head.
+-		//      In those cases fall through to the patch-reconstructed
+-		//      virtual fallback for the missing side.
+-		//   2. Otherwise (no workspace), both sides use the Phase 8.5
+-		//      virtual URIs — same as before, no LSP, but syntax + diff.
+-		const reconstructed = reconstructFromPatch(opts.file.patch ?? '');
+-
+-		// `IModelService.createModel` throws if a model already exists at
+-		// the same URI — and the same URI re-renders constantly here
+-		// (every sub-mode switch builds a new diff view per file). Reuse
+-		// the cached model when present; only create on first miss.
+-		const getOrCreate = (uri: URI, value: string): ITextModel => {
+-			const existing = modelService.getModel(uri);
+-			if (existing) {
+-				return existing;
+-			}
+-			return modelService.createModel(
+-				value,
+-				languageService.createByFilepathOrFirstLine(uri),
+-				uri,
+-				false,
+-			);
+-		};
++		// Synchronous initial render with patch-reconstructed virtual
++		// models. The async upgrade below swaps these for workspace-
++		// backed models (file:// + krt-git://) when applicable, so LSP
++		// extensions activate against the head URI. Doing the virtual
++		// render first means the diff is visible immediately; the
++		// upgrade is invisible UX-wise except for hover / goto-def
++		// becoming live a moment later.
++		this.applyVirtualModels();
++
++		// Phase 8.6 LSP path — kick off async upgrade to file:// + krt-git://.
++		// The upgrade is best-effort; on any failure we stay on the
++		// virtual models the constructor already mounted.
++		if (opts.workspace) {
++			void this.tryUpgradeForLsp(opts.workspace);
++		}
+ 
+-		const baseModel: ITextModel = (() => {
+-			if (opts.workspace && file.status !== 'added') {
+-				return getOrCreate(
+-					encodeKrtGit(opts.workspace.folderUri, opts.baseSha, previousPath),
+-					reconstructed.base.text,
+-				);
+-			}
+-			return getOrCreate(
+-				URI.parse(`krt-pr-base://${encodeURIComponent(opts.owner)}/${encodeURIComponent(opts.repo)}/${encodeURIComponent(opts.baseSha)}/${encodeURI(previousPath)}`),
+-				reconstructed.base.text,
++		// `onDidContentSizeChange` only matters for changes the static
++		// estimate can't predict — review-comment view zones rendering
++		// markdown, the user expanding a "+ N hidden lines" region. On
++		// any such fire, refresh the wrapper's height from Monaco's
++		// current content height. (This is the one place runtime
++		// re-sizing can happen; on first construction the height is
++		// set up-front from the patch, no Monaco APIs consulted.)
++		this._register(this.widget.onDidContentSizeChange(() => {
++			const target = Math.max(
++				this.widget.getContentHeight() + CARD_CHROME_PX,
++				MIN_CARD_HEIGHT_PX,
+ 			);
+-		})();
+-
+-		const headModel: ITextModel = (() => {
+-			if (opts.workspace && file.status !== 'removed') {
+-				const headFileUri = URI.joinPath(URI.file(opts.workspace.folderPath), path);
+-				const existing = modelService.getModel(headFileUri);
+-				if (existing) {
+-					return existing;
+-				}
++			if (this.container.clientHeight !== target) {
++				this.container.style.height = `${target}px`;
+ 			}
+-			return getOrCreate(
+-				URI.parse(`krt-pr-head://${encodeURIComponent(opts.owner)}/${encodeURIComponent(opts.repo)}/${encodeURIComponent(opts.headSha)}/${encodeURI(path)}`),
+-				reconstructed.head.text,
+-			);
+-		})();
++		}));
++	}
++
++	private virtualBaseUri(): URI {
++		const previousPath = this.opts.file.previousPath ?? this.opts.file.path;
++		return URI.parse(`krt-pr-base://${encodeURIComponent(this.opts.owner)}/${encodeURIComponent(this.opts.repo)}/${encodeURIComponent(this.opts.baseSha)}/${encodeURI(previousPath)}`);
++	}
++
++	private virtualHeadUri(): URI {
++		return URI.parse(`krt-pr-head://${encodeURIComponent(this.opts.owner)}/${encodeURIComponent(this.opts.repo)}/${encodeURIComponent(this.opts.headSha)}/${encodeURI(this.opts.file.path)}`);
++	}
++
++	private getOrCreate(uri: URI, value: string): ITextModel {
++		const existing = this.modelService.getModel(uri);
++		if (existing) {
++			return existing;
++		}
++		return this.modelService.createModel(
++			value,
++			this.languageService.createByFilepathOrFirstLine(uri),
++			uri,
++			false,
++		);
++	}
++
++	private applyVirtualModels(): void {
++		const reconstructed = reconstructFromPatch(this.opts.file.patch ?? '');
++		const baseModel = this.getOrCreate(this.virtualBaseUri(), reconstructed.base.text);
++		const headModel = this.getOrCreate(this.virtualHeadUri(), reconstructed.head.text);
+ 
+-		// Map model line N → real file line. Patch-direct reconstruction
+-		// produces models whose line N corresponds to one specific row
+-		// in the patch; the real file line is taken from the hunk
+-		// headers. Pass these into the inner editors' `lineNumbers`
+-		// callbacks so the gutter shows actual file line numbers.
+ 		this.baseRealLines = reconstructed.base.realLines;
+ 		this.headRealLines = reconstructed.head.realLines;
+ 
+-		// Phase 9.5 — let `KrtPrCommentController` find this URI when it
+-		// looks up "all diff URIs for this PR" so it can fan out review
+-		// comments. Skipped when `opts.pr` isn't passed (legacy callers
+-		// or non-PR diff embeds).
+-		if (opts.pr) {
+-			this.logService.info(`[krt] diff view registering URIs for PR ${opts.pr.url}: base=${baseModel.uri.toString()} head=${headModel.uri.toString()}`);
+-			this._register(registerKrtPrResource(baseModel.uri, {
+-				side: 'LEFT',
+-				path,
+-				previousPath,
+-				realLines: this.baseRealLines,
+-				pr: {
+-					url: opts.pr.url,
+-					owner: opts.owner,
+-					repo: opts.repo,
+-					number: opts.pr.number,
+-					headSha: opts.headSha,
+-				},
+-			}));
+-			this._register(registerKrtPrResource(headModel.uri, {
+-				side: 'RIGHT',
+-				path,
+-				previousPath,
+-				realLines: this.headRealLines,
+-				pr: {
+-					url: opts.pr.url,
+-					owner: opts.owner,
+-					repo: opts.repo,
+-					number: opts.pr.number,
+-					headSha: opts.headSha,
+-				},
+-			}));
+-		}
++		this.applyDiffModel(baseModel, headModel);
++		this.applyLineNumbers(/*identity*/ false);
++		this.registerCommentResources(baseModel.uri, headModel.uri);
++	}
+ 
++	private applyDiffModel(base: ITextModel, head: ITextModel): void {
+ 		// Phase 8.5/8.6 — view-model refcount workaround. The public
+ 		// `setModel({original, modified})` path goes through
+ 		// `RefCounted.create(...)` once and `createNewRef` once, leaving
+@@ -316,43 +280,174 @@ export class KrtMonacoDiffView extends Disposable {
+ 		// widget disposes (also from our store), `_diffModelSrc` clears
+ 		// → cloned ref disposes → refcount = 0 → view-model torn down
+ 		// cleanly.
+-		const viewModel = this.widget.createViewModel({ original: baseModel, modified: headModel });
++		const viewModel = this.widget.createViewModel({ original: base, modified: head });
+ 		const ref = RefCounted.create(viewModel);
+ 		this._register(toDisposable(() => ref.dispose()));
+ 		this.widget.setDiffModel(ref);
++	}
+ 
++	private applyLineNumbers(identity: boolean): void {
+ 		// Per-side line-number callback — model line N → real file line.
+-		// Using inner editor `updateOptions` since `lineNumbers` is a
+-		// per-editor option, not a diff-editor-level one.
++		// Identity (model line == real file line) is used when both sides
++		// are full-content models from the workspace. Otherwise the
++		// patch-derived sparse map maps model line N back to the original
++		// file's line number.
++		if (identity) {
++			this.widget.getOriginalEditor().updateOptions({ lineNumbers: 'on' });
++			this.widget.getModifiedEditor().updateOptions({ lineNumbers: 'on' });
++			return;
++		}
+ 		this.widget.getOriginalEditor().updateOptions({
+ 			lineNumbers: (n: number) => formatRealLine(this.baseRealLines[n - 1]),
+ 		});
+ 		this.widget.getModifiedEditor().updateOptions({
+ 			lineNumbers: (n: number) => formatRealLine(this.headRealLines[n - 1]),
+ 		});
++	}
++
++	private registerCommentResources(baseUri: URI, headUri: URI): void {
++		this.resourceRegistrations.clear();
++		if (!this.opts.pr) {
++			return;
++		}
++		const path = this.opts.file.path;
++		const previousPath = this.opts.file.previousPath ?? path;
++		this.logService.info(`[krt] diff view registering URIs for PR ${this.opts.pr.url}: base=${baseUri.toString()} head=${headUri.toString()}`);
++		const prMeta = {
++			url: this.opts.pr.url,
++			owner: this.opts.owner,
++			repo: this.opts.repo,
++			number: this.opts.pr.number,
++			headSha: this.opts.headSha,
++		};
++		this.resourceRegistrations.add(registerKrtPrResource(baseUri, {
++			side: 'LEFT',
++			path,
++			previousPath,
++			realLines: this.baseRealLines,
++			pr: prMeta,
++		} satisfies IKrtPrResource));
++		this.resourceRegistrations.add(registerKrtPrResource(headUri, {
++			side: 'RIGHT',
++			path,
++			previousPath,
++			realLines: this.headRealLines,
++			pr: prMeta,
++		} satisfies IKrtPrResource));
++	}
+ 
+-		// Models we created (non-file://) get cached and reused across
+-		// re-renders — disposing them here would force the next render to
+-		// hit `createModel` again and risk the "already exists" race.
+-		// Leave them in `IModelService` for the workbench's lifetime; they
+-		// share a URI per (owner, repo, sha, path) so memory stays bounded.
++	/**
++	 * Asynchronously upgrade the head + base models to workspace-backed
++	 * URIs so language extensions (rust-analyzer, gopls, pyright, …)
++	 * activate against the head side. The head goes to a real `file://`
++	 * URI when the working tree is on the PR's head SHA — that's the
++	 * URI scheme language servers anchor on. The base goes to a
++	 * `krt-git://` URI whose content provider shells `git show
++	 * ${baseSha}:${path}`.
++	 *
++	 * All resolution is best-effort. Any failure (working tree drifted,
++	 * SHA not fetched locally, file is added/removed and has no
++	 * counterpart side) leaves the corresponding side on the
++	 * synchronous virtual model the constructor already mounted.
++	 */
++	private async tryUpgradeForLsp(workspace: KrtWorkspace): Promise<void> {
++		const file = this.opts.file;
++		const path = file.path;
++		const previousPath = file.previousPath ?? path;
++
++		// Head side — file:// when working tree on PR head, otherwise
++		// skip (we keep the virtual model the constructor mounted).
++		// Going to krt-git:// for head as a fallback would give us
++		// correct content but no LSP, and the virtual model already
++		// renders correctly — there's no upgrade path from "virtual" to
++		// "krt-git head" that improves UX.
++		let headRef: IReference<IResolvedTextEditorModel> | undefined;
++		if (file.status !== 'removed') {
++			try {
++				const workingTreeSha = await this.gitService.getHeadSha(workspace.folderPath);
++				if (this._store.isDisposed) {
++					return;
++				}
++				if (workingTreeSha === this.opts.headSha) {
++					const headFileUri = URI.joinPath(URI.file(workspace.folderPath), path);
++					headRef = await this.textModelService.createModelReference(headFileUri);
++					if (this._store.isDisposed) {
++						headRef.dispose();
++						return;
++					}
++					this._register(headRef);
++				} else {
++					this.logService.info(
++						`[krt] diff: workspace ${workspace.folderPath} is on ${workingTreeSha.slice(0, 7)} but PR head is ${this.opts.headSha.slice(0, 7)} — keeping virtual head model (no LSP). Check out the PR head SHA to enable LSP.`,
++					);
++				}
++			} catch (err) {
++				this.logService.warn(`[krt] diff: head LSP upgrade failed for ${path}`, err);
++			}
++		}
+ 
+-		// `onDidContentSizeChange` only matters for changes the static
+-		// estimate can't predict — review-comment view zones rendering
+-		// markdown, the user expanding a "+ N hidden lines" region. On
+-		// any such fire, refresh the wrapper's height from Monaco's
+-		// current content height. (This is the one place runtime
+-		// re-sizing can happen; on first construction the height is
+-		// set up-front from the patch, no Monaco APIs consulted.)
+-		this._register(this.widget.onDidContentSizeChange(() => {
+-			const target = Math.max(
+-				this.widget.getContentHeight() + CARD_CHROME_PX,
+-				MIN_CARD_HEIGHT_PX,
+-			);
+-			if (this.container.clientHeight !== target) {
+-				this.container.style.height = `${target}px`;
++		// Base side — krt-git:// always when applicable. This is full
++		// content from `git show baseSha:previousPath`, which gives a
++		// real diff (changed regions visible, unchanged context
++		// available) instead of the patch-reconstructed compact text.
++		let baseRef: IReference<IResolvedTextEditorModel> | undefined;
++		if (file.status !== 'added') {
++			try {
++				const baseGitUri = encodeKrtGit(workspace.folderUri, this.opts.baseSha, previousPath);
++				baseRef = await this.textModelService.createModelReference(baseGitUri);
++				if (this._store.isDisposed) {
++					baseRef.dispose();
++					return;
++				}
++				this._register(baseRef);
++			} catch (err) {
++				this.logService.warn(
++					`[krt] diff: base LSP upgrade failed for ${path}@${this.opts.baseSha.slice(0, 7)} — base SHA may not be fetched in ${workspace.folderPath}`,
++					err,
++				);
+ 			}
+-		}));
++		}
++
++		if (!headRef && !baseRef) {
++			return;
++		}
++
++		// At least one side resolved. Build a coherent pair: prefer the
++		// resolved side; for the unresolved side, reuse the virtual
++		// model the constructor already created (cached in
++		// `IModelService` since we share URIs across renders).
++		const baseModel = baseRef?.object.textEditorModel ?? this.modelService.getModel(this.virtualBaseUri());
++		const headModel = headRef?.object.textEditorModel ?? this.modelService.getModel(this.virtualHeadUri());
++		if (!baseModel || !headModel) {
++			return;
++		}
++
++		this.applyDiffModel(baseModel, headModel);
++
++		// realLines is identity for full-content workspace-backed
++		// models — the gutter shows real file line numbers naturally
++		// because each model line IS a real file line. The
++		// `applyLineNumbers(true)` path uses Monaco's built-in
++		// numbering for sides that upgraded; the patch-derived sparse
++		// map is only needed when a side stays virtual.
++		if (headRef) {
++			this.headRealLines = identityArray(headModel.getLineCount());
++		}
++		if (baseRef) {
++			this.baseRealLines = identityArray(baseModel.getLineCount());
++		}
++		this.applyLineNumbers(/*identity*/ !!(headRef && baseRef));
++		this.registerCommentResources(baseModel.uri, headModel.uri);
++
++		// Both sides now have full content — collapse unchanged regions
++		// so the visual stays focused on the changes plus a few lines of
++		// real surrounding context (`+ N hidden lines` is meaningful
++		// here, unlike the virtual case where it would reveal nothing).
++		if (headRef && baseRef) {
++			this.widget.updateOptions({
++				hideUnchangedRegions: { enabled: true, contextLineCount: 3, minimumLineCount: 4 },
++			});
++		}
+ 	}
+ 
+ 	/**
+@@ -490,3 +585,11 @@ export class KrtMonacoDiffView extends Disposable {
+ function formatRealLine(real: number | undefined): string {
+ 	return real !== undefined ? String(real) : '';
+ }
++
++function identityArray(n: number): ReadonlyArray<number> {
++	const arr: number[] = new Array(n);
++	for (let i = 0; i < n; i++) {
++		arr[i] = i + 1;
++	}
++	return arr;
++}
+diff --git a/src/vs/workbench/contrib/krt/browser/workspace/krtGitContentProvider.ts b/src/vs/workbench/contrib/krt/browser/workspace/krtGitContentProvider.ts
+index 77185ab38d2..ecfc4efeb9a 100644
+--- a/src/vs/workbench/contrib/krt/browser/workspace/krtGitContentProvider.ts
++++ b/src/vs/workbench/contrib/krt/browser/workspace/krtGitContentProvider.ts
+@@ -18,6 +18,28 @@ import { IKrtGitService } from '../../../../../platform/krt/common/krtGit.js';
+ import { IKrtWorkspaceRegistry } from './krtWorkspaceRegistry.js';
+ 
+ export const KRT_GIT_SCHEME = 'krt-git';
++export const KRT_PR_BASE_SCHEME = 'krt-pr-base';
++export const KRT_PR_HEAD_SCHEME = 'krt-pr-head';
++
++/**
++ * Passthrough provider for the patch-derived virtual URI schemes
++ * (`krt-pr-base://`, `krt-pr-head://`). The diff view creates these
++ * models directly via `IModelService.createModel`. Downstream features
++ * (Monaco hover, peek, language services, …) may still call
++ * `ITextModelService.createModelReference` against any URI an editor
++ * is showing, and without a registered content provider that errors
++ * with "Unable to resolve resource". Returning the existing cached
++ * model satisfies the resolver contract without producing fresh
++ * content.
++ */
++class KrtPrVirtualPassthroughProvider implements ITextModelContentProvider {
++	constructor(
++		@IModelService private readonly modelService: IModelService,
++	) { }
++	provideTextContent(resource: URI): Promise<ITextModel | null> {
++		return Promise.resolve(this.modelService.getModel(resource));
++	}
++}
+ 
+ /**
+  * Resolves `krt-git://<folderUri-encoded>/<ref>/<path>` URIs by
+@@ -118,6 +140,16 @@ export class KrtGitContentProviderContribution extends Disposable implements IWo
+ 		super();
+ 		const provider = instantiationService.createInstance(KrtGitContentProvider);
+ 		this._register(textModelService.registerTextModelContentProvider(KRT_GIT_SCHEME, provider));
++		// Phase 8.6 LSP path — register passthrough providers for the
++		// patch-derived virtual schemes so `createModelReference` calls
++		// from peek / hover / language services don't error with
++		// "Unable to resolve resource". The diff view creates the
++		// models directly via `IModelService.createModel`; the
++		// passthrough's job is purely to advertise the schemes as
++		// resolvable so the resolver picks the cached model.
++		const passthrough = instantiationService.createInstance(KrtPrVirtualPassthroughProvider);
++		this._register(textModelService.registerTextModelContentProvider(KRT_PR_BASE_SCHEME, passthrough));
++		this._register(textModelService.registerTextModelContentProvider(KRT_PR_HEAD_SCHEME, passthrough));
+ 	}
+ }
+ 
+-- 
+2.52.0
+

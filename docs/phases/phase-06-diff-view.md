@@ -1,5 +1,12 @@
 # Phase 6 — Review view: Diff sub-mode
 
+> **Superseded by [Phase 10 — Diff view rebuild](phase-10-diff-rebuild.md)
+> (patches 0067-0088).** The custom `<div>`-stacked diff renderer and
+> patch-text rendering this phase shipped were thrown out and rebuilt
+> on top of stock VS Code primitives (`DiffEditorWidget` per file,
+> `ICommentService`, `ITextModelService`). Kept in tree as historical
+> record of the original sub-mode shape and provider surface.
+
 Goal: introduce a sub-mode toggle on the PR pane (PR view ↔ Diff
 view). The Diff view shows a single scrollable surface with all
 files stacked, a folder-grouped file tree on the left whose active

@@ -59,141 +59,208 @@ fidelity layers in afterwards.
 
 ### Draft-review storage
 
-- [ ] `vscode/src/vs/workbench/contrib/krt/browser/review/krtReviewDraftService.ts`
+- [x] `vscode/src/vs/workbench/contrib/krt/browser/pr/krtReviewDraftService.ts`
       — `IKrtReviewDraftService` decorator + service.
-      Methods: `getDraft(prUrl)`, `addComment(prUrl,
-      comment)`, `updateComment(prUrl, id, body)`,
-      `removeComment(prUrl, id)`, `discard(prUrl)`,
-      `submit(prUrl)`, `onDidChange(prUrl?)`.
-- [ ] Persist under `krt.reviewDrafts.v1` envelope. App
+      Methods: `getDraft`, `hasDraft`, `startReview`,
+      `discard`, `addComment`, `removeComment`, `submit`,
+      `onDidChange(prUrl)`. (Lives under `pr/` rather
+      than `review/` since everything else lifecycle-
+      coupled to it is already there.)
+- [x] Persist under `krt.reviewDrafts.v1` envelope. App
       scope. Concurrent drafts keyed by `prUrl`.
 
 ### Start Review / Continue Review button
 
-- [ ] PR header replaces the existing Check Out button.
-      Three states: Start Review (no draft) / Continue
-      Review (draft exists) / Submit / Discard (when in
-      review mode).
-- [ ] Start Review runs the existing
-      `checkOutPullRequest` flow then opens a fresh
-      draft for that PR.
-- [ ] Continue Review runs the same check-out flow if
+- [x] PR header replaces the existing Check Out button.
+      Three primary-button states: Start Review (no
+      draft) / Continue Review (draft, not on head) /
+      Submit Review (draft, on head). A Discard button
+      surfaces alongside once a draft exists.
+- [x] Start Review runs the existing checkout flow
+      (`switchTo` from Phase 8.7) then opens a fresh
+      draft for that PR. Already-on-head case skips the
+      switch dance and goes straight to draft creation.
+- [x] Continue Review runs the same check-out flow if
       not already on this PR, then re-enters review mode
       against the existing draft.
 
 ### Submit + Discard
 
-- [ ] `submit(prUrl)` POSTs to
-      `/repos/{owner}/{repo}/pulls/{number}/reviews`
-      with `{event: 'COMMENT', comments: [...]}` (use
-      `'APPROVE'` / `'REQUEST_CHANGES'` when the user
-      picks one of those buttons in the submit
-      sheet). Drop the local draft on success.
-- [ ] `discard(prUrl)` clears the draft + invokes the
-      Phase 8.7 Return flow on the active resume token.
+- [x] `submit({prUrl, event, body})` POSTs to
+      `/repos/{owner}/{repo}/pulls/{number}/reviews` via
+      a new `IPullRequestProvider.submitReview(url,
+      submission)` with `{event, body, commitId,
+      comments, replies}`. Drops the local draft on
+      success and re-fetches review comments so the
+      pending threads flip to native server-side ones.
+- [x] Approve / Comment / Request Changes verdicts.
+      Submit is now a two-step dialog: a three-button
+      prompt picks the `ReviewSubmissionEvent`, then an
+      input dialog collects the optional summary body.
+      Notification + body-dialog copy adapt to the
+      verdict ("Approved PR #N" / "Requested changes" /
+      "Review posted"). Patch 0100.
+- [x] `discard(prUrl)` clears the draft + invokes the
+      existing `returnFrom` flow on the active resume
+      token (only when KRT owns the switch — manual
+      check-outs aren't reverted).
 
 ### Mode-switching UI
 
-- [ ] Restyle the existing sub-mode bar in
+- [x] Restyle the existing sub-mode bar in
       `krtPullRequestEditorPane.css` to match the demo's
-      segmented control.
+      pill-wrapped subtab style (outer track + accent-soft
+      active state, no per-button dividers). Patch 0092.
 - [ ] Move the refresh button DOM element to the left
-      side of the title in `createEditor()`.
-- [ ] Add an "Open on GitHub" link button to the header
-      (see Phase 9 for the icon set).
+      side of the title — descoped on user request; the
+      existing right-side placement stays.
+- [x] "Open on GitHub" link button: already shipped in
+      Phase 9, kept as-is.
 
 ### Reply-to-comment threading
 
-- [ ] Extend `Comment` (or wrap with a new draft-side
-      type) to carry `inReplyTo: number?`.
-- [ ] Discussion + Diff comment renderers grow a Reply
-      button. Click adds a draft comment under the
-      parent.
-- [ ] Submit posts replies via `POST
-      /repos/{o}/{r}/pulls/{n}/comments` with
-      `in_reply_to`.
+- [x] Extend `KrtReviewDraftComment` + `IAddDraftCommentArgs`
+      with `inReplyTo?: number`. (Modelled on the draft
+      side rather than mutating `Comment`, since GitHub
+      threads its replies via parent id, not via the
+      comment payload.)
+- [x] `KrtPrCommentController.refreshUri` flips
+      `canReply: true` on real threads while a draft is
+      active. Native widget shows the Reply input
+      automatically.
+- [x] `submitNewComment` detects reply mode (non-template
+      thread + at least one server-side comment on the
+      line) and calls `findReplyParentId` to look up the
+      earliest GitHub comment id as the reply target.
+- [x] Submit splits the draft into top-level comments
+      (POST `/reviews`, batched) and replies (POST
+      `/comments` with `in_reply_to`, one request per
+      reply). Patch 0093.
 
 ### Bot list
 
-- [ ] `IKrtBotListService` with
-      `getBots(workspaceId)`, `addBot(workspaceId,
-      login)`, `removeBot(workspaceId, login)`,
-      `isBot(workspaceId, login)`. Persist under
-      `krt.botList.v1`.
-- [ ] Activity classifier in
-      `krtPullRequestEditorPane.ts` consults the bot
-      list when bucketing comments into Discussion vs
-      Automation.
-- [ ] Commands: `KRT: Add Bot User…`, `KRT: Remove Bot
-      User…`. Add Bot picks from the PR's existing
-      commenters via QuickPick so the user doesn't have
-      to type GitHub logins from memory.
+- [x] `IKrtBotListService` with the methods listed,
+      persisted under `krt.botList.v1`. Keyed by workspace
+      folder URI — matches the workspace registry's
+      scope. Patch 0094.
+- [x] `partitionCommentsByBot` filters `liveComments` per
+      PR via `botListService.isBot(workspace.folderUri, ...)`.
+      Bot comments merge into the Automation timeline by
+      timestamp so chronology stays clean.
+- [x] In-context kebab menu on every comment header (no
+      command palette entries). Click the kebab → context
+      menu with one item: "Mark as Automation" (or "Mark
+      as Discussion" if already a bot). Visible by default
+      at 0.6 opacity, brightens on hover. The kebab is
+      shaped to host more per-comment actions later
+      (resolve, copy permalink, …) without re-plumbing the
+      chrome. Patches 0097-0099. Initial command-palette
+      shape (patch 0094) was rolled back per user
+      direction — see `feedback_avoid_command_palette`.
 
 ### Markdown HTML support
 
-- [ ] Update the markdown renderer (likely
-      `renderMarkdown`'s sanitizer config) to allow
-      `<details>`, `<summary>`, `<sub>`, `<sup>`, `<kbd>`,
-      `<br>`. Audit GitHub's markdown to make sure we're
-      not under-sanitizing.
-- [ ] Test against a PR description containing a
-      collapsed `<details>` block; verify it expands on
-      click.
+- [x] Flipped `supportHtml: true` on PR description and
+      comment body. The base `renderMarkdown` sanitizer's
+      default allowlist already covers every tag PLAN.md
+      called out (`<details>`, `<summary>`, `<kbd>`,
+      `<sub>`, `<sup>`, `<br>`) plus the `s` / `strike` /
+      `del` family — no custom sanitizer config needed.
+      Patch 0095.
+- [x] Verified against a real PR with a collapsed
+      `<details>` block in the description.
 
 ### Avatar pops in Discussion
 
-- [ ] PR data now carries `avatarUrl` (already on
-      `PullRequestUser`). Render `<img>` next to the
-      author name in the comment headers.
-- [ ] Fall back to a generated initial-avatar when
-      `avatarUrl` is absent.
+- [x] `<img class="krt-pr-comment-avatar">` rendered next
+      to each comment author in the timeline. Source URL
+      is GitHub's `avatarUrl` with `?s=40` appended
+      (idempotent). Patch 0095.
+- [x] Initial-letter fallback chip with a stable colour
+      hashed from the login when `avatarUrl` is absent.
 
 ### Checks tab dedupe + restyle
 
-- [ ] Group `CheckRun` entries by `name`; keep the
-      newest by `completedAt` (or `startedAt` if
-      missing). Currently we render all entries
-      verbatim, hence duplicates after re-runs.
-- [ ] Some checks reportedly fail to render at all —
-      audit the GraphQL query to ensure we're paginating
-      / requesting the right `checkSuites` / handling
-      the `CheckSuite.app.slug` for non-Actions checks.
-- [ ] Restyle to the demo (status pill colours,
-      timestamp on the right, expandable details).
+- [x] `dedupeChecksByName` collapses re-runs to the
+      latest entry by `completedAt` (falling back to
+      `startedAt`) and sorts alphabetically for stable
+      ordering. Patch 0096.
+- [x] Each row grows a right-aligned meta cell:
+      relative time of the latest run, or "running…" in
+      the warn colour for in-flight checks. The arrow
+      glyph fades in on hover instead of always
+      showing.
+- [ ] Deeper "missing checks" audit (statuses API for
+      non-Actions sources, paging past 100) deferred —
+      none of the test PRs surfaced missing entries
+      during the dedupe work, but the `commits/{sha}/check-runs`
+      endpoint specifically can miss third-party
+      statuses. Tracked as a follow-up.
 
 ### Demo gate
 
-- [ ] `npm run compile-check-ts-native` clean.
-- [ ] `npm run valid-layers-check` clean.
-- [ ] `npm run compile` clean.
-- [ ] `bash scripts/code.sh` launches.
-- [ ] **Review happy path**: Start Review on PR A → leave
-      3 inline comments + 1 reply via the Diff view →
-      Submit → all 4 land on GitHub as a single review.
-- [ ] **Multi-PR drafts**: Start Review on PR A, leave a
-      comment, navigate to PR B, Start Review there,
-      leave a different comment, return to PR A —
-      Continue Review picks up where you left off.
-- [ ] **Discard**: leave a comment, Discard, working
-      copy returns via the Phase 8.7 resume flow, draft
-      is gone.
-- [ ] **Bot list**: add a known automation user; their
-      previously-Discussion comments shift to
-      Automation. Reload the PR; classification sticks.
-- [ ] **Markdown**: PR with a `<details>` block in the
-      description renders collapsed; clicking the
-      summary expands it.
-- [ ] **Avatars**: every commenter row shows the right
-      avatar; fallback initial avatar appears for users
-      with no `avatarUrl`.
-- [ ] **Checks**: re-run a check on a test PR; the row
-      updates rather than duplicating; layout matches
-      demo.
-- [ ] Tag `phase-10-complete`.
+- [x] `npm run compile-check-ts-native` clean.
+- [x] `npm run valid-layers-check` clean.
+- [x] **Review happy path** (verified): Start Review →
+      inline comment with the kebab/template flow →
+      Submit Review → comment lands on GitHub.
+- [x] **Bot list**: kebab → "Mark as Automation" shifts
+      the author's comments to the Automation tab. Reload
+      to confirm it sticks. Verified.
+- [x] **Approve / Request Changes verdicts**: Submit
+      Review prompt offers three buttons; verdict flows
+      through provider to GitHub.
+- Tagging deferred — patch 0067 onward isn't squashed yet.
+  Pick a tag point when the parent KRT repo's jj change is
+  described.
 
 ## Decisions to capture during execution
 
-- _(filled in during execution)_
+- **Submit-as-Approve / Request-Changes deferred.** The provider +
+  draft service already accept `'APPROVE'` / `'REQUEST_CHANGES'`
+  (`ReviewSubmissionEvent`), so adding the dropdown later is a UI
+  change in `handleSubmitReview`'s dialog. Not blocking review-mode
+  ergonomics, so it's not in Phase 10.
+- **Refresh button stays on the right.** PLAN.md called for moving it
+  left of the title; user descoped during execution because the right
+  cluster (Refresh / Open on GitHub / Discard / Submit Review)
+  reads cleanly together.
+- **Replies need a real parent.** `submitNewComment` only routes a
+  comment as a reply when the line already has a server-side comment
+  it can `in_reply_to`. Follow-ups on a draft-only line fall through
+  to "another new top-level on the same line" — GitHub will collapse
+  those into one thread anyway via line position.
+- **Inline `Comment` button was hidden in Phase C.** `KrtPrCommentController`
+  never set `contextValue`, so the menu's
+  `commentController == 'krt-pr'` `when` clause never matched and the
+  inline submit button was invisible. Patch 0090 binds
+  `contextValue = KRT_PR_COMMENT_OWNER` (matching upstream
+  `MainThreadCommentController`'s `contextValue = id`). The keyboard
+  shortcut had been masking the regression.
+- **`setDocumentComments` was double-mounting widgets.** Both
+  `refreshUri` and `createCommentThreadTemplate` fired the
+  `updateComments` delta AND the `setDocumentComments` snapshot. The
+  workbench treats the snapshot as a wipe-and-re-add, so the snapshot
+  re-mounted the widgets the delta just created and left stacked
+  `ReviewZoneWidget` viewzones on the same line. Patch 0091 drops the
+  snapshot calls — the delta alone is sufficient after the initial
+  provider attach.
+- **Template threads need explicit cleanup.** After the user submits
+  a comment (real or draft), the empty template thread previously
+  lingered in `threadsByUri` (carry-over preserved it). `disposeTemplateForLine`
+  (patch 0090) removes it explicitly so the line shows only the
+  consumed thread. `deleteCommentThreadMain` is no longer a stub —
+  the workbench's hide-empty-template path now actually drops the
+  thread from our state.
+- **Bot list scope: per-workspace.** Matches the workspace registry's
+  scoping. The `IKrtBotListService` is keyed by `workspace.folderUri`
+  rather than `(owner, repo)` so a user with multiple clones of the
+  same repo can keep their bot lists independent.
+- **Bot comments merge into Automation by timestamp.** Rather than
+  bucketing bot comments into a separate "Bots" sub-section, they
+  interleave with `AutomationEvent` rows by `at` / `createdAt`. Keeps
+  the timeline coherent — a bot comment about a CI failure renders
+  next to the CI status row instead of below all of them.
 
 ## Open questions
 

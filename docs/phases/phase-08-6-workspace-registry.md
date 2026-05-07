@@ -1,5 +1,13 @@
 # Phase 8.6 — Workspace registry + LSP via real file URIs
 
+> **Workspace registry survives in [Phase 10](phase-10-diff-rebuild.md)
+> (patches 0067-0088).** The registry storage, auto-switch behaviour,
+> and `KrtGitContentProvider` from this phase are still load-bearing —
+> Phase 10 layers `MultiDiffEditorWidget` / per-file `DiffEditorWidget`
+> on top of them. The base-side URI scheme moved from authority-encoded
+> to query-encoded (`krt-git://path?{folderUri,ref,path}`) to survive
+> `URI.from`'s authority-lowercasing; see Phase 10 for details.
+
 Goal: KRT knows about a list of local repository workspaces.
 PR search filters to those repos. When viewing a PR whose
 repo matches one of the registered workspaces, base + head
@@ -238,6 +246,96 @@ Smallest reversible piece first.
   `IKrtWorkspaceRegistry.getAll()` on each search. Empty
   registry → "Add a workspace" CTA inline; registry change
   fires `runSearch` automatically while the overlay is open.
+
+## LSP re-restoration (patch 0064)
+
+The 0037 re-land of Phase 8.6 lost two LSP-critical pieces that
+were in the original combined Phase 8.5/8.6/8.7 commit but didn't
+make it into the patch series. Both got rediscovered in the
+dangling pre-rollback commit (`01509fc`). Symptom: rust-analyzer
+hover / goto-definition don't fire on the head side of the diff
+even when the workspace is registered and the working tree is on
+the PR head.
+
+- **Inner-editor contributions filter must be `{}`, not a
+  single-entry allow-list.** Phase 9.5 patch 0058 restricted the
+  diff editor's two inner code editors to
+  `['editor.contrib.review']` so the native comment controller
+  attaches. That filter also stripped hover, goto-definition,
+  peek, find-references, etc. — they register themselves into
+  the global list and only instantiate when the field is left
+  undefined. Pass `{}` for both inner editor option blocks; the
+  default set includes `editor.contrib.review` so comments still
+  attach.
+- **Use `ITextModelService.createModelReference(file://...)`,
+  don't just check `IModelService.getModel`.** The 0037 head-
+  model resolution only used the file:// URI when an existing
+  model was already cached at it — i.e. only when the user had
+  already opened the file in another editor. The typical flow
+  (open PR, working tree on PR head, file not previously opened)
+  hit the virtual `krt-pr-head://` URI instead, and language
+  extensions don't activate against KRT-internal schemes.
+  Restored the original async-resolution path: render
+  synchronously with virtual models for instant visibility, then
+  asynchronously call `createModelReference(file://)` once
+  `getHeadSha` confirms the working tree is on the PR head SHA.
+  The reference goes through the workbench's normal file-loading
+  path, which triggers extension activation.
+- **Base side upgrades to `krt-git://` via `createModelReference`
+  too** — full content from `git show baseSha:previousPath`,
+  rather than the patch-reconstructed compact text. With both
+  sides full-content, `hideUnchangedRegions` flips on so the
+  visual stays focused on the changes plus a few lines of real
+  surrounding context (and "+ N hidden lines" expansions reveal
+  real source instead of the previous padding-blank bug).
+- **Passthrough providers for `krt-pr-base://` /
+  `krt-pr-head://`** registered in
+  `KrtGitContentProviderContribution`. Without these,
+  `createModelReference` calls from peek / hover / language
+  services error with "Unable to resolve resource" on the
+  virtual URIs. The diff view creates the models directly via
+  `IModelService.createModel`; the passthrough's job is purely
+  to advertise the schemes as resolvable so the resolver picks
+  the cached model.
+
+When the working tree isn't on the PR head, the upgrade logs
+`workspace ${path} is on ${sha} but PR head is ${headSha} —
+staying on virtual diff (no LSP). Check out the PR head SHA to
+enable LSP.` and stays on virtuals.
+
+`realLines` becomes identity for full-content sides (model line
+N == real file line N); line-numbers fall back to Monaco's
+built-in numbering. The comment-resource registry re-registers
+at the new URIs after the upgrade so `KrtPrCommentController`
+sees the right set.
+
+### Follow-up: all-or-nothing upgrade (patch 0065)
+
+Patch 0064's first cut upgraded each side independently and
+fell back to the constructor-mounted virtual model on a per-
+side failure. That produced a mixed-content visual bug: when
+only one side resolved (e.g. base resolved via `krt-git://`
+but head stayed on `krt-pr-head://` because the working tree
+was on a different SHA), the diff editor compared full content
+against patch-reconstructed compact text and flagged every
+line outside the patch's hunks as a difference. Symptom: large
+chunks of unrelated code visually marked as changed.
+
+Patch 0065 makes the upgrade all-or-nothing:
+
+- The `getHeadSha` check happens up-front. Working tree not on
+  PR head → no upgrade attempted on either side. The
+  `krt-git://` base wouldn't have a sensible counterpart
+  anyway with a virtual head, so we'd just be paying the shell
+  cost for nothing.
+- Both sides resolve in parallel via `Promise.allSettled` so a
+  one-sided rejection doesn't leak the other side's
+  `IReference`.
+- Either side failing → both refs dispose, virtual diff stays.
+- Added/removed files skip the upgrade entirely. The patch
+  already shows their full content on the side that has any
+  (the other side is naturally empty); LSP for those is
+  deferred — most code-review traffic is modified files.
 
 ## Post-MVP polish
 

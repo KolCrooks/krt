@@ -1,0 +1,707 @@
+From d0d37b91d90acedfb1bb406e535463b9751527fd Mon Sep 17 00:00:00 2001
+From: Kol Crooks <kol.crooks@datadoghq.com>
+Date: Thu, 7 May 2026 16:52:14 -0400
+Subject: [PATCH] Phase E: delete unused KrtPrMultiDiff + dead diff CSS
+
+Phase D replaced KrtPrMultiDiff with KrtPrFlatDiff (one DiffEditorWidget
+per file, content-sized). The old MultiDiffEditorWidget-based renderer
+and its associated CSS rules are no longer reachable from any code path,
+so wipe them.
+
+Deletions:
+- krtPrMultiDiff.ts (entire file, 292 lines)
+- ~285 lines of CSS for the old per-section/per-line/zone-host/composer
+  styling that the flat-diff cards don't use
+- Stale comment refs to KrtPrMultiDiff in krtPrFlatDiff.ts and
+  krtPrCommentController.ts
+
+No behavioral change.
+---
+ .../krt/browser/pr/krtPrCommentController.ts  |   4 +-
+ .../contrib/krt/browser/pr/krtPrFlatDiff.ts   |  30 +-
+ .../contrib/krt/browser/pr/krtPrMultiDiff.ts  | 292 ------------------
+ .../browser/pr/krtPullRequestEditorPane.css   | 285 -----------------
+ 4 files changed, 21 insertions(+), 590 deletions(-)
+ delete mode 100644 src/vs/workbench/contrib/krt/browser/pr/krtPrMultiDiff.ts
+
+diff --git a/src/vs/workbench/contrib/krt/browser/pr/krtPrCommentController.ts b/src/vs/workbench/contrib/krt/browser/pr/krtPrCommentController.ts
+index 4031222a748..a9e4e427934 100644
+--- a/src/vs/workbench/contrib/krt/browser/pr/krtPrCommentController.ts
++++ b/src/vs/workbench/contrib/krt/browser/pr/krtPrCommentController.ts
+@@ -27,7 +27,7 @@ import { KrtPrCommentThread } from './krtPrCommentThread.js';
+ export const KRT_PR_COMMENT_OWNER = 'krt-pr';
+ 
+ /**
+- * Per-URI metadata. Each diff editor side mounted by `KrtPrMultiDiff`
++ * Per-URI metadata. Each diff editor side mounted by `KrtPrFlatDiff`
+  * registers its URI here so the controller can:
+  *   1. filter the PR's comment list to ones for this `(side, path)`,
+  *   2. translate native gutter clicks into `(prUrl, side, path)` for
+@@ -154,7 +154,7 @@ export class KrtPrCommentController extends Disposable implements ICommentContro
+ 	 * KRT registers this controller eagerly at singleton init time —
+ 	 * before any KRT diff editor exists — so `onDidSetDataProvider`
+ 	 * fires for nobody. After the multi-diff mounts and editors render,
+-	 * `KrtPrMultiDiff` calls this method to re-fire the event so any
++	 * `KrtPrFlatDiff` calls this method to re-fire the event so any
+ 	 * newly-listening `editor.contrib.review` triggers compute and
+ 	 * picks up the threads we already published.
+ 	 */
+diff --git a/src/vs/workbench/contrib/krt/browser/pr/krtPrFlatDiff.ts b/src/vs/workbench/contrib/krt/browser/pr/krtPrFlatDiff.ts
+index aca33f4b83c..eb2da067591 100644
+--- a/src/vs/workbench/contrib/krt/browser/pr/krtPrFlatDiff.ts
++++ b/src/vs/workbench/contrib/krt/browser/pr/krtPrFlatDiff.ts
+@@ -39,12 +39,15 @@ import { IKrtPrCommentController } from './krtPrCommentController.js';
+  *     gives the user the page-scrolling experience GitHub does in the
+  *     browser.
+  *
+- * URI strategy is identical to `KrtPrMultiDiff` (file:// modified +
+- * krt-git:// original), so LSP and the native Comments API work the
+- * same way. URI metadata is registered with `KrtPrCommentController`
+- * per-side per-file; the controller's data-provider is bumped 150ms
+- * after the editors mount so each editor's `editor.contrib.review`
+- * picks up the cached threads.
++ * URI strategy: file:// for the modified side (real on-disk path so
++ * language extensions activate), krt-git:// for the original side
++ * (Phase 8.6's content provider, `git show baseSha:path`). Same URIs
++ * the native Comments API anchors against, so LSP + inline comments
++ * work through the standard workbench plumbing. URI metadata is
++ * registered with `KrtPrCommentController` per-side per-file; the
++ * controller's data-provider is bumped 150ms after the editors mount
++ * so each editor's `editor.contrib.review` picks up the cached
++ * threads.
+  */
+ export class KrtPrFlatDiff extends Disposable {
+ 
+@@ -83,8 +86,12 @@ export class KrtPrFlatDiff extends Disposable {
+ 		const localStore = new DisposableStore();
+ 		this.renderStore.add(localStore);
+ 
+-		// Merge-base: same rationale as `KrtPrMultiDiff` — `pr.base.sha`
+-		// is the target tip, GitHub diffs against the merge base.
++		// `pr.base.sha` is the *current* tip of the target branch, but
++		// GitHub diffs the PR against the merge base of the two refs.
++		// When the target has moved forward since the PR was opened,
++		// diffing against `pr.base.sha` includes every commit that
++		// landed on target as a "reverted" change in the PR. Merge
++		// base = common ancestor = the SHA the PR diff anchors on.
+ 		let baseSha = pr.base.sha;
+ 		try {
+ 			baseSha = await this.gitService.getMergeBase(workspace.folderPath, pr.base.sha, pr.head.sha);
+@@ -130,9 +137,10 @@ export class KrtPrFlatDiff extends Disposable {
+ 			? URI.joinPath(URI.file(workspace.folderPath), file.path)
+ 			: undefined;
+ 
+-		// Per-side resolution. Mirrors `KrtPrMultiDiff`: a one-sided
+-		// failure renders the file as added/removed instead of
+-		// dropping it.
++		// Per-side resolution via `Promise.allSettled` so a one-sided
++		// failure (e.g. base SHA unfetched, file not in the local
++		// view of the merge base) renders the file as added or
++		// removed instead of dropping it entirely.
+ 		const [originalSettled, modifiedSettled] = await Promise.allSettled([
+ 			originalUri ? this.textModelService.createModelReference(originalUri) : Promise.resolve(undefined),
+ 			modifiedUri ? this.textModelService.createModelReference(modifiedUri) : Promise.resolve(undefined),
+diff --git a/src/vs/workbench/contrib/krt/browser/pr/krtPrMultiDiff.ts b/src/vs/workbench/contrib/krt/browser/pr/krtPrMultiDiff.ts
+deleted file mode 100644
+index fe1561a25c3..00000000000
+--- a/src/vs/workbench/contrib/krt/browser/pr/krtPrMultiDiff.ts
++++ /dev/null
+@@ -1,292 +0,0 @@
+-/*---------------------------------------------------------------------------------------------
+- *  Copyright (c) Microsoft Corporation. All rights reserved.
+- *  Licensed under the MIT License. See License.txt in the project root for license information.
+- *--------------------------------------------------------------------------------------------*/
+-
+-import { Disposable, DisposableStore, IDisposable, IReference } from '../../../../../base/common/lifecycle.js';
+-import { observableValue, ValueWithChangeEventFromObservable } from '../../../../../base/common/observable.js';
+-import { URI } from '../../../../../base/common/uri.js';
+-import { MultiDiffEditorWidget } from '../../../../../editor/browser/widget/multiDiffEditor/multiDiffEditorWidget.js';
+-import { MultiDiffEditorViewModel } from '../../../../../editor/browser/widget/multiDiffEditor/multiDiffEditorViewModel.js';
+-import { IDocumentDiffItem, IMultiDiffEditorModel } from '../../../../../editor/browser/widget/multiDiffEditor/model.js';
+-import { IResourceLabel, IWorkbenchUIElementFactory } from '../../../../../editor/browser/widget/multiDiffEditor/workbenchUIElementFactory.js';
+-import { RefCounted } from '../../../../../editor/browser/widget/diffEditor/utils.js';
+-import { IResolvedTextEditorModel, ITextModelService } from '../../../../../editor/common/services/resolverService.js';
+-import { IInstantiationService } from '../../../../../platform/instantiation/common/instantiation.js';
+-import { IKrtGitService } from '../../../../../platform/krt/common/krtGit.js';
+-import { ILogService } from '../../../../../platform/log/common/log.js';
+-import { PullRequest, PullRequestFile } from '../../../../../platform/krt/common/krt.js';
+-import { ResourceLabel } from '../../../../browser/labels.js';
+-import { encodeKrtGit } from '../workspace/krtGitContentProvider.js';
+-import { KrtWorkspace } from '../workspace/krtWorkspaceRegistry.js';
+-import { IKrtPrCommentController } from './krtPrCommentController.js';
+-
+-/**
+- * Phase 10/B — owns the embedded `MultiDiffEditorWidget` for KRT's
+- * Diff sub-mode. One instance per render. The widget self-virtualises
+- * the file list and self-scrolls internally; KRT's job is to feed it
+- * the right `(originalUri, modifiedUri)` pairs and let the workbench's
+- * normal model resolution handle everything else (LSP activation on
+- * the modified `file://` URI, content via `git show` for the
+- * `krt-git://` original, etc.).
+- *
+- * URI strategy:
+- *   - **modifiedUri** = `file://${workspace.folderPath}/${path}` for any
+- *     file whose `status !== 'removed'`. The workbench loads this via
+- *     `IFileService` through its normal file-loading path → language
+- *     extensions activate.
+- *   - **originalUri** = `krt-git://${workspace}/${baseSha}/${previousPath}`
+- *     for any file whose `status !== 'added'`. The Phase 8.6
+- *     `KrtGitContentProvider` shells `git show baseSha:path` for the
+- *     content. Read-only, no LSP — but the base side rarely needs it.
+- *
+- * Strict gate: callers should only construct this when the workspace
+- * is registered AND the working tree's HEAD matches `pr.head.sha`.
+- * Without that, the `file://` content would reflect a different
+- * commit and the diff would lie. The gate lives in the editor pane
+- * because the pane already tracks `isCheckedOut`.
+- */
+-export class KrtPrMultiDiff extends Disposable {
+-
+-	private readonly widget: MultiDiffEditorWidget;
+-	private currentModel: { dispose(): void } | undefined;
+-	/**
+-	 * The widget's `setViewModel` doesn't take ownership — it just
+-	 * stores a reference. The previous viewModel still holds
+-	 * `createNewRef`-style refs to the previous diff items, keeping
+-	 * their `itemStore`s alive. Track the current viewModel so we can
+-	 * dispose it on swap (and on full disposal). Without this the
+-	 * GC-based leak tracker logs a `[LEAKED DISPOSABLE]` warning
+-	 * pointing at every `new DisposableStore()` we create per file.
+-	 */
+-	private currentViewModel: MultiDiffEditorViewModel | undefined;
+-	private readonly uriRegistrations = this._register(new DisposableStore());
+-
+-	constructor(
+-		container: HTMLElement,
+-		@IInstantiationService private readonly instantiationService: IInstantiationService,
+-		@ITextModelService private readonly textModelService: ITextModelService,
+-		@ILogService private readonly logService: ILogService,
+-		@IKrtPrCommentController private readonly commentController: IKrtPrCommentController,
+-		@IKrtGitService private readonly gitService: IKrtGitService,
+-	) {
+-		super();
+-		const factory = this.instantiationService.createInstance(KrtMultiDiffUIElementFactory);
+-		this.widget = this._register(this.instantiationService.createInstance(
+-			MultiDiffEditorWidget,
+-			container,
+-			factory,
+-		));
+-	}
+-
+-	/**
+-	 * Build a `MultiDiffEditorViewModel` from the PR's file list and
+-	 * push it into the widget. Resolves each side via
+-	 * `ITextModelService.createModelReference` so the workbench's
+-	 * normal lifetime/sharing rules apply. References live until the
+-	 * model is replaced or this view disposes.
+-	 *
+-	 * Per-side resolution is independent. If the original side fails
+-	 * (e.g. GitHub flagged the file `renamed` from a path the local
+-	 * clone of the base SHA doesn't have, or the base SHA simply
+-	 * doesn't fetch the file), the file still renders with an empty
+-	 * original — same visual as an `added` file. Same for modified
+-	 * failure → empty modified, looks like `removed`. Only when BOTH
+-	 * sides fail does the file get skipped entirely.
+-	 */
+-	async setPullRequest(pr: PullRequest, files: readonly PullRequestFile[], workspace: KrtWorkspace, opts: { renderSideBySide: boolean }): Promise<void> {
+-		const previous = this.currentModel;
+-		this.uriRegistrations.clear();
+-
+-		// Compute the merge base of the PR's two refs. GitHub diffs the
+-		// PR against the merge base, NOT `pr.base.sha` directly:
+-		// `pr.base.sha` is the *current* tip of the target branch, so
+-		// when the target has moved forward since the PR was opened,
+-		// diffing against it shows every commit that landed on target
+-		// as a "reverted" change in the PR. Merge base = common
+-		// ancestor = the SHA the PR's diff should anchor on.
+-		// Fall back to `pr.base.sha` if `git merge-base` fails (the
+-		// per-side resolver will warn on each file in that case).
+-		let baseSha = pr.base.sha;
+-		try {
+-			baseSha = await this.gitService.getMergeBase(workspace.folderPath, pr.base.sha, pr.head.sha);
+-		} catch (err) {
+-			this.logService.warn(
+-				`[krt] multi-diff: git merge-base ${pr.base.sha.slice(0, 7)} ${pr.head.sha.slice(0, 7)} failed in ${workspace.folderPath} — falling back to pr.base.sha`,
+-				err,
+-			);
+-		}
+-		if (this._store.isDisposed) {
+-			return;
+-		}
+-
+-		const items: RefCounted<IDocumentDiffItem>[] = [];
+-		for (const file of files) {
+-			const itemStore = new DisposableStore();
+-			const previousPath = file.previousPath ?? file.path;
+-			const originalUri = file.status !== 'added'
+-				? encodeKrtGit(workspace.folderUri, workspace.folderPath, baseSha, previousPath)
+-				: undefined;
+-			const modifiedUri = file.status !== 'removed'
+-				? URI.joinPath(URI.file(workspace.folderPath), file.path)
+-				: undefined;
+-
+-			// Per-side resolution. `Promise.allSettled` so a one-sided
+-			// rejection doesn't leak the other side's reference.
+-			const [originalSettled, modifiedSettled] = await Promise.allSettled([
+-				originalUri ? this.textModelService.createModelReference(originalUri) : Promise.resolve(undefined),
+-				modifiedUri ? this.textModelService.createModelReference(modifiedUri) : Promise.resolve(undefined),
+-			]);
+-
+-			let original: IReference<IResolvedTextEditorModel> | undefined;
+-			let modified: IReference<IResolvedTextEditorModel> | undefined;
+-			if (originalSettled.status === 'fulfilled') {
+-				original = originalSettled.value;
+-			} else {
+-				this.logService.warn(`[krt] multi-diff: ${file.path} (base side) — ${originalSettled.reason instanceof Error ? originalSettled.reason.message : originalSettled.reason}`);
+-			}
+-			if (modifiedSettled.status === 'fulfilled') {
+-				modified = modifiedSettled.value;
+-			} else {
+-				this.logService.warn(`[krt] multi-diff: ${file.path} (head side) — ${modifiedSettled.reason instanceof Error ? modifiedSettled.reason.message : modifiedSettled.reason}`);
+-			}
+-
+-			if (this._store.isDisposed) {
+-				original?.dispose();
+-				modified?.dispose();
+-				itemStore.dispose();
+-				return;
+-			}
+-
+-			// Both sides failed — nothing to render. Only happens when
+-			// the file is genuinely missing on both sides; one-sided
+-			// failures fall through with the surviving side.
+-			if (!original && !modified) {
+-				itemStore.dispose();
+-				continue;
+-			}
+-
+-			if (original) { itemStore.add(original); }
+-			if (modified) { itemStore.add(modified); }
+-
+-			// Phase 10/C — register URIs with the comment controller so
+-			// it can fan review comments out to the right side and so
+-			// the native `+` glyph anchors back to the right
+-			// `(prUrl, side, path)` tuple on click. LEFT comments
+-			// anchor at `previousPath` (matters on rename); RIGHT at
+-			// `path`. Only register sides that resolved — registering a
+-			// URI we couldn't load would leak into the panel as a
+-			// thread the user can never reach.
+-			if (original && originalUri) {
+-				this.uriRegistrations.add(this.commentController.registerDiffUri(originalUri, {
+-					prUrl: pr.url,
+-					headSha: pr.head.sha,
+-					side: 'LEFT',
+-					path: previousPath,
+-				}));
+-			}
+-			if (modified && modifiedUri) {
+-				this.uriRegistrations.add(this.commentController.registerDiffUri(modifiedUri, {
+-					prUrl: pr.url,
+-					headSha: pr.head.sha,
+-					side: 'RIGHT',
+-					path: file.path,
+-				}));
+-			}
+-
+-			const item: IDocumentDiffItem = {
+-				original: original?.object.textEditorModel,
+-				modified: modified?.object.textEditorModel,
+-				options: {
+-					readOnly: true,
+-					originalEditable: false,
+-					renderSideBySide: opts.renderSideBySide,
+-					hideUnchangedRegions: { enabled: true, contextLineCount: 3, minimumLineCount: 4 },
+-				},
+-			};
+-			items.push(RefCounted.createOfNonDisposable(item, itemStore));
+-		}
+-
+-		if (this._store.isDisposed) {
+-			for (const item of items) { item.dispose(); }
+-			return;
+-		}
+-
+-		const documents = observableValue<readonly RefCounted<IDocumentDiffItem>[] | 'loading'>('krt.pr.multiDiff.documents', items);
+-		const model: IMultiDiffEditorModel & IDisposable = {
+-			documents: new ValueWithChangeEventFromObservable(documents),
+-			dispose: () => {
+-				for (const item of items) { item.dispose(); }
+-			},
+-		};
+-
+-		const vm = this.widget.createViewModel(model);
+-		this.widget.setViewModel(vm);
+-		const previousViewModel = this.currentViewModel;
+-		this.currentViewModel = vm;
+-		this.currentModel = model;
+-
+-		// Drop the previous viewModel + model after the swap so the
+-		// widget never holds a destroyed text model. The viewModel
+-		// owns its own `createNewRef` against each item; if we don't
+-		// dispose it, the previous items' refs never reach 0 and
+-		// their `itemStore`s leak. (Mirrors the pattern in upstream's
+-		// `MultiDiffEditor.clearInput`.)
+-		previousViewModel?.dispose();
+-		previous?.dispose();
+-
+-		// Phase 10/C — kick the comment controller's data-provider
+-		// registration so the editors that just mounted via
+-		// `setViewModel` trigger their initial compute. Their
+-		// `editor.contrib.review` is `AfterFirstRender` (max ~50ms
+-		// after model attach) and only computes via the comment
+-		// service events; firing them while no editor was listening
+-		// (controller registers eagerly at singleton init) means the
+-		// new editors miss the data. 150ms is comfortably past the
+-		// 50ms `AfterFirstRender` idle timeout.
+-		setTimeout(() => {
+-			if (this._store.isDisposed) {
+-				return;
+-			}
+-			this.commentController.bumpDataProvider();
+-		}, 150);
+-	}
+-
+-	revealFile(modifiedUri: URI | undefined, originalUri: URI | undefined): void {
+-		this.widget.reveal({ modified: modifiedUri, original: originalUri }, { highlight: false });
+-	}
+-
+-	override dispose(): void {
+-		this.widget.setViewModel(undefined);
+-		this.currentViewModel?.dispose();
+-		this.currentViewModel = undefined;
+-		this.currentModel?.dispose();
+-		this.currentModel = undefined;
+-		super.dispose();
+-	}
+-}
+-
+-/**
+- * Tiny `IWorkbenchUIElementFactory` impl — the widget asks us to
+- * create file labels for its per-item header. Mirrors upstream's
+- * private `WorkbenchUIElementFactory` in `multiDiffEditor.ts`.
+- */
+-class KrtMultiDiffUIElementFactory implements IWorkbenchUIElementFactory {
+-	constructor(
+-		@IInstantiationService private readonly instantiationService: IInstantiationService,
+-	) { }
+-
+-	createResourceLabel(element: HTMLElement): IResourceLabel {
+-		const label = this.instantiationService.createInstance(ResourceLabel, element, {});
+-		return {
+-			setUri: (uri, options = {}) => {
+-				if (!uri) {
+-					label.element.clear();
+-				} else {
+-					label.element.setFile(uri, { strikethrough: options.strikethrough });
+-				}
+-			},
+-			dispose: () => label.dispose(),
+-		};
+-	}
+-}
+diff --git a/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.css b/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.css
+index e0926ee9c86..cc000c8e657 100644
+--- a/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.css
++++ b/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.css
+@@ -1089,245 +1089,6 @@
+ 	min-width: 0;
+ }
+ 
+-.krt-pr-diff-section {
+-	border: 1px solid var(--vscode-widget-border, rgba(127, 127, 127, 0.3));
+-	border-radius: 6px;
+-	scroll-margin-top: 8px;
+-	/* Sticky requires the section NOT to be a scroll container, so we leave `overflow: visible` and use `clip-path` for the rounded-corner clip instead. clip-path applies a visual mask without affecting layout, so children's `position: sticky` continues to anchor against the outer .krt-pr-editor scroll. */
+-	clip-path: inset(0 round 6px);
+-}
+-
+-.krt-pr-diff-section.reviewed {
+-	opacity: 0.7;
+-}
+-
+-/* Collapsed: hide the body. Header stays visible and clickable. */
+-.krt-pr-diff-section.collapsed > .krt-pr-diff-section-body {
+-	display: none;
+-}
+-
+-.krt-pr-diff-section.collapsed > .krt-pr-diff-section-head {
+-	border-bottom: none;
+-}
+-
+-.krt-pr-diff-section.collapsed .krt-pr-diff-section-caret {
+-	transform: rotate(-90deg);
+-}
+-
+-.krt-pr-diff-section-head {
+-	display: flex;
+-	align-items: center;
+-	gap: 10px;
+-	padding: 8px 12px;
+-	border-bottom: 1px solid var(--vscode-widget-border, rgba(127, 127, 127, 0.3));
+-	background: var(--vscode-editorWidget-background, rgba(127, 127, 127, 0.06));
+-	font-size: 12px;
+-	cursor: pointer;
+-	user-select: none;
+-	/* Sticky within the outer .krt-pr-editor scroll — pins to viewport top while section is in view, slides off when the section ends. The section's `overflow: clip` rounds the corners; the head itself is a flat rectangle. */
+-	position: sticky;
+-	top: 0;
+-	z-index: 2;
+-}
+-
+-.krt-pr-diff-section-caret {
+-	flex: 0 0 auto;
+-	font-size: 14px;
+-	color: var(--vscode-descriptionForeground);
+-	transition: transform 80ms ease-out;
+-}
+-
+-.krt-pr-diff-section-path {
+-	font-family: 'JetBrains Mono', monospace;
+-	flex: 1 1 auto;
+-	overflow: hidden;
+-	text-overflow: ellipsis;
+-	white-space: nowrap;
+-}
+-
+-.krt-pr-diff-section-renamed {
+-	font-size: 11px;
+-	color: var(--vscode-descriptionForeground);
+-}
+-
+-.krt-pr-diff-section-counts {
+-	display: flex;
+-	gap: 6px;
+-	font-family: 'JetBrains Mono', monospace;
+-	font-size: 11.5px;
+-}
+-
+-.krt-pr-diff-section-counts .add {
+-	color: rgba(46, 160, 67, 1);
+-}
+-
+-.krt-pr-diff-section-counts .del {
+-	color: rgba(207, 34, 46, 1);
+-}
+-
+-.krt-pr-diff-reviewed {
+-	display: inline-flex;
+-	align-items: center;
+-	gap: 5px;
+-	font-size: 11.5px;
+-	color: var(--vscode-descriptionForeground);
+-	cursor: pointer;
+-	user-select: none;
+-}
+-
+-.krt-pr-diff-reviewed input[type='checkbox'] {
+-	cursor: pointer;
+-}
+-
+-.krt-pr-diff-section-body {
+-	font-family: 'JetBrains Mono', monospace;
+-	font-size: 12px;
+-	line-height: 1.45;
+-	overflow-x: auto;
+-}
+-
+-.krt-pr-diff-no-patch {
+-	padding: 12px;
+-	color: var(--vscode-descriptionForeground);
+-	font-style: italic;
+-}
+-
+-/* Phase 8.5 — embedded Monaco diff. The view sets its own height to */
+-/* match `getContentHeight()` (capped at MAX_HEIGHT_PX). */
+-.krt-pr-diff-monaco {
+-	width: 100%;
+-	overflow: hidden;
+-}
+-
+-.krt-pr-diff-zone-host {
+-	padding: 6px 8px;
+-	background: var(--vscode-editorWidget-background, rgba(127, 127, 127, 0.06));
+-	border-top: 1px solid var(--vscode-editorWidget-border, rgba(127, 127, 127, 0.3));
+-	border-bottom: 1px solid var(--vscode-editorWidget-border, rgba(127, 127, 127, 0.3));
+-}
+-
+-/* Click-to-comment affordance: highlight the line-number gutter on hover so users discover the click target. The actual click is wired in `KrtMonacoDiffView.onLineNumberClick` via `MouseTargetType.GUTTER_LINE_NUMBERS`. */
+-.krt-pr-diff-monaco .monaco-editor .margin-view-overlays .line-numbers {
+-	cursor: pointer;
+-}
+-
+-.krt-pr-diff-monaco .monaco-editor .margin-view-overlays .line-numbers:hover {
+-	color: var(--krt-accent, var(--vscode-textLink-foreground));
+-	background: var(--krt-accent-soft, var(--vscode-toolbar-hoverBackground));
+-}
+-
+-.krt-pr-diff-line {
+-	display: grid;
+-	grid-template-columns: 48px 48px 24px 1fr;
+-	align-items: stretch;
+-	white-space: pre;
+-}
+-
+-.krt-pr-diff-line.add {
+-	background: rgba(46, 160, 67, 0.10);
+-}
+-
+-.krt-pr-diff-line.del {
+-	background: rgba(207, 34, 46, 0.10);
+-}
+-
+-.krt-pr-diff-line.hunk {
+-	background: rgba(80, 110, 230, 0.10);
+-	color: var(--vscode-descriptionForeground);
+-}
+-
+-.krt-pr-diff-line.meta {
+-	color: var(--vscode-descriptionForeground);
+-	font-style: italic;
+-}
+-
+-.krt-pr-diff-lineno {
+-	display: inline-block;
+-	text-align: right;
+-	padding: 0 6px;
+-	color: var(--vscode-descriptionForeground);
+-	user-select: none;
+-	font-size: 11px;
+-}
+-
+-.krt-pr-diff-line.hunk .krt-pr-diff-lineno,
+-.krt-pr-diff-line.meta .krt-pr-diff-lineno {
+-	visibility: hidden;
+-}
+-
+-.krt-pr-diff-gutter {
+-	position: relative;
+-	display: inline-flex;
+-	align-items: center;
+-	justify-content: center;
+-}
+-
+-.krt-pr-diff-add-comment {
+-	display: none;
+-	width: 18px;
+-	height: 18px;
+-	padding: 0;
+-	border: none;
+-	border-radius: 3px;
+-	background: var(--vscode-button-background, rgba(80, 110, 230, 0.7));
+-	color: var(--vscode-button-foreground, white);
+-	cursor: pointer;
+-	font-size: 13px;
+-	line-height: 1;
+-}
+-
+-.krt-pr-diff-line:hover .krt-pr-diff-add-comment {
+-	display: inline-flex;
+-	align-items: center;
+-	justify-content: center;
+-}
+-
+-.krt-pr-diff-line-content {
+-	padding: 0 8px;
+-	overflow: hidden;
+-	text-overflow: ellipsis;
+-}
+-
+-/* ---------- Diff threads + composer ---------- */
+-
+-.krt-pr-diff-thread,
+-.krt-pr-diff-composer {
+-	border-top: 1px solid var(--vscode-widget-border, rgba(127, 127, 127, 0.3));
+-	border-bottom: 1px solid var(--vscode-widget-border, rgba(127, 127, 127, 0.3));
+-	background: var(--vscode-editor-background, transparent);
+-	padding: 8px 12px;
+-	font-family: 'Inter', system-ui, sans-serif;
+-	font-size: 13px;
+-	display: flex;
+-	flex-direction: column;
+-	gap: 8px;
+-}
+-
+-.krt-pr-diff-composer-card {
+-	display: flex;
+-	flex-direction: column;
+-	gap: 6px;
+-}
+-
+-.krt-pr-diff-composer-note {
+-	font-size: 11.5px;
+-	color: var(--vscode-descriptionForeground);
+-}
+-
+-.krt-pr-reply-cancel {
+-	background: transparent;
+-	border: 1px solid var(--vscode-widget-border, rgba(127, 127, 127, 0.3));
+-	color: var(--vscode-foreground);
+-	padding: 4px 10px;
+-	border-radius: 4px;
+-	cursor: pointer;
+-	font-size: 12px;
+-}
+-
+-.krt-pr-reply-cancel:hover:not(:disabled) {
+-	background: var(--vscode-toolbar-hoverBackground, rgba(127, 127, 127, 0.1));
+-}
+-
+ /* ---------- Tour sub-mode ---------- */
+ 
+ .krt-pr-editor-body.tour {
+@@ -1634,52 +1395,6 @@
+ 	gap: 12px;
+ }
+ 
+-.krt-pr-tour-mini-section {
+-	border: 1px solid var(--vscode-widget-border, rgba(127, 127, 127, 0.25));
+-	border-radius: 6px;
+-	overflow: hidden;
+-}
+-
+-.krt-pr-tour-mini-head {
+-	display: flex;
+-	align-items: center;
+-	gap: 8px;
+-	padding: 6px 10px;
+-	background: var(--vscode-editorGroupHeader-tabsBackground, transparent);
+-	border-bottom: 1px solid var(--vscode-widget-border, rgba(127, 127, 127, 0.25));
+-	font-size: 12px;
+-}
+-
+-.krt-pr-tour-mini-path {
+-	flex: 1;
+-	font-family: var(--monaco-monospace-font, monospace);
+-	overflow: hidden;
+-	text-overflow: ellipsis;
+-	white-space: nowrap;
+-}
+-
+-.krt-pr-tour-mini-counts {
+-	display: inline-flex;
+-	gap: 6px;
+-	font-family: var(--monaco-monospace-font, monospace);
+-	font-size: 11px;
+-}
+-
+-.krt-pr-tour-mini-counts .add {
+-	color: var(--vscode-gitDecoration-addedResourceForeground, #587c0c);
+-}
+-
+-.krt-pr-tour-mini-counts .del {
+-	color: var(--vscode-gitDecoration-deletedResourceForeground, #ad0707);
+-}
+-
+-.krt-pr-tour-mini-body {
+-	max-height: 320px;
+-	overflow: auto;
+-	font-family: var(--monaco-monospace-font, monospace);
+-	font-size: 12px;
+-}
+-
+ .krt-pr-tour-mini-empty {
+ 	padding: 12px;
+ 	font-size: 12px;
+-- 
+2.52.0
+

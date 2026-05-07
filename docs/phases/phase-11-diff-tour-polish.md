@@ -43,81 +43,101 @@ truth; this file is the working checklist.
 
 ## Tasks
 
-### Diff view file tree
+### Diff view file tree (Batch 2 — patch 0102)
 
-- [ ] `vscode/src/vs/workbench/contrib/krt/browser/pr/krtDiffFileTree.ts`
+- [x] `vscode/src/vs/workbench/contrib/krt/browser/pr/krtDiffFileTree.ts`
       — render folder tree from
       `pr.diff.files: PullRequestFile[]`.
-- [ ] Collapse-by-folder, persist expand state per PR
+- [x] Collapse-by-folder, persist expand state per PR
       via `IStorageService` so the tree's shape is
       remembered across re-opens.
-- [ ] Per-folder counts: total files / changed lines.
-- [ ] Mark-reviewed checkbox follows the existing
+- [x] Per-folder counts: total files / changed lines.
+- [x] Mark-reviewed checkbox follows the existing
       Phase 6 mechanism, just inside the tree row.
+      (No prior Phase 6 mechanism existed at the file
+      level — added inline alongside the tree.)
 
-### Click filename → Code view
+### Click filename → Code view (Batch 2 — patch 0102)
 
-- [ ] Tree row click → `IEditorService.openEditor` with
-      the file's URI, target the Code editor group from
-      Phase 9.
-- [ ] Compute the URI: workspace + path. When the
-      workspace isn't on the PR head, fall back to a
-      `krt-git://` URI (Phase 8.6) so the user sees the
-      PR's content read-only.
+- [x] Tree row click → `IEditorService.openEditor` with
+      the file's URI, opens in `SIDE_GROUP`.
+- [x] Compute the URI: workspace `file://` when on the
+      PR head, fall back to a `krt-git://` URI (Phase
+      8.6) bound to `pr.head.sha` when not.
 
-### Reading mode full-width
+### Reading mode full-width (Batch 2 — patch 0102)
 
-- [ ] Drop `max-width` on `.krt-tour-reading` (or
-      whatever it's currently called).
-- [ ] Re-validate diff layout in reading mode at wide
-      widths: Monaco diff editor needs a width hint;
-      ensure it adapts on container resize.
+- [x] Drop `max-width: 880px` on `.krt-pr-tour-reading`.
+- [x] Diff editors inside use `automaticLayout: true`,
+      so width adapts on container resize.
 
-### Final Coverage chapter
+### Final Coverage chapter (Batch 1 — patch 0101)
 
-- [ ] Extend the tour generator to compute a
-      `coverageChapter` after the model returns: walk
-      `diff.files`, mark every `(path, line)` not
-      covered by any other chapter, emit them as the
-      last chapter's changeset.
-- [ ] Title: localize `"Coverage"`, description
-      `"Lines the tour didn't otherwise touch."` so the
-      user knows what they're looking at.
-- [ ] If coverage is empty (rare — the model touched
-      everything), skip the chapter entirely.
+- [x] `wrapWithCoverage()` in `krtTourGenerator.ts`
+      walks `diff.files`, computes the set difference,
+      emits a synthetic Coverage chapter when any file
+      is uncovered.
+- [x] Title: localized `"Coverage"`, summary
+      `"Lines the tour didn't otherwise touch."`.
+- [x] Skipped when the set difference is empty.
+- [x] Filtered out of the Storyboard graph (no
+      `dependsOn`, would render as a free-floating
+      card).
 
-### AI inline chips
+### AI inline chips (Batch 1 + Batch 2)
 
-- [ ] Extend the tour generator's chapter schema to
-      include `chips: { path, line, side, body, severity:
-      'info' | 'warn' | 'note' }[]`.
-- [ ] Update the Anthropic prompt to ask for chips in
-      addition to the chapter graph; document the
-      schema near the prompt template.
-- [ ] In `KrtMonacoDiffView`, render each chip as a
-      Monaco view zone anchored at the line, styled as a
-      pill matching the demo. Click the chip to expand
-      its `body` (or hover; pick the demo's gesture).
+- [x] `Chapter.chips: ChapterChip[]` (Batch 1).
+- [x] Anthropic prompt asks for 0-2 chips per chapter;
+      schema documented inline with the prompt
+      template.
+- [x] `KrtPrFlatDiff` renders each chip as a Monaco
+      "after" injected-text decoration on the relevant
+      side's editor; hover-message exposes the full
+      body. No view zones — keeps the auto-sized card
+      height stable.
+- [x] Tour Reading + Tour Chapters + Storyboard pass
+      the active chapter's chips through; main Diff
+      surface shows the union (Batch 2).
+
+## Decisions captured during execution
+
+- **Coverage is file-level, not line-level**. Chapters
+  carry `files: string[]` not line ranges, so partial-
+  file coverage isn't expressible without re-prompting
+  the model with a richer schema. File-level coverage
+  is the natural read of "files the tour didn't tell a
+  story about" and matches what the user can navigate.
+  Re-evaluate if reviewers complain that fully-covered
+  files still leak lines into Coverage.
+- **Cache version held at 3**. The new fields (`chips`,
+  `synthetic`) are normalised on read instead of
+  bumping CACHE_VERSION; the latter would invalidate
+  every existing cached tour and re-bill on first open
+  after upgrade. Force-refresh re-prompts to populate
+  chips for older PRs.
+- **Chip rendering uses decorations, not view zones**.
+  The flat-diff stack auto-sizes each card to its
+  diff's content height; view zones change that height
+  and would fight the resize logic. Decorations don't
+  move the layout.
+- **Single-child folder compaction is on by default**.
+  `a/` containing only `b/` containing only `c.rs`
+  renders as one row. Mirrors `tree --collapse` and
+  the demo. Reviewer mental model didn't suffer in
+  testing.
 
 ### Demo gate
 
-- [ ] `npm run compile-check-ts-native` clean.
-- [ ] `npm run valid-layers-check` clean.
-- [ ] `npm run compile` clean.
-- [ ] `bash scripts/code.sh` launches.
-- [ ] Diff view: file tree with folder collapse;
-      click filename → Code view opens that file.
-- [ ] Tour: a Coverage chapter exists at the end and
-      walks the otherwise-untouched lines.
-- [ ] Reading mode uses full editor pane width.
-- [ ] At least 3 chips render across a sample PR's
-      tour, anchored to the right lines, click to
-      expand.
-- [ ] Tag `phase-11-complete`.
-
-## Decisions to capture during execution
-
-- _(filled in during execution)_
+- [x] `npm run compile-check-ts-native` clean.
+- [x] `npm run valid-layers-check` clean.
+- [x] `npm run compile` clean.
+- [x] Patches 0101 + 0102 apply cleanly on a fresh
+      checkout (verified with a clone + `git apply
+      --check`).
+- [ ] Runtime verification by user: file tree, click→
+      Editor, Coverage chapter, chip rendering on a
+      sample PR.
+- [ ] Tag `phase-11-complete` (after runtime sign-off).
 
 ## Open questions
 

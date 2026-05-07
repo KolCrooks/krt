@@ -1,5 +1,16 @@
 # Phase 9.5 — Native comments API migration
 
+> **Superseded by [Phase 10 — Diff view rebuild](phase-10-diff-rebuild.md)
+> (patches 0067-0088).** The 9.5 attempt at a `realLines` translation
+> map (model line N → file line M for synthetic base text) was
+> abandoned. Phase 10 uses real `file://` content on the modified side
+> and full-content `krt-git://` on the base side, so model line ==
+> real file line everywhere, no translation needed. The
+> `KrtPrCommentController` was rebuilt from scratch in patch 0071, and
+> the `editor.contrib.review` lifecycle issue (the
+> `bumpDataProvider` workaround in patch 0076) is the new canonical
+> reference for that interaction.
+
 Goal: replace KRT's custom view-zone-based review-comment overlay
 with the workbench's `ICommentService` infrastructure. End state:
 GitHub-style native gutter affordances (the `+` hover icon on

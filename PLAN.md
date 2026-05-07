@@ -328,7 +328,14 @@ Rules:
   CI status, post a comment.
 
 ### Phase 6 — Review view: Diff sub-mode (1.5 weeks)
-- File tree (folder-grouped, status dots, +/− counts) + Monaco diff editor for
+> **Final state**: rebuilt in [Phase 10 — Diff view rebuild](docs/phases/phase-10-diff-rebuild.md)
+> (patches 0067-0088). The original `<div>`-stacked patch-text renderer this
+> phase shipped was thrown out and replaced with one stock VS Code
+> `DiffEditorWidget` per file, content-sized into a flat scrollable stack.
+> File-tree, mark-reviewed, side-by-side / inline toggle survived; everything
+> below the file tree is new code.
+
+- File tree (folder-grouped, status dots, +/- counts) + Monaco diff editor for
   each file. Single scroll surface; active-file highlight scroll-syncs.
 - Per-file actions: comment, mark reviewed.
 - Inline comments anchored to lines (read existing PR review comments; create
@@ -364,6 +371,14 @@ Rules:
   highlight relationships.
 
 ### Phase 8.5 — Monaco-backed diff views (1 week)
+> **Final state**: superseded by [Phase 10 — Diff view rebuild](docs/phases/phase-10-diff-rebuild.md)
+> (patches 0067-0088). The unified-diff-derived virtual models with blank-line
+> padding (and the line-translation map they implied) were abandoned. Phase 10
+> uses real `file://` content on the modified side and full-content
+> `krt-git://` content on the base side, so model line == real file line on
+> both sides — no padding, no translation. Monaco diff rendering, language
+> detection / syntax highlighting goal preserved.
+
 - Replace the hand-rolled `<div>`-based unified-diff renderer used by the
   Diff sub-mode and the Tour mini-diffs with embedded Monaco diff editors.
 - Hosts on `IModelService` text models created from unified-diff-derived
@@ -376,6 +391,14 @@ Rules:
   threads + composer attach as Monaco view zones.
 
 ### Phase 8.6 — Workspace registry + LSP via real file URIs (1 week)
+> **Final state**: workspace registry survives unchanged. URI strategy
+> evolved in [Phase 10 — Diff view rebuild](docs/phases/phase-10-diff-rebuild.md)
+> (patches 0067-0088): `krt-git://` metadata moved from authority-encoded
+> (which `URI.from` lowercases) to query-encoded JSON, and the
+> `KrtGitContentProvider` gained a `gh` Contents API fallback for SHAs the
+> local clone hasn't fetched. `git merge-base` replaced `pr.base.sha` for
+> base-side resolution so target-tip movement doesn't break the diff.
+
 - Workspace registry: an explicit list of local repository folders KRT
   is allowed to surface PRs from. Add / remove via Settings → KRT or
   the PR Search overlay. Stored in `IStorageService` (application
@@ -391,7 +414,7 @@ Rules:
 - Empty state when no workspaces registered: "Add a workspace to start
   finding PRs" CTA.
 - **Demo**: add a Cargo repo as a workspace, search shows that repo's
-  PRs, open one, command-click a function name in the diff → jump to
+  PRs, open one, command-click a function name in the diff -> jump to
   its definition via rust-analyzer.
 
 ### Phase 8.7 — Auto-switch on review (jj + git, 1 week)
@@ -447,6 +470,14 @@ Rules:
   surfaces full IntelliSense; the Tweaks panel doesn't exist.
 
 ### Phase 9.5 — Native comments API migration (~3 sessions)
+> **Final state**: rebuilt from scratch in [Phase 10 — Diff view rebuild](docs/phases/phase-10-diff-rebuild.md)
+> (patches 0067-0088). The 9.5 attempt at a `realLines` translation map for
+> synthetic base text was abandoned along with the patch-text base. The new
+> `KrtPrCommentController` (patch 0071) uses real file line numbers
+> directly. The `bumpDataProvider` workaround (patch 0076) for
+> `editor.contrib.review`'s `AfterFirstRender` lifecycle is the new
+> canonical reference for that subtle interaction.
+
 - Replace KRT's custom view-zone-based review-comment overlay with the
   workbench's `ICommentService` infrastructure. End state: GitHub-style
   native gutter affordances (the `+` hover icon on commentable lines),

@@ -1,0 +1,71 @@
+From e31dc9881d1933e5f5a762dc5358ade0477556a1 Mon Sep 17 00:00:00 2001
+From: Kol Crooks <kol.crooks@datadoghq.com>
+Date: Thu, 7 May 2026 16:39:03 -0400
+Subject: [PATCH] Phase D polish: pre-fetch review comments so they're ready by
+ Diff entry
+
+Reported: comment fetching feels slow.
+
+Cause: `loadReviewComments` was lazy -- it only fired when the
+user entered the Diff sub-mode. By then they were waiting on the
+cold `gh api` call (~300-500ms, dominated by gh CLI spawn +
+network round-trip) before any threads appeared inline.
+
+Fire `loadReviewComments` eagerly:
+  - cache-miss path: right after PR metadata resolves and the PR
+    sub-mode renders. Latency overlaps with the user reading the
+    PR.
+  - cache-hit path with no cached review-comments: same idea --
+    pre-fetch in the background while the cached PR renders.
+
+`loadReviewComments` is idempotent under `reviewCommentsLoading`,
+so the diff sub-mode's lazy guard is a no-op when comments are
+already in flight. By the time the user navigates to Diff (or
+Tour / Storyboard) the threads are usually already in the
+controller and the inline widgets render immediately.
+
+Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+---
+ .../browser/pr/krtPullRequestEditorPane.ts    | 19 +++++++++++++++++++
+ 1 file changed, 19 insertions(+)
+
+diff --git a/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.ts b/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.ts
+index ac6565ab7d5..486b2e8442b 100644
+--- a/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.ts
++++ b/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.ts
+@@ -539,6 +539,13 @@ export class KrtPullRequestEditorPane extends EditorPane {
+ 			if (cached.reviewComments !== undefined) {
+ 				this.reviewComments = cached.reviewComments;
+ 				this.krtCommentController.setCommentsForPr(input.url, cached.reviewComments);
++			} else if (!this.reviewCommentsLoading) {
++				// Cache hit on the PR metadata but the review-comments
++				// sub-resource wasn't filled yet. Pre-fetch in the
++				// background so the latency overlaps with the user
++				// reading the PR sub-mode rather than waiting on a
++				// cold `gh api` spawn the moment they click Diff.
++				void this.loadReviewComments(cached.pr);
+ 			}
+ 			if (cached.activity !== undefined) {
+ 				this.automationEvents = cached.activity;
+@@ -569,6 +576,18 @@ export class KrtPullRequestEditorPane extends EditorPane {
+ 			this.liveComments = [...pr.comments];
+ 			this.renderLoaded(pr);
+ 			recordRecentPullRequest(this.krtStorageService, pr);
++			// Pre-fetch the review-comments sub-resource in the
++			// background. The `gh api` call costs ~300-500ms (CLI
++			// spawn + network), and lazy-loading on Diff entry made
++			// the user wait that long before threads appeared. Firing
++			// it here overlaps the latency with the user reading the
++			// PR sub-mode. `loadReviewComments` is idempotent under
++			// `reviewCommentsLoading` and pushes through the
++			// controller on resolve, so by the time the user navigates
++			// to Diff (or Tour / Storyboard) the threads are ready.
++			if (this.reviewComments === undefined && !this.reviewCommentsLoading) {
++				void this.loadReviewComments(pr);
++			}
+ 		} catch (err) {
+ 			if (this.currentInput !== input || this.fetchToken !== myToken) {
+ 				return;
+-- 
+2.52.0
+

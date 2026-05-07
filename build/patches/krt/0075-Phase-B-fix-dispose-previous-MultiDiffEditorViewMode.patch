@@ -1,0 +1,95 @@
+From 2e1390126d79f74244edf741d4f8521fd5cc9396 Mon Sep 17 00:00:00 2001
+From: Kol Crooks <kol.crooks@datadoghq.com>
+Date: Thu, 7 May 2026 15:15:02 -0400
+Subject: [PATCH] Phase B fix: dispose previous MultiDiffEditorViewModel on
+ swap
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Reported: GC-based `[LEAKED DISPOSABLE]` warning pointing at
+`new DisposableStore()` on line 72 of `setPullRequest` (the
+per-file `itemStore`). Cause: I never disposed the previous
+`MultiDiffEditorViewModel` when calling `setViewModel` with a new
+one. The widget's `setViewModel` doesn't take ownership of the
+prior viewModel — it just stores a reference. The prior
+`MultiDiffEditorViewModel` still holds `createNewRef`-style refs
+against each `IDocumentDiffItem` we built; those refs hold the
+items' refcounts above 0, so the per-item `itemStore`s never
+dispose and the leak tracker fires whenever the items get GC'd.
+
+Track `currentViewModel` and dispose it whenever a new one
+replaces it (and on full disposal). Mirrors upstream's
+`MultiDiffEditor.clearInput`.
+
+Visible as `[LEAKED DISPOSABLE]` warnings in the dev console;
+practically a memory leak per PR navigation, not a functional
+bug.
+
+Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+---
+ .../contrib/krt/browser/pr/krtPrMultiDiff.ts  | 25 ++++++++++++++++---
+ 1 file changed, 22 insertions(+), 3 deletions(-)
+
+diff --git a/src/vs/workbench/contrib/krt/browser/pr/krtPrMultiDiff.ts b/src/vs/workbench/contrib/krt/browser/pr/krtPrMultiDiff.ts
+index 8d96c917cd1..dab88df2cf3 100644
+--- a/src/vs/workbench/contrib/krt/browser/pr/krtPrMultiDiff.ts
++++ b/src/vs/workbench/contrib/krt/browser/pr/krtPrMultiDiff.ts
+@@ -7,6 +7,7 @@ import { Disposable, DisposableStore, IDisposable, IReference } from '../../../.
+ import { observableValue, ValueWithChangeEventFromObservable } from '../../../../../base/common/observable.js';
+ import { URI } from '../../../../../base/common/uri.js';
+ import { MultiDiffEditorWidget } from '../../../../../editor/browser/widget/multiDiffEditor/multiDiffEditorWidget.js';
++import { MultiDiffEditorViewModel } from '../../../../../editor/browser/widget/multiDiffEditor/multiDiffEditorViewModel.js';
+ import { IDocumentDiffItem, IMultiDiffEditorModel } from '../../../../../editor/browser/widget/multiDiffEditor/model.js';
+ import { IResourceLabel, IWorkbenchUIElementFactory } from '../../../../../editor/browser/widget/multiDiffEditor/workbenchUIElementFactory.js';
+ import { RefCounted } from '../../../../../editor/browser/widget/diffEditor/utils.js';
+@@ -49,6 +50,16 @@ export class KrtPrMultiDiff extends Disposable {
+ 
+ 	private readonly widget: MultiDiffEditorWidget;
+ 	private currentModel: { dispose(): void } | undefined;
++	/**
++	 * The widget's `setViewModel` doesn't take ownership — it just
++	 * stores a reference. The previous viewModel still holds
++	 * `createNewRef`-style refs to the previous diff items, keeping
++	 * their `itemStore`s alive. Track the current viewModel so we can
++	 * dispose it on swap (and on full disposal). Without this the
++	 * GC-based leak tracker logs a `[LEAKED DISPOSABLE]` warning
++	 * pointing at every `new DisposableStore()` we create per file.
++	 */
++	private currentViewModel: MultiDiffEditorViewModel | undefined;
+ 	private readonly uriRegistrations = this._register(new DisposableStore());
+ 
+ 	constructor(
+@@ -211,11 +222,17 @@ export class KrtPrMultiDiff extends Disposable {
+ 
+ 		const vm = this.widget.createViewModel(model);
+ 		this.widget.setViewModel(vm);
++		const previousViewModel = this.currentViewModel;
++		this.currentViewModel = vm;
+ 		this.currentModel = model;
+ 
+-		// Drop the previous model after the swap so the widget never
+-		// holds a destroyed text model. (Mirrors the pattern in
+-		// upstream's `MultiDiffEditor.clearInput`.)
++		// Drop the previous viewModel + model after the swap so the
++		// widget never holds a destroyed text model. The viewModel
++		// owns its own `createNewRef` against each item; if we don't
++		// dispose it, the previous items' refs never reach 0 and
++		// their `itemStore`s leak. (Mirrors the pattern in upstream's
++		// `MultiDiffEditor.clearInput`.)
++		previousViewModel?.dispose();
+ 		previous?.dispose();
+ 	}
+ 
+@@ -225,6 +242,8 @@ export class KrtPrMultiDiff extends Disposable {
+ 
+ 	override dispose(): void {
+ 		this.widget.setViewModel(undefined);
++		this.currentViewModel?.dispose();
++		this.currentViewModel = undefined;
+ 		this.currentModel?.dispose();
+ 		this.currentModel = undefined;
+ 		super.dispose();
+-- 
+2.52.0
+

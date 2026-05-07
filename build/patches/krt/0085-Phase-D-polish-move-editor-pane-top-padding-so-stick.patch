@@ -1,0 +1,60 @@
+From 9d465a5ed655a32accda7ccd92f7d9b26fca6c62 Mon Sep 17 00:00:00 2001
+From: Kol Crooks <kol.crooks@datadoghq.com>
+Date: Thu, 7 May 2026 16:31:02 -0400
+Subject: [PATCH] Phase D polish: move editor pane top padding so sticky
+ headers anchor flush
+
+Reported: sticky diff card headers stuck to the top of
+`.krt-pr-editor` but the editor's `padding-top: 24px` left an
+empty gap above the header (the padding region shows the editor
+background between the editor's top edge and the sticky header).
+
+CSS sticky `top: 0` anchors at the scroll container's
+**padding-box** top edge, which is the inside of the border. With
+a non-zero `padding-top` on the scroll container, that edge is
+above where non-sticky content normally lives, so the sticky
+header floats inside the padding region with empty space below it
+(or above, depending on perspective) before the rest of the
+content reaches it.
+
+Move the 24px top padding off the scroll container and onto the
+PR header (`.krt-pr-editor-header { padding-top: 24px }`) so the
+visual breathing room above the PR header is preserved while
+sticky children anchor flush with the editor's top edge. Side
+padding stays on the scroll container; bottom padding too (it
+doesn't affect sticky).
+
+Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+---
+ .../contrib/krt/browser/pr/krtPullRequestEditorPane.css   | 8 +++++++-
+ 1 file changed, 7 insertions(+), 1 deletion(-)
+
+diff --git a/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.css b/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.css
+index d7059967206..2af0801889f 100644
+--- a/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.css
++++ b/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.css
+@@ -7,7 +7,10 @@
+ 	display: flex;
+ 	flex-direction: column;
+ 	box-sizing: border-box;
+-	padding: 24px 32px 48px;
++	/* Top padding moved to `.krt-pr-editor-header` so sticky children
++	 * (diff card headers, etc.) anchor at `top: 0` of the visible
++	 * scrollport without leaving an empty padding gap above them. */
++	padding: 0 32px 48px;
+ 	gap: 18px;
+ 	overflow: auto;
+ 	font-family: 'Inter', system-ui, sans-serif;
+@@ -18,6 +21,9 @@
+ 	align-items: flex-start;
+ 	justify-content: space-between;
+ 	gap: 16px;
++	/* Visual breathing room that used to live on the scroll
++	 * container's `padding-top`. See `.krt-pr-editor`. */
++	padding-top: 24px;
+ }
+ 
+ .krt-pr-editor-header-text {
+-- 
+2.52.0
+

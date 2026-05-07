@@ -1,5 +1,13 @@
 # Phase 8.5 — Monaco-backed diff views
 
+> **Superseded by [Phase 10 — Diff view rebuild](phase-10-diff-rebuild.md)
+> (patches 0067-0088).** The patch-reconstruction approach this phase
+> took (synthesizing base text from hunks with blank-line padding) was
+> abandoned in Phase 10 in favour of real `file://` modified content
+> + `krt-git://` original content via `ITextModelService`. That removed
+> the line-translation map entirely (model line == real file line) and
+> unblocked LSP on the modified side.
+
 Goal: replace the hand-rolled `<div>`-based unified-diff
 renderer used by the Diff sub-mode and the Tour mini-diffs
 (plus the storyboard's chapter-scoped diff, which reuses
