@@ -1,0 +1,30 @@
+From 6d1d2edf2451e204f91025e239f76cdcb0a3cfd2 Mon Sep 17 00:00:00 2001
+From: julietmoss <juliet.moss@datadoghq.com>
+Date: Fri, 8 May 2026 17:03:03 -0400
+Subject: [PATCH] Link to API key page from Claude settings prompt
+
+Adds the Anthropic console URL to the configure-key input prompt so
+first-time users can find where to create their key without leaving
+the IDE.
+
+Closes KolCrooks/krt#3
+---
+ src/vs/workbench/contrib/krt/browser/ai/krtAi.contribution.ts | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/src/vs/workbench/contrib/krt/browser/ai/krtAi.contribution.ts b/src/vs/workbench/contrib/krt/browser/ai/krtAi.contribution.ts
+index 5b885a7928a..0f3f2b80f44 100644
+--- a/src/vs/workbench/contrib/krt/browser/ai/krtAi.contribution.ts
++++ b/src/vs/workbench/contrib/krt/browser/ai/krtAi.contribution.ts
+@@ -51,7 +51,7 @@ class KrtConfigureAnthropicKeyAction extends Action2 {
+ 
+ 		const value = await quickInputService.input({
+ 			title: localize('krt.ai.configureKey.inputTitle', "Anthropic API Key"),
+-			prompt: localize('krt.ai.configureKey.inputPrompt', "Paste your Anthropic API key. Stored encrypted in the OS keychain. Leave blank to clear."),
++			prompt: localize('krt.ai.configureKey.inputPrompt', "Paste your Anthropic API key. Stored encrypted in the OS keychain. Leave blank to clear. Don't have a key? https://platform.claude.com/settings/workspaces/default/keys"),
+ 			placeHolder: 'sk-ant-…',
+ 			password: true,
+ 			ignoreFocusLost: true,
+-- 
+2.54.0
+
