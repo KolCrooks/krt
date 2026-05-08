@@ -1,0 +1,44 @@
+From 6d2e93b7e8e6d14ff720f21ba41b38e524f7c112 Mon Sep 17 00:00:00 2001
+From: julietmoss <juliet.moss@datadoghq.com>
+Date: Fri, 8 May 2026 17:08:58 -0400
+Subject: [PATCH] Wire search and PR rail icons to their commands
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Fixes KolCrooks/krt#1. The left rail's search and PR icons were no-op
+placeholders waiting on Phase 4/5. Dispatch `krt.search` and
+`krt.openPullRequest` via ICommandService so the icons match the ⌘K and
+F1 → "KRT: Open PR" keyboard paths.
+---
+ src/vs/workbench/services/krt/browser/krtRail.ts | 9 +++++----
+ 1 file changed, 5 insertions(+), 4 deletions(-)
+
+diff --git a/src/vs/workbench/services/krt/browser/krtRail.ts b/src/vs/workbench/services/krt/browser/krtRail.ts
+index 8f8cac320bc..d8a6dab1191 100644
+--- a/src/vs/workbench/services/krt/browser/krtRail.ts
++++ b/src/vs/workbench/services/krt/browser/krtRail.ts
+@@ -22,15 +22,16 @@ const KRT_RAIL_BUTTONS: ReadonlyArray<KrtRailButton> = [
+ 		key: 'search',
+ 		icon: 'search',
+ 		tooltip: localize('krt.rail.search', "Search PRs"),
+-		// Phase 4 wires this to the KRT search overlay.
+-		onClick: () => { /* no-op until Phase 4 */ },
++		// Opens the KRT search overlay (same as ⌘K).
++		onClick: commandService => { commandService.executeCommand('krt.search'); },
+ 	},
+ 	{
+ 		key: 'pr',
+ 		icon: 'pr',
+ 		tooltip: localize('krt.rail.pr', "PR view"),
+-		// Phase 5 sets the active PR tab's view mode.
+-		onClick: () => { /* no-op until Phase 5 */ },
++		// Until Phase 5 can set the active tab's view mode, treat the PR
++		// icon as "open a PR" — same action as F1 → KRT: Open PR.
++		onClick: commandService => { commandService.executeCommand('krt.openPullRequest'); },
+ 	},
+ 	{
+ 		key: 'review',
+-- 
+2.54.0
+
