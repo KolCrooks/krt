@@ -22,6 +22,12 @@ tag and applies KRT's patches, then runs the upstream build.
 
 ## Usage
 
+Prerequisites (one-time):
+
+```sh
+brew install node@22   # upstream VSCode pins to Node 22 (see .nvmrc); nodenv users get this automatically via .node-version
+```
+
 First time:
 
 ```sh
