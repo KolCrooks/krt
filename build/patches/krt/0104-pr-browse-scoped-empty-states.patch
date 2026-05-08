@@ -1,0 +1,56 @@
+diff --git a/src/vs/platform/krt/electron-main/pullRequestProviderMainService.ts b/src/vs/platform/krt/electron-main/pullRequestProviderMainService.ts
+index 1a1a65300bc..81d48bd70c1 100644
+--- a/src/vs/platform/krt/electron-main/pullRequestProviderMainService.ts
++++ b/src/vs/platform/krt/electron-main/pullRequestProviderMainService.ts
+@@ -280,6 +280,9 @@ function buildSearchQuery(query: string, scope: SearchScope): string {
+ 	switch (scope) {
+ 		case 'all-open':
+ 			qualifiers.push('is:open');
++			if (!trimmed) {
++				qualifiers.push('author:@me');
++			}
+ 			break;
+ 		case 'reviewed':
+ 			qualifiers.push('reviewed-by:@me');
+diff --git a/src/vs/workbench/contrib/krt/browser/search/krtSearchOverlay.ts b/src/vs/workbench/contrib/krt/browser/search/krtSearchOverlay.ts
+index 0bcec2a661f..bb6cef645b9 100644
+--- a/src/vs/workbench/contrib/krt/browser/search/krtSearchOverlay.ts
++++ b/src/vs/workbench/contrib/krt/browser/search/krtSearchOverlay.ts
+@@ -173,6 +173,7 @@ class KrtSearchOverlay extends Disposable {
+ 	private attachEventListeners(): void {
+ 		this.listeners.add(DOM.addDisposableListener(this.inputElement, 'input', () => {
+ 			this.query = this.inputElement.value;
++			this.refreshRecents();
+ 			this.scheduleSearch();
+ 		}));
+ 		this.listeners.add(DOM.addDisposableListener(this.inputElement, 'keydown', (raw) => {
+@@ -296,9 +297,17 @@ class KrtSearchOverlay extends Disposable {
+ 		}
+ 		if (this.results.length === 0) {
+ 			const el = DOM.append(this.resultsElement, DOM.$('.krt-search-empty'));
+-			el.textContent = this.query
+-				? localize('krt.search.noMatches', "No PRs match.")
+-				: localize('krt.search.startTyping', "Type to search PRs across GitHub.");
++			if (this.query) {
++				el.textContent = localize('krt.search.noMatches', "No PRs match.");
++			} else {
++				if (this.scope === 'all-open') {
++					el.textContent = localize('krt.search.emptyAllOpen', "You have no open PRs. Type to search across GitHub.");
++				} else if (this.scope === 'reviewed') {
++					el.textContent = localize('krt.search.emptyReviewed', "You haven't reviewed any PRs. Type to search across GitHub.");
++				} else if (this.scope === 'awaiting-review') {
++					el.textContent = localize('krt.search.emptyAwaiting', "No PRs are awaiting your review. Type to search across GitHub.");
++				}
++			}
+ 			return;
+ 		}
+ 		this.resultRowElements = [];
+@@ -364,7 +373,7 @@ class KrtSearchOverlay extends Disposable {
+ 	private refreshRecents(): void {
+ 		DOM.clearNode(this.recentsGrid);
+ 		const recents = readRecentPullRequests(this.storageService).slice(0, RECENTS_GRID_LIMIT);
+-		if (recents.length === 0) {
++		if (recents.length === 0 || this.query.trim().length > 0) {
+ 			this.recentsContainer.hidden = true;
+ 			return;
+ 		}
