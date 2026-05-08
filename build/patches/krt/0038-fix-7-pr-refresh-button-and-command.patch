@@ -1,0 +1,269 @@
+From f991760e71fee5befb0f1d507847c22207450cf6 Mon Sep 17 00:00:00 2001
+From: julietmoss <juliet.moss@datadoghq.com>
+Date: Fri, 8 May 2026 17:58:06 -0400
+Subject: [PATCH] Fix #7: add refresh button and command to PR view
+
+---
+ .../pr/krtPullRequestEditor.contribution.ts   | 40 ++++++++-
+ .../browser/pr/krtPullRequestEditorPane.css   | 32 ++++++-
+ .../browser/pr/krtPullRequestEditorPane.ts    | 87 ++++++++++++++++++-
+ 3 files changed, 155 insertions(+), 4 deletions(-)
+
+diff --git a/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditor.contribution.ts b/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditor.contribution.ts
+index 22921703154..e72b82c0e41 100644
+--- a/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditor.contribution.ts
++++ b/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditor.contribution.ts
+@@ -3,12 +3,17 @@
+  *  Licensed under the MIT License. See License.txt in the project root for license information.
+  *--------------------------------------------------------------------------------------------*/
+ 
+-import { localize } from '../../../../../nls.js';
++import { KeyCode, KeyMod } from '../../../../../base/common/keyCodes.js';
++import { localize, localize2 } from '../../../../../nls.js';
++import { Action2, registerAction2 } from '../../../../../platform/actions/common/actions.js';
++import { ContextKeyExpr } from '../../../../../platform/contextkey/common/contextkey.js';
+ import { SyncDescriptor } from '../../../../../platform/instantiation/common/descriptors.js';
+-import { IInstantiationService } from '../../../../../platform/instantiation/common/instantiation.js';
++import { IInstantiationService, ServicesAccessor } from '../../../../../platform/instantiation/common/instantiation.js';
++import { KeybindingWeight } from '../../../../../platform/keybinding/common/keybindingsRegistry.js';
+ import { Registry } from '../../../../../platform/registry/common/platform.js';
+ import { EditorPaneDescriptor, IEditorPaneRegistry } from '../../../../browser/editor.js';
+ import { EditorExtensions, IEditorFactoryRegistry, IEditorSerializer } from '../../../../common/editor.js';
++import { IEditorService } from '../../../../services/editor/common/editorService.js';
+ import { KrtPullRequestEditorInput } from './krtPullRequestEditorInput.js';
+ import { KrtPullRequestEditorPane } from './krtPullRequestEditorPane.js';
+ 
+@@ -59,3 +64,34 @@ Registry.as<IEditorPaneRegistry>(EditorExtensions.EditorPane)
+ 		),
+ 		[new SyncDescriptor(KrtPullRequestEditorInput)],
+ 	);
++
++class KrtRefreshPullRequestAction extends Action2 {
++
++	static readonly ID = 'krt.refreshPullRequest';
++
++	constructor() {
++		super({
++			id: KrtRefreshPullRequestAction.ID,
++			title: localize2('krt.refreshPullRequest.title', "Refresh PR"),
++			category: localize2('krt.category', "KRT"),
++			f1: true,
++			precondition: ContextKeyExpr.equals('activeEditor', KrtPullRequestEditorInput.ID),
++			keybinding: {
++				when: ContextKeyExpr.equals('activeEditor', KrtPullRequestEditorInput.ID),
++				weight: KeybindingWeight.WorkbenchContrib + 75,
++				primary: KeyMod.CtrlCmd | KeyCode.KeyR,
++				secondary: [KeyCode.F5],
++				mac: { primary: KeyMod.CtrlCmd | KeyCode.KeyR, secondary: [] },
++			},
++		});
++	}
++
++	override async run(accessor: ServicesAccessor): Promise<void> {
++		const activePane = accessor.get(IEditorService).activeEditorPane;
++		if (activePane instanceof KrtPullRequestEditorPane) {
++			await activePane.refreshPullRequest();
++		}
++	}
++}
++
++registerAction2(KrtRefreshPullRequestAction);
+diff --git a/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.css b/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.css
+index 3f8b7ad0bfa..ca285121dab 100644
+--- a/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.css
++++ b/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.css
+@@ -27,6 +27,37 @@
+ 	min-width: 0;
+ }
+ 
++.krt-pr-editor-header-actions {
++	display: flex;
++	align-items: center;
++	gap: 10px;
++	flex: 0 0 auto;
++}
++
++.krt-pr-refresh-status {
++	font-size: 11.5px;
++	color: var(--vscode-descriptionForeground);
++}
++
++.krt-pr-refresh-button {
++	border: 1px solid var(--vscode-button-border, transparent);
++	border-radius: 5px;
++	background: var(--vscode-button-secondaryBackground, transparent);
++	color: var(--vscode-button-secondaryForeground, var(--vscode-foreground));
++	padding: 4px 10px;
++	font-size: 12px;
++	cursor: pointer;
++}
++
++.krt-pr-refresh-button:hover:not(:disabled) {
++	background: var(--vscode-button-secondaryHoverBackground, var(--vscode-toolbar-hoverBackground));
++}
++
++.krt-pr-refresh-button:disabled {
++	opacity: 0.55;
++	cursor: default;
++}
++
+ .krt-pr-editor-subtitle {
+ 	font-size: 12px;
+ 	opacity: 0.7;
+@@ -43,7 +74,6 @@
+ }
+ 
+ .krt-pr-editor-state-pill {
+-	flex: 0 0 auto;
+ 	font-size: 11px;
+ 	font-weight: 600;
+ 	letter-spacing: 0.04em;
+diff --git a/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.ts b/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.ts
+index a73b4e0e001..61798f2fdde 100644
+--- a/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.ts
++++ b/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.ts
+@@ -85,12 +85,15 @@ export class KrtPullRequestEditorPane extends EditorPane {
+ 	private titleElement!: HTMLElement;
+ 	private subtitleElement!: HTMLElement;
+ 	private statePillElement!: HTMLElement;
++	private refreshButtonElement!: HTMLButtonElement;
++	private refreshStatusElement!: HTMLElement;
+ 	private subModeBarElement!: HTMLElement;
+ 	private bodyElement!: HTMLElement;
+ 
+ 	private currentInput: KrtPullRequestEditorInput | undefined;
+ 	private currentPr: PullRequest | undefined;
+ 	private fetchToken = 0;
++	private refreshing = false;
+ 
+ 	private readonly bodyDisposables = this._register(new DisposableStore());
+ 	private subMode: SubMode = 'pr';
+@@ -152,7 +155,14 @@ export class KrtPullRequestEditorPane extends EditorPane {
+ 		const headerText = DOM.append(this.headerElement, DOM.$('.krt-pr-editor-header-text'));
+ 		this.subtitleElement = DOM.append(headerText, DOM.$('.krt-pr-editor-subtitle'));
+ 		this.titleElement = DOM.append(headerText, DOM.$('h1.krt-pr-editor-title'));
+-		this.statePillElement = DOM.append(this.headerElement, DOM.$('.krt-pr-editor-state-pill'));
++		const headerActions = DOM.append(this.headerElement, DOM.$('.krt-pr-editor-header-actions'));
++		this.refreshStatusElement = DOM.append(headerActions, DOM.$('span.krt-pr-refresh-status'));
++		this.refreshButtonElement = DOM.append(headerActions, DOM.$('button.krt-pr-refresh-button')) as HTMLButtonElement;
++		this.refreshButtonElement.type = 'button';
++		this.refreshButtonElement.textContent = localize('krt.pr.refresh', "Refresh");
++		this.refreshButtonElement.title = localize('krt.pr.refreshTitle', "Refresh pull request from GitHub");
++		this._register(DOM.addDisposableListener(this.refreshButtonElement, 'click', () => void this.refreshPullRequest()));
++		this.statePillElement = DOM.append(headerActions, DOM.$('.krt-pr-editor-state-pill'));
+ 		this.subModeBarElement = DOM.append(this.root, DOM.$('.krt-pr-submode-bar'));
+ 		this.bodyElement = DOM.append(this.root, DOM.$('.krt-pr-editor-body'));
+ 	}
+@@ -160,6 +170,7 @@ export class KrtPullRequestEditorPane extends EditorPane {
+ 	override async setInput(input: KrtPullRequestEditorInput, options: IEditorOptions | undefined, context: IEditorOpenContext, token: CancellationToken): Promise<void> {
+ 		await super.setInput(input, options, context, token);
+ 		this.currentInput = input;
++		this.refreshing = false;
+ 		this.currentPr = undefined;
+ 		this.automationEvents = undefined;
+ 		this.automationLoading = false;
+@@ -215,6 +226,8 @@ export class KrtPullRequestEditorPane extends EditorPane {
+ 	override clearInput(): void {
+ 		this.currentInput = undefined;
+ 		this.currentPr = undefined;
++		this.refreshing = false;
++		this.updateRefreshControl();
+ 		this.fetchToken++;
+ 		this.diffTreeRowsByPath = new Map();
+ 		this.diffTreeCountEl = undefined;
+@@ -243,6 +256,7 @@ export class KrtPullRequestEditorPane extends EditorPane {
+ 		this.titleElement.textContent = localize('krt.pr.loading', "Loading…");
+ 		this.statePillElement.textContent = '';
+ 		this.statePillElement.className = 'krt-pr-editor-state-pill';
++		this.updateRefreshControl();
+ 		this.bodyDisposables.clear();
+ 		DOM.clearNode(this.subModeBarElement);
+ 		DOM.clearNode(this.bodyElement);
+@@ -254,6 +268,7 @@ export class KrtPullRequestEditorPane extends EditorPane {
+ 		this.subtitleElement.textContent = `${pr.owner}/${pr.repo} #${pr.number} · ${pr.author.login}`;
+ 		this.titleElement.textContent = pr.title;
+ 		this.applyStatePill(pr.state);
++		this.updateRefreshControl();
+ 		this.bodyDisposables.clear();
+ 		DOM.clearNode(this.subModeBarElement);
+ 		DOM.clearNode(this.bodyElement);
+@@ -269,6 +284,76 @@ export class KrtPullRequestEditorPane extends EditorPane {
+ 		}
+ 	}
+ 
++	public async refreshPullRequest(): Promise<void> {
++		const input = this.currentInput;
++		if (!input || this.refreshing) {
++			return;
++		}
++
++		this.refreshing = true;
++		this.updateRefreshControl();
++		this.fetchToken++;
++		const myToken = this.fetchToken;
++		try {
++			const pr = await this.pullRequestProvider.getPullRequest(input.url);
++			if (this.currentInput !== input || this.fetchToken !== myToken) {
++				return;
++			}
++			input.setTitle(pr.title);
++			this.currentPr = pr;
++			this.liveComments = [...pr.comments];
++			this.automationEvents = undefined;
++			this.automationLoading = false;
++			this.automationError = undefined;
++			this.diffFiles = undefined;
++			this.diffFilesLoading = false;
++			this.diffFilesError = undefined;
++			this.reviewComments = undefined;
++			this.reviewCommentsLoading = false;
++			this.liveReviewComments = [];
++			this.composingAt = undefined;
++			this.tourFetchToken++;
++			this.tourState = undefined;
++			this.tourLoading = false;
++			this.tourStreaming = false;
++			this.tourError = undefined;
++			this.tourNoKey = false;
++			this.tourSelectedChapterId = undefined;
++			this.storyboardSelectedId = undefined;
++			recordRecentPullRequest(this.krtStorageService, pr);
++			this.renderLoaded(pr);
++		} catch (err) {
++			if (this.currentInput !== input || this.fetchToken !== myToken) {
++				return;
++			}
++			if (isKrtError(err)) {
++				this.logService.warn(`[krt] pr-pane refresh failed (${err.kind}): ${err.message}`);
++				this.renderError(err.kind, err.message, err.hint);
++				return;
++			}
++			this.logService.error('[krt] pr-pane refresh failed', err);
++			this.renderError('unknown', String(err), localize('krt.pr.unknownErrorHint', "See the developer tools console for details."));
++		} finally {
++			if (this.currentInput === input && this.fetchToken === myToken) {
++				this.refreshing = false;
++				this.updateRefreshControl();
++			}
++		}
++	}
++
++	private updateRefreshControl(): void {
++		if (!this.refreshButtonElement || !this.refreshStatusElement) {
++			return;
++		}
++		this.refreshButtonElement.disabled = !this.currentInput || this.refreshing;
++		this.refreshButtonElement.textContent = this.refreshing
++			? localize('krt.pr.refreshing', "Refreshing…")
++			: localize('krt.pr.refresh', "Refresh");
++		this.refreshStatusElement.textContent = this.refreshing
++			? localize('krt.pr.refreshStatus', "Fetching latest PR state…")
++			: '';
++	}
++
+ 	private renderPrView(pr: PullRequest): void {
+ 		this.bodyElement.classList.remove('diff', 'tour', 'storyboard');
+ 		this.bodyElement.classList.add('pr');
+-- 
+2.54.0
+
