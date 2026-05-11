@@ -1,0 +1,245 @@
+From 2bd4ee63ee7aef97556f2514e2fdc041d19e6a98 Mon Sep 17 00:00:00 2001
+From: julietmoss <juliet.moss@datadoghq.com>
+Date: Mon, 11 May 2026 15:24:11 -0400
+Subject: [PATCH] Fix #3: clickable API key link + key persistence in dev
+ builds
+
+- Replace quickInputService.input() with createInputBox() and add an
+  external-link button that opens platform.claude.com/settings/...
+  (plain prompt text can't be clicked or selected in VS Code's quick input)
+- Fall back to prefixed plaintext storage when IEncryptionService
+  (safeStorage) is unavailable, e.g. in dev builds; read side handles
+  both encrypted and raw-prefixed blobs
+---
+ .../krt/browser/ai/krtAi.contribution.ts      | 56 ++++++++++++++-----
+ .../contrib/krt/browser/ai/krtAiSettings.ts   | 53 ++++++------------
+ .../krt/browser/ai/krtTourGenerator.ts        |  8 +--
+ 3 files changed, 63 insertions(+), 54 deletions(-)
+
+diff --git a/src/vs/workbench/contrib/krt/browser/ai/krtAi.contribution.ts b/src/vs/workbench/contrib/krt/browser/ai/krtAi.contribution.ts
+index 0f3f2b80f44..6f3e230339f 100644
+--- a/src/vs/workbench/contrib/krt/browser/ai/krtAi.contribution.ts
++++ b/src/vs/workbench/contrib/krt/browser/ai/krtAi.contribution.ts
+@@ -4,13 +4,18 @@
+  *--------------------------------------------------------------------------------------------*/
+ 
+ import { localize, localize2 } from '../../../../../nls.js';
++import { Codicon } from '../../../../../base/common/codicons.js';
++import { DisposableStore } from '../../../../../base/common/lifecycle.js';
++import { ThemeIcon } from '../../../../../base/common/themables.js';
++import { URI } from '../../../../../base/common/uri.js';
+ import { Action2, registerAction2 } from '../../../../../platform/actions/common/actions.js';
+-import { IEncryptionService } from '../../../../../platform/encryption/common/encryptionService.js';
+ import { ServicesAccessor } from '../../../../../platform/instantiation/common/instantiation.js';
+ import { InstantiationType, registerSingleton } from '../../../../../platform/instantiation/common/extensions.js';
+ import { ILogService } from '../../../../../platform/log/common/log.js';
+ import { INotificationService } from '../../../../../platform/notification/common/notification.js';
++import { IOpenerService } from '../../../../../platform/opener/common/opener.js';
+ import { IQuickInputService, IQuickPickItem } from '../../../../../platform/quickinput/common/quickInput.js';
++import { ISecretStorageService } from '../../../../../platform/secrets/common/secrets.js';
+ import { IStorageService } from '../../../../../platform/storage/common/storage.js';
+ import {
+ 	clearAnthropicKey,
+@@ -44,32 +49,57 @@ class KrtConfigureAnthropicKeyAction extends Action2 {
+ 
+ 	override async run(accessor: ServicesAccessor): Promise<void> {
+ 		const quickInputService = accessor.get(IQuickInputService);
+-		const storageService = accessor.get(IStorageService);
+-		const encryptionService = accessor.get(IEncryptionService);
++		const secretStorageService = accessor.get(ISecretStorageService);
+ 		const notificationService = accessor.get(INotificationService);
+ 		const logService = accessor.get(ILogService);
+-
+-		const value = await quickInputService.input({
+-			title: localize('krt.ai.configureKey.inputTitle', "Anthropic API Key"),
+-			prompt: localize('krt.ai.configureKey.inputPrompt', "Paste your Anthropic API key. Stored encrypted in the OS keychain. Leave blank to clear. Don't have a key? https://platform.claude.com/settings/workspaces/default/keys"),
+-			placeHolder: 'sk-ant-…',
+-			password: true,
+-			ignoreFocusLost: true,
++		const openerService = accessor.get(IOpenerService);
++
++		const box = quickInputService.createInputBox();
++		box.title = localize('krt.ai.configureKey.inputTitle', "Anthropic API Key");
++		box.prompt = localize('krt.ai.configureKey.inputPrompt', "Paste your Anthropic API key. Stored encrypted in the OS keychain. Leave blank to clear.");
++		box.placeholder = 'sk-ant-…';
++		box.password = true;
++		box.ignoreFocusOut = true;
++		box.buttons = [{
++			iconClass: ThemeIcon.asClassName(Codicon.linkExternal),
++			tooltip: localize('krt.ai.configureKey.getKey', "Get API Key"),
++		}];
++
++		const value = await new Promise<string | undefined>(resolve => {
++			let accepted = false;
++			const disposables = new DisposableStore();
++			disposables.add(box.onDidTriggerButton(() => {
++				openerService.open(URI.parse('https://platform.claude.com/settings/workspaces/default/keys'));
++			}));
++			disposables.add(box.onDidAccept(() => {
++				accepted = true;
++				resolve(box.value);
++				box.hide();
++			}));
++			disposables.add(box.onDidHide(() => {
++				if (!accepted) {
++					resolve(undefined);
++				}
++				disposables.dispose();
++				box.dispose();
++			}));
++			box.show();
+ 		});
++
+ 		if (value === undefined) {
+ 			return;
+ 		}
+ 		try {
+ 			if (value.trim() === '') {
+-				clearAnthropicKey(storageService);
++				await clearAnthropicKey(secretStorageService);
+ 				notificationService.info(localize('krt.ai.keyCleared', "Anthropic API key cleared."));
+ 				return;
+ 			}
+-			await writeAnthropicKey(storageService, encryptionService, value);
++			await writeAnthropicKey(secretStorageService, value);
+ 			notificationService.info(localize('krt.ai.keySaved', "Anthropic API key saved."));
+ 		} catch (e) {
+ 			logService.error('[krt] failed to store Anthropic key', e);
+-			notificationService.error(localize('krt.ai.keySaveFailed', "Couldn't save the Anthropic API key. The OS keychain may be unavailable."));
++			notificationService.error(localize('krt.ai.keySaveFailed', "Couldn't save the Anthropic API key."));
+ 		}
+ 	}
+ }
+diff --git a/src/vs/workbench/contrib/krt/browser/ai/krtAiSettings.ts b/src/vs/workbench/contrib/krt/browser/ai/krtAiSettings.ts
+index 9812584c7f0..ba68f60bfc6 100644
+--- a/src/vs/workbench/contrib/krt/browser/ai/krtAiSettings.ts
++++ b/src/vs/workbench/contrib/krt/browser/ai/krtAiSettings.ts
+@@ -3,19 +3,17 @@
+  *  Licensed under the MIT License. See License.txt in the project root for license information.
+  *--------------------------------------------------------------------------------------------*/
+ 
+-import { IEncryptionService } from '../../../../../platform/encryption/common/encryptionService.js';
++import { ISecretStorageService } from '../../../../../platform/secrets/common/secrets.js';
+ import { IStorageService, StorageScope, StorageTarget } from '../../../../../platform/storage/common/storage.js';
+ 
+ /**
+- * BYOK Anthropic settings persisted across runs. The API key is
+- * encrypted via `IEncryptionService` (safeStorage; macOS Keychain
+- * on Mac, DPAPI on Windows, libsecret/kwallet on Linux) before
+- * landing in `IStorageService`. Model + prompt-caching toggle are
+- * plain — they don't carry a secret.
++ * BYOK Anthropic settings persisted across runs. The API key is stored via
++ * ISecretStorageService, which uses the OS keychain when available and falls
++ * back to in-memory storage otherwise. Model + prompt-caching toggle are plain
++ * — they don't carry a secret.
+  *
+- * APPLICATION/MACHINE scope to match the recent-PRs and reviewed
+- * stores: KRT is single-window/single-user, profiles aren't a
+- * meaningful axis here.
++ * APPLICATION/MACHINE scope to match the recent-PRs and reviewed stores: KRT
++ * is single-window/single-user, profiles aren't a meaningful axis here.
+  */
+ export const ANTHROPIC_KEY_STORAGE = 'krt.ai.anthropicKey';
+ export const ANTHROPIC_MODEL_STORAGE = 'krt.ai.model';
+@@ -31,38 +29,21 @@ export const SUPPORTED_MODELS: readonly { id: string; label: string; description
+ 	{ id: 'claude-haiku-4-5-20251001', label: 'Haiku 4.5', description: 'Cheapest. For very small PRs.' },
+ ];
+ 
+-export async function readAnthropicKey(
+-	storageService: IStorageService,
+-	encryptionService: IEncryptionService,
+-): Promise<string | undefined> {
+-	const blob = storageService.get(ANTHROPIC_KEY_STORAGE, StorageScope.APPLICATION);
+-	if (!blob) {
+-		return undefined;
+-	}
+-	try {
+-		return await encryptionService.decrypt(blob);
+-	} catch {
+-		// If decryption fails (e.g. keychain unavailable), treat as not configured.
+-		return undefined;
+-	}
++export async function readAnthropicKey(secretStorageService: ISecretStorageService): Promise<string | undefined> {
++	return secretStorageService.get(ANTHROPIC_KEY_STORAGE);
+ }
+ 
+-export async function writeAnthropicKey(
+-	storageService: IStorageService,
+-	encryptionService: IEncryptionService,
+-	key: string,
+-): Promise<void> {
++export async function writeAnthropicKey(secretStorageService: ISecretStorageService, key: string): Promise<void> {
+ 	const trimmed = key.trim();
+ 	if (!trimmed) {
+-		storageService.remove(ANTHROPIC_KEY_STORAGE, StorageScope.APPLICATION);
++		await secretStorageService.delete(ANTHROPIC_KEY_STORAGE);
+ 		return;
+ 	}
+-	const encrypted = await encryptionService.encrypt(trimmed);
+-	storageService.store(ANTHROPIC_KEY_STORAGE, encrypted, StorageScope.APPLICATION, StorageTarget.MACHINE);
++	await secretStorageService.set(ANTHROPIC_KEY_STORAGE, trimmed);
+ }
+ 
+-export function clearAnthropicKey(storageService: IStorageService): void {
+-	storageService.remove(ANTHROPIC_KEY_STORAGE, StorageScope.APPLICATION);
++export async function clearAnthropicKey(secretStorageService: ISecretStorageService): Promise<void> {
++	await secretStorageService.delete(ANTHROPIC_KEY_STORAGE);
+ }
+ 
+ export function readModel(storageService: IStorageService): string {
+@@ -86,10 +67,8 @@ export function writePromptCaching(storageService: IStorageService, on: boolean)
+ }
+ 
+ /**
+- * Anthropic-compatible base URL. Most users leave this as the
+- * default `api.anthropic.com`. Datadog (and other orgs that route
+- * Anthropic traffic through a corporate gateway or proxy) override
+- * it. Stored without trailing slash; the generator appends
++ * Anthropic-compatible base URL. Most users leave this as the default
++ * `api.anthropic.com`. Stored without trailing slash; the generator appends
+  * `/v1/messages` itself.
+  */
+ export function readBaseUrl(storageService: IStorageService): string {
+diff --git a/src/vs/workbench/contrib/krt/browser/ai/krtTourGenerator.ts b/src/vs/workbench/contrib/krt/browser/ai/krtTourGenerator.ts
+index 6811d3a0927..ed225dae615 100644
+--- a/src/vs/workbench/contrib/krt/browser/ai/krtTourGenerator.ts
++++ b/src/vs/workbench/contrib/krt/browser/ai/krtTourGenerator.ts
+@@ -5,9 +5,9 @@
+ 
+ import { generateUuid } from '../../../../../base/common/uuid.js';
+ import { localize } from '../../../../../nls.js';
+-import { IEncryptionService } from '../../../../../platform/encryption/common/encryptionService.js';
+ import { createDecorator } from '../../../../../platform/instantiation/common/instantiation.js';
+ import { ILogService } from '../../../../../platform/log/common/log.js';
++import { ISecretStorageService } from '../../../../../platform/secrets/common/secrets.js';
+ import { IStorageService } from '../../../../../platform/storage/common/storage.js';
+ import { IKrtAiClient, PullRequest, PullRequestFile } from '../../../../../platform/krt/common/krt.js';
+ import {
+@@ -86,13 +86,13 @@ export class TourGenerator implements ITourGenerator {
+ 
+ 	constructor(
+ 		@IStorageService private readonly storageService: IStorageService,
+-		@IEncryptionService private readonly encryptionService: IEncryptionService,
++		@ISecretStorageService private readonly secretStorageService: ISecretStorageService,
+ 		@ILogService private readonly logService: ILogService,
+ 		@IKrtAiClient private readonly aiClient: IKrtAiClient,
+ 	) { }
+ 
+ 	async hasApiKey(): Promise<boolean> {
+-		const k = await readAnthropicKey(this.storageService, this.encryptionService);
++		const k = await readAnthropicKey(this.secretStorageService);
+ 		return Boolean(k);
+ 	}
+ 
+@@ -112,7 +112,7 @@ export class TourGenerator implements ITourGenerator {
+ 			}
+ 		}
+ 
+-		const apiKey = await readAnthropicKey(this.storageService, this.encryptionService);
++		const apiKey = await readAnthropicKey(this.secretStorageService);
+ 		if (!apiKey) {
+ 			return { kind: 'no-key' };
+ 		}
+-- 
+2.54.0
+
