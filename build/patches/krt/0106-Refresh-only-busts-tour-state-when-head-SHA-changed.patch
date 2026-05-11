@@ -1,0 +1,52 @@
+From fb013a5d866c779261be13ced3b0a6855734dcb0 Mon Sep 17 00:00:00 2001
+From: julietmoss <juliet.moss@datadoghq.com>
+Date: Mon, 11 May 2026 16:59:03 -0400
+Subject: [PATCH] Refresh only busts tour state when head SHA changed
+
+---
+ .../browser/pr/krtPullRequestEditorPane.ts    | 22 ++++++++++++-------
+ 1 file changed, 14 insertions(+), 8 deletions(-)
+
+diff --git a/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.ts b/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.ts
+index 61798f2fdde..19c56e98d8e 100644
+--- a/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.ts
++++ b/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.ts
+@@ -295,6 +295,7 @@ export class KrtPullRequestEditorPane extends EditorPane {
+ 		this.fetchToken++;
+ 		const myToken = this.fetchToken;
+ 		try {
++			const previousSha = this.currentPr?.head.sha;
+ 			const pr = await this.pullRequestProvider.getPullRequest(input.url);
+ 			if (this.currentInput !== input || this.fetchToken !== myToken) {
+ 				return;
+@@ -312,14 +313,19 @@ export class KrtPullRequestEditorPane extends EditorPane {
+ 			this.reviewCommentsLoading = false;
+ 			this.liveReviewComments = [];
+ 			this.composingAt = undefined;
+-			this.tourFetchToken++;
+-			this.tourState = undefined;
+-			this.tourLoading = false;
+-			this.tourStreaming = false;
+-			this.tourError = undefined;
+-			this.tourNoKey = false;
+-			this.tourSelectedChapterId = undefined;
+-			this.storyboardSelectedId = undefined;
++			// Only bust tour state when new commits were pushed — the tour cache
++			// is keyed by headSha, so a SHA change means a cache miss and
++			// regeneration. If the SHA is unchanged, keep the existing tour.
++			if (!previousSha || previousSha !== pr.head.sha) {
++				this.tourFetchToken++;
++				this.tourState = undefined;
++				this.tourLoading = false;
++				this.tourStreaming = false;
++				this.tourError = undefined;
++				this.tourNoKey = false;
++				this.tourSelectedChapterId = undefined;
++				this.storyboardSelectedId = undefined;
++			}
+ 			recordRecentPullRequest(this.krtStorageService, pr);
+ 			this.renderLoaded(pr);
+ 		} catch (err) {
+-- 
+2.54.0
+
