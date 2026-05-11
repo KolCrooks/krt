@@ -328,7 +328,14 @@ Rules:
   CI status, post a comment.
 
 ### Phase 6 — Review view: Diff sub-mode (1.5 weeks)
-- File tree (folder-grouped, status dots, +/− counts) + Monaco diff editor for
+> **Final state**: rebuilt in [Phase 10 — Diff view rebuild](docs/phases/phase-10-diff-rebuild.md)
+> (patches 0067-0088). The original `<div>`-stacked patch-text renderer this
+> phase shipped was thrown out and replaced with one stock VS Code
+> `DiffEditorWidget` per file, content-sized into a flat scrollable stack.
+> File-tree, mark-reviewed, side-by-side / inline toggle survived; everything
+> below the file tree is new code.
+
+- File tree (folder-grouped, status dots, +/- counts) + Monaco diff editor for
   each file. Single scroll surface; active-file highlight scroll-syncs.
 - Per-file actions: comment, mark reviewed.
 - Inline comments anchored to lines (read existing PR review comments; create
@@ -364,43 +371,187 @@ Rules:
   highlight relationships.
 
 ### Phase 8.5 — Monaco-backed diff views (1 week)
+> **Final state**: superseded by [Phase 10 — Diff view rebuild](docs/phases/phase-10-diff-rebuild.md)
+> (patches 0067-0088). The unified-diff-derived virtual models with blank-line
+> padding (and the line-translation map they implied) were abandoned. Phase 10
+> uses real `file://` content on the modified side and full-content
+> `krt-git://` content on the base side, so model line == real file line on
+> both sides — no padding, no translation. Monaco diff rendering, language
+> detection / syntax highlighting goal preserved.
+
 - Replace the hand-rolled `<div>`-based unified-diff renderer used by the
   Diff sub-mode and the Tour mini-diffs with embedded Monaco diff editors.
-- Hosts on `IModelService` text models created from the PR file's
-  base/head content (or unified-diff-derived virtual models when full
-  content isn't easily available).
+- Hosts on `IModelService` text models created from unified-diff-derived
+  virtual models with blank-line padding for unknown context. Real
+  base/head content (and the LSP that comes with it) lands in Phase 8.6.
 - Wire language detection via VS Code's existing language detection so
   syntax highlighting "just works" for Rust/Go/TS/Python/etc.
-- **LSP "go to definition" / hover / references inside the diff**:
-  enable command-click on tokens. This requires the file's text model to
-  be language-server-aware, which means feeding it through the same
-  `ITextModelService` path Editor view (Phase 9) uses. Sequencing:
-  this phase lands first (read-only Monaco views), Phase 9 adds editing.
-- **Demo**: open a Rust PR, click a function name in the diff, jump to
-  its definition, see hover docs.
+- **Demo**: Diff / Tour Chapters / Tour Reading / Storyboard all render
+  Monaco side-by-side diffs with syntax colours. Inline review-comment
+  threads + composer attach as Monaco view zones.
 
-### Phase 9 — Editor view (1 week)
-- Mostly stock Monaco. Custom: file tree styled to match the design, status
-  bar minimized, AI context panel.
-- Read-only by default for files in the PR's base branch; editable when on the
-  feature branch (caveat: need clear UX for editing-during-review).
-- Language servers via extensions: keep upstream's "you opened a `.rs` /
-  `.go` / `.py` file — install the recommended extension?" prompt, repointed
-  at open-vsx so the recommendations are install-able from our gallery.
-- Verify hover docs, diagnostics, go-to-definition, and find-references work
-  for at least Rust (rust-analyzer), Go (gopls), TypeScript (built-in), and
-  Python (pylance) before signing off the phase.
-- **Demo**: open any file from a PR diff in the Editor mode, install the
-  language extension when prompted, and get full IntelliSense.
+### Phase 8.6 — Workspace registry + LSP via real file URIs (1 week)
+> **Final state**: workspace registry survives unchanged. URI strategy
+> evolved in [Phase 10 — Diff view rebuild](docs/phases/phase-10-diff-rebuild.md)
+> (patches 0067-0088): `krt-git://` metadata moved from authority-encoded
+> (which `URI.from` lowercases) to query-encoded JSON, and the
+> `KrtGitContentProvider` gained a `gh` Contents API fallback for SHAs the
+> local clone hasn't fetched. `git merge-base` replaced `pr.base.sha` for
+> base-side resolution so target-tip movement doesn't break the diff.
 
-### Phase 10 — Tweaks panel + theming variants (3 days)
-- Bottom-right floating panel with sections: Tour layout, Theme accent (Indigo/
-  Ember/Pine/Graphite), Density (Compact/Regular), Window chrome toggle.
-- Persist via `IPreferencesService`.
-- Hot-reload accent CSS variables on change.
-- **Demo**: live-switch accents and watch the whole UI restyle without reload.
+- Workspace registry: an explicit list of local repository folders KRT
+  is allowed to surface PRs from. Add / remove via Settings → KRT or
+  the PR Search overlay. Stored in `IStorageService` (application
+  scope).
+- PR Search filters to those repos: GraphQL query gets `repo:o/n`
+  filters per registered workspace.
+- `KrtMonacoDiffView` switches URI strategy when the PR's repo matches
+  a workspace: head model uses the real `file://` URI of the working
+  copy, base model uses a `krt-git://` URI backed by
+  `git -C <workspace> show ${baseSha}:${path}`. Models go through
+  `ITextModelService.createModelReference` so language extensions
+  activate the normal way.
+- Empty state when no workspaces registered: "Add a workspace to start
+  finding PRs" CTA.
+- **Demo**: add a Cargo repo as a workspace, search shows that repo's
+  PRs, open one, command-click a function name in the diff -> jump to
+  its definition via rust-analyzer.
 
-### Phase 11 — Polish + packaging for public OSS release (2 weeks)
+### Phase 8.7 — Auto-switch on review (jj + git, 1 week)
+- When opening a PR for a registered workspace, prompt to switch the
+  workspace's working copy to the PR's head commit.
+  - **jj-managed workspace**: `git fetch +refs/pull/N/head:refs/remotes/origin/krt-pr/N`
+    → `jj git import` → `jj new ${headSha}` (the fetch+import is
+    required for forks and any PR head the local clone hasn't pulled
+    yet). Non-destructive — KRT captures the pre-switch op id and
+    returns via `jj op restore <opId>`, which works even when the
+    previous change was empty + got auto-abandoned.
+  - **plain git, clean tree**: `gh pr checkout ${n}`.
+  - **plain git, dirty tree**: strong warning dialog, then
+    `git stash push -m "krt: PR #${n}"` followed by checkout. KRT
+    reminds the user to `git stash pop` when the PR closes (manual,
+    intentionally — auto-popping is too surprising).
+- Resume token persisted to `IStorageService` so even a crash mid-review
+  is recoverable.
+- Workbench refresh after switch so the file tree, status bar, and any
+  open editors re-read.
+- **Demo**: open a PR in a registered jj-colocated repo, confirm the
+  switch dialog, files in the Editor view reflect the PR's head, close
+  the PR tab → prompted to return → working copy back where it was.
+
+### Phase 9 — Workbench shell + Editor view (2 weeks)
+- Workbench chrome aligns with the demo:
+  - Replace the stock title bar with the demo's PR header (PR number,
+    title, state pill, in-app refresh + "Open on GitHub" buttons). Drop
+    the temporary KRT pill from the status bar.
+  - Functional left rail: Search button opens the PR Search overlay; PR
+    button reveals open PR tabs; Code button switches to the standalone
+    editor view. Today these buttons are no-ops.
+  - Editor view (Code rail mode) gets its own tab group, independent of
+    the PR view's tabs — flipping rail modes doesn't churn either.
+  - Remove the Copilot side panel entirely (KRT doesn't ship it).
+    Terminal becomes vertical-by-default on the right, surfaced via a
+    Terminal button that takes Copilot's old slot.
+  - Add the Extensions marketplace button to the rail, immediately above
+    Settings.
+  - Apply the demo's color theming as default (indigo accent, compact
+    density). The Tweaks panel idea is dropped — these are defaults, not
+    user-tunable variants.
+- Editor view (mostly stock Monaco):
+  - Read-only by default for files in the PR's base; editable when the
+    workspace is on the feature branch (caveat: clear UX for editing-
+    during-review — likely tied to Phase 10's review mode).
+  - LSP via extensions repointed at open-vsx; keep upstream's "install
+    the recommended extension?" prompt.
+  - Verify hover / diagnostics / go-to-definition / find-references for
+    Rust (rust-analyzer), Go (gopls), TypeScript (built-in), Python.
+- **Demo**: rail buttons all do something useful; vertical terminal
+  toggles via the Terminal button; opening a file via the Code rail
+  surfaces full IntelliSense; the Tweaks panel doesn't exist.
+
+### Phase 9.5 — Native comments API migration (~3 sessions)
+> **Final state**: rebuilt from scratch in [Phase 10 — Diff view rebuild](docs/phases/phase-10-diff-rebuild.md)
+> (patches 0067-0088). The 9.5 attempt at a `realLines` translation map for
+> synthetic base text was abandoned along with the patch-text base. The new
+> `KrtPrCommentController` (patch 0071) uses real file line numbers
+> directly. The `bumpDataProvider` workaround (patch 0076) for
+> `editor.contrib.review`'s `AfterFirstRender` lifecycle is the new
+> canonical reference for that subtle interaction.
+
+- Replace KRT's custom view-zone-based review-comment overlay with the
+  workbench's `ICommentService` infrastructure. End state: GitHub-style
+  native gutter affordances (the `+` hover icon on commentable lines),
+  native comment-thread chrome (collapse, reply, resolve, reactions),
+  and a draft-review state model that Phase 10 builds on directly.
+- **Session A — Foundation**: register a `KrtPrCommentController`
+  against `ICommentService` and surface existing review comments
+  through it. Set `commentingRanges` so the native gutter shows the
+  `+` affordance. Custom view zones for threads stay in place; double
+  rendering is the accepted price for the intermediate.
+- **Session B — Posting**: hook `createCommentThreadTemplate` and the
+  thread-accept flow to post to GitHub via
+  `IPullRequestProvider.postReviewComment`. Add
+  `IContinueOnCommentProvider` for typed-but-not-submitted comment
+  bodies.
+- **Session C — Cleanup**: remove the custom view-zone overlay
+  (`mountComposer` / `dismountComposer` / `attachReviewCommentZones` /
+  `renderInlineComposer` and their CSS). Verify `liveReviewComments`
+  flow still works with the native UI.
+- Lands BEFORE Phase 10 — Phase 10's draft / submit / reply features
+  should target the native thread surface, not the custom one.
+- **Demo**: open a PR; native thread widgets render at the right
+  lines on both sides of the diff; native gutter `+` works for
+  posting; the Comments view (Activity Bar) lists every thread on
+  the PR.
+- Working checklist: `docs/phases/phase-09-5-native-comments.md`.
+
+### Phase 10 — Review mode + comment fidelity (1.5 weeks)
+- Replace the "Check Out" button on the PR header with a "Start Review"
+  button that:
+  - Runs the existing Phase 8.7 check-out flow.
+  - Enters review-composition mode where inline comments accumulate as
+    a draft review attached to the PR (multiple PRs can carry concurrent
+    drafts).
+  - Exposes Submit / Discard. Submit posts the entire draft to GitHub in
+    one batch; Discard drops the draft and returns the workspace via the
+    resume token.
+- Mode-switching UI (PR / Diff / Tour / Storyboard) restyled to match
+  the demo's segmented control. Refresh button moves to the left of the
+  PR title. Add an "Open on GitHub" affordance on the PR header.
+- Comment + automation fidelity (these are mostly bug-fix work, but
+  share the comment-rendering surface area review mode lives on):
+  - Reply-to-comment threading on review comments.
+  - Per-workspace local "bot list": GitHub usernames whose comments
+    route to the Automation tab instead of Discussion. Add via a small
+    command + persist to `IStorageService`.
+  - Markdown rendering supports inline HTML — at minimum `<details>` —
+    in comments and PR descriptions.
+  - User avatar pops next to authors in Discussion.
+  - Checks tab: dedupe re-runs (currently shows duplicates, sometimes
+    misses runs); restyle to the demo's design.
+- **Demo**: open a PR, click Start Review, leave inline comments + a
+  reply, submit; everything lands on GitHub at once. Add a bot user;
+  their comments shift to Automation. `<details>` blocks render. Avatar
+  pops next to commenters.
+
+### Phase 11 — Diff + tour polish + AI inline chips (1 week)
+- Diff view:
+  - File list becomes a tree (vs flat list) with collapse-by-folder.
+  - Clicking a filename opens that file in the Editor view (Phase 9
+    hand-off) rather than just scrolling within the diff.
+- Tour:
+  - Generate a final "Coverage" chapter that walks any diff lines the
+    other chapters didn't touch, ensuring full coverage.
+  - Reading mode uses the full screen width (currently capped narrow,
+    feels cramped on wide monitors).
+- AI inline chip comments: the tour generator produces short, line-
+  anchored review nudges that render as chips inside the diff editor.
+  Hover-to-expand or per-chapter.
+- **Demo**: open a Rust PR, browse the diff with the file tree; click a
+  filename to jump into the Editor view; flip to Tour, see the Coverage
+  chapter, see chip comments inside the diff guiding what to look at.
+
+### Phase 12 — Polish + packaging for public OSS release (2 weeks)
 - Window chrome polish: drop shadow, rounded corners (the "windowed" mode in
   the design).
 - Keyboard shortcuts: `⌘K` (search), `⌘1/2/3/4` (rail modes), `⌘W` (close tab),
@@ -422,11 +573,11 @@ Rules:
   install on a clean machine, launch, use, get an in-app update prompt when
   we publish v1.0.1.
 
-### Phase 12 — Public beta (open-ended)
+### Phase 13 — Public beta (open-ended)
 - Tag a `v0.1.0-beta`, write a launch post, share with a small group, collect
   feedback in GitHub issues. Iterate. Ship v1.
 
-Aggregate ~16-18 weeks of work for a single engineer, less with a small team.
+Aggregate ~22-25 weeks of work for a single engineer, less with a small team.
 
 ---
 
@@ -459,6 +610,14 @@ The early-architecture questions are resolved as follows:
    a hard requirement: no Microsoft assets, no "Visual Studio" / "VSCode"
    strings in the binary, MIT LICENSE + NOTICE file crediting upstream,
    signed installers per platform, update feed on GitHub Releases.
+8. **Workspace model** — KRT is a per-repo tool. Users register a list of
+   local repository folders ("workspaces") and PR Search filters to those
+   repos only. Diff models are backed by the local clone (real `file://`
+   URI for head, `git show` for base) so language servers activate
+   normally. Reviewing a PR optionally switches the workspace's working
+   copy to the PR head — non-destructively via `jj new` when the
+   workspace is jj-managed, or via `git stash + checkout` (behind a
+   strong warning dialog) for plain git. Established in Phases 8.6 / 8.7.
 
 ---
 

@@ -1,0 +1,567 @@
+From e2301d16315db200006c2fa2e75e8f2d330146e6 Mon Sep 17 00:00:00 2001
+From: Kol Crooks <kol.crooks@datadoghq.com>
+Date: Fri, 8 May 2026 14:20:52 -0400
+Subject: [PATCH] Phase 10 Batch 4: per-workspace bot list
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Comments authored by users on a workspace's bot list now route to
+Automation instead of Discussion. The list is per-workspace (keyed by
+folder URI) and persisted under `krt.botList.v1`.
+
+- `IKrtBotListService` exposes `getBots / addBot / removeBot / isBot`
+  plus an `onDidChange(folderUri)` event so the active PR pane re-
+  renders when the list changes.
+- `KRT: Add Bot User…` builds its picker from the active PR's
+  commenters (issue + review + automation actors) and falls back to
+  free-form input. `KRT: Remove Bot User…` quick-picks from the
+  workspace's existing entries.
+- The activity classifier in `KrtPullRequestEditorPane` partitions
+  `liveComments` into Discussion / bot piles per PR. Bot comments are
+  merged into the Automation timeline by timestamp so the row order
+  tracks chronology.
+---
+ .../krt/browser/pr/krtBotList.contribution.ts | 204 ++++++++++++++++++
+ .../krt/browser/pr/krtBotListService.ts       | 138 ++++++++++++
+ .../pr/krtPullRequestEditor.contribution.ts   |   1 +
+ .../browser/pr/krtPullRequestEditorPane.ts    |  84 ++++++--
+ 4 files changed, 415 insertions(+), 12 deletions(-)
+ create mode 100644 src/vs/workbench/contrib/krt/browser/pr/krtBotList.contribution.ts
+ create mode 100644 src/vs/workbench/contrib/krt/browser/pr/krtBotListService.ts
+
+diff --git a/src/vs/workbench/contrib/krt/browser/pr/krtBotList.contribution.ts b/src/vs/workbench/contrib/krt/browser/pr/krtBotList.contribution.ts
+new file mode 100644
+index 00000000000..dd44cd41e40
+--- /dev/null
++++ b/src/vs/workbench/contrib/krt/browser/pr/krtBotList.contribution.ts
+@@ -0,0 +1,204 @@
++/*---------------------------------------------------------------------------------------------
++ *  Copyright (c) Microsoft Corporation. All rights reserved.
++ *  Licensed under the MIT License. See License.txt in the project root for license information.
++ *--------------------------------------------------------------------------------------------*/
++
++import { localize, localize2 } from '../../../../../nls.js';
++import { Action2, registerAction2 } from '../../../../../platform/actions/common/actions.js';
++import { InstantiationType, registerSingleton } from '../../../../../platform/instantiation/common/extensions.js';
++import { ServicesAccessor } from '../../../../../platform/instantiation/common/instantiation.js';
++import { INotificationService, Severity } from '../../../../../platform/notification/common/notification.js';
++import { IQuickInputService, IQuickPickItem } from '../../../../../platform/quickinput/common/quickInput.js';
++import { IEditorService } from '../../../../services/editor/common/editorService.js';
++import { IKrtBotListService, KrtBotListService } from './krtBotListService.js';
++import { getCached } from './krtPrCache.js';
++import { KrtPullRequestEditorInput } from './krtPullRequestEditorInput.js';
++import { IKrtWorkspaceRegistry, KrtWorkspace } from '../workspace/krtWorkspaceRegistry.js';
++
++const KRT_CATEGORY = localize2('krt.category', "KRT");
++
++registerSingleton(IKrtBotListService, KrtBotListService, InstantiationType.Delayed);
++
++/**
++ * Picks the workspace the bot list edits should target. If a PR editor
++ * is open, prefer that PR's workspace. If only one workspace is
++ * registered, use it. Otherwise quick-pick from the registered set.
++ */
++async function pickActiveWorkspace(accessor: ServicesAccessor): Promise<KrtWorkspace | undefined> {
++	const editorService = accessor.get(IEditorService);
++	const registry = accessor.get(IKrtWorkspaceRegistry);
++	const quickInput = accessor.get(IQuickInputService);
++
++	const activeInput = editorService.activeEditor;
++	if (activeInput instanceof KrtPullRequestEditorInput) {
++		const ws = registry.findByOwnerRepo(activeInput.owner, activeInput.repo);
++		if (ws) {
++			return ws;
++		}
++	}
++	const all = registry.getAll();
++	if (all.length === 0) {
++		return undefined;
++	}
++	if (all.length === 1) {
++		return all[0];
++	}
++	type WorkspacePick = IQuickPickItem & { workspace: KrtWorkspace };
++	const picked = await quickInput.pick<WorkspacePick>(
++		all.map(ws => ({
++			label: `${ws.owner}/${ws.repo}`,
++			description: ws.folderPath,
++			workspace: ws,
++		})),
++		{ placeHolder: localize('krt.bots.pickWorkspace', "Pick a workspace") },
++	);
++	return picked?.workspace;
++}
++
++class KrtAddBotAction extends Action2 {
++	static readonly ID = 'krt.bots.add';
++
++	constructor() {
++		super({
++			id: KrtAddBotAction.ID,
++			title: localize2('krt.bots.add.title', "Add Bot User…"),
++			category: KRT_CATEGORY,
++			f1: true,
++		});
++	}
++
++	override async run(accessor: ServicesAccessor): Promise<void> {
++		const editorService = accessor.get(IEditorService);
++		const botList = accessor.get(IKrtBotListService);
++		const notification = accessor.get(INotificationService);
++		const quickInput = accessor.get(IQuickInputService);
++
++		const workspace = await pickActiveWorkspace(accessor);
++		if (!workspace) {
++			notification.notify({
++				severity: Severity.Info,
++				message: localize(
++					'krt.bots.add.noWorkspace',
++					"Add a workspace first — bot lists are scoped per workspace.",
++				),
++			});
++			return;
++		}
++
++		// Build the picker from the active PR's commenters when one is
++		// open. Free-form input is the fallback when no PR is active.
++		const candidates = new Map<string, string>(); // login -> displayName
++		const activeInput = editorService.activeEditor;
++		if (activeInput instanceof KrtPullRequestEditorInput) {
++			const cached = getCached(activeInput.url);
++			if (cached) {
++				const seen = new Set<string>();
++				const collect = (login: string) => {
++					if (login && !seen.has(login.toLowerCase())) {
++						seen.add(login.toLowerCase());
++						candidates.set(login, login);
++					}
++				};
++				for (const c of cached.pr.comments) { collect(c.author.login); }
++				for (const ev of cached.activity ?? []) { collect(ev.actor.login); }
++				if (cached.reviewComments) {
++					for (const c of cached.reviewComments) { collect(c.author.login); }
++				}
++			}
++		}
++
++		const existing = new Set(botList.getBots(workspace.folderUri).map(l => l.toLowerCase()));
++		const picker = quickInput.createQuickPick();
++		picker.title = localize('krt.bots.add.pickerTitle', "Add bot user — {0}/{1}", workspace.owner, workspace.repo);
++		picker.placeholder = localize('krt.bots.add.placeholder', "Pick a commenter or type a GitHub username");
++		picker.items = [...candidates.values()]
++			.filter(login => !existing.has(login.toLowerCase()))
++			.sort()
++			.map(login => ({ label: login }));
++
++		const login = await new Promise<string | undefined>(resolve => {
++			picker.onDidAccept(() => {
++				const selected = picker.selectedItems[0]?.label;
++				const typed = picker.value.trim();
++				resolve(selected ?? (typed.length > 0 ? typed : undefined));
++				picker.hide();
++			});
++			picker.onDidHide(() => resolve(undefined));
++			picker.show();
++		});
++		picker.dispose();
++		if (!login) {
++			return;
++		}
++
++		botList.addBot(workspace.folderUri, login);
++		notification.notify({
++			severity: Severity.Info,
++			message: localize(
++				'krt.bots.add.success',
++				"Added `{0}` to the bot list for {1}/{2}.",
++				login,
++				workspace.owner,
++				workspace.repo,
++			),
++		});
++	}
++}
++
++class KrtRemoveBotAction extends Action2 {
++	static readonly ID = 'krt.bots.remove';
++
++	constructor() {
++		super({
++			id: KrtRemoveBotAction.ID,
++			title: localize2('krt.bots.remove.title', "Remove Bot User…"),
++			category: KRT_CATEGORY,
++			f1: true,
++		});
++	}
++
++	override async run(accessor: ServicesAccessor): Promise<void> {
++		const botList = accessor.get(IKrtBotListService);
++		const notification = accessor.get(INotificationService);
++		const quickInput = accessor.get(IQuickInputService);
++
++		const workspace = await pickActiveWorkspace(accessor);
++		if (!workspace) {
++			return;
++		}
++		const bots = botList.getBots(workspace.folderUri);
++		if (bots.length === 0) {
++			notification.notify({
++				severity: Severity.Info,
++				message: localize(
++					'krt.bots.remove.empty',
++					"No bots configured for {0}/{1}.",
++					workspace.owner,
++					workspace.repo,
++				),
++			});
++			return;
++		}
++		const picked = await quickInput.pick(
++			bots.map(login => ({ label: login })),
++			{ placeHolder: localize('krt.bots.remove.placeholder', "Pick a bot to remove") },
++		);
++		if (!picked) {
++			return;
++		}
++		botList.removeBot(workspace.folderUri, picked.label);
++		notification.notify({
++			severity: Severity.Info,
++			message: localize(
++				'krt.bots.remove.success',
++				"Removed `{0}` from the bot list for {1}/{2}.",
++				picked.label,
++				workspace.owner,
++				workspace.repo,
++			),
++		});
++	}
++}
++
++registerAction2(KrtAddBotAction);
++registerAction2(KrtRemoveBotAction);
+diff --git a/src/vs/workbench/contrib/krt/browser/pr/krtBotListService.ts b/src/vs/workbench/contrib/krt/browser/pr/krtBotListService.ts
+new file mode 100644
+index 00000000000..74520a1eb78
+--- /dev/null
++++ b/src/vs/workbench/contrib/krt/browser/pr/krtBotListService.ts
+@@ -0,0 +1,138 @@
++/*---------------------------------------------------------------------------------------------
++ *  Copyright (c) Microsoft Corporation. All rights reserved.
++ *  Licensed under the MIT License. See License.txt in the project root for license information.
++ *--------------------------------------------------------------------------------------------*/
++
++import { Emitter, Event } from '../../../../../base/common/event.js';
++import { Disposable } from '../../../../../base/common/lifecycle.js';
++import { createDecorator } from '../../../../../platform/instantiation/common/instantiation.js';
++import { ILogService } from '../../../../../platform/log/common/log.js';
++import { IStorageService, StorageScope, StorageTarget } from '../../../../../platform/storage/common/storage.js';
++
++const STORAGE_KEY = 'krt.botList.v1';
++
++/**
++ * Per-workspace allowlist of GitHub usernames to treat as automation
++ * (bots). Comments authored by a listed user route to the Automation
++ * tab instead of Discussion. Scoped per workspace folder URI so a
++ * user's "internal bots" stay tied to the repo they were declared for.
++ */
++export interface IKrtBotListService {
++	readonly _serviceBrand: undefined;
++
++	readonly onDidChange: Event<string>;
++
++	/** Logins registered as bots for the given workspace. Empty array if no entry. */
++	getBots(workspaceFolderUri: string): readonly string[];
++	isBot(workspaceFolderUri: string, login: string): boolean;
++	addBot(workspaceFolderUri: string, login: string): void;
++	removeBot(workspaceFolderUri: string, login: string): void;
++}
++
++export const IKrtBotListService = createDecorator<IKrtBotListService>('krtBotListService');
++
++interface PersistedEnvelope {
++	readonly version: 1;
++	readonly bots: { readonly [workspaceFolderUri: string]: readonly string[] };
++}
++
++export class KrtBotListService extends Disposable implements IKrtBotListService {
++
++	declare readonly _serviceBrand: undefined;
++
++	private readonly _onDidChange = this._register(new Emitter<string>());
++	readonly onDidChange = this._onDidChange.event;
++
++	/** Workspace folder URI → set of lowercased logins. */
++	private bots = new Map<string, Set<string>>();
++
++	constructor(
++		@IStorageService private readonly storageService: IStorageService,
++		@ILogService private readonly logService: ILogService,
++	) {
++		super();
++		this.bots = this.read();
++	}
++
++	getBots(workspaceFolderUri: string): readonly string[] {
++		const set = this.bots.get(workspaceFolderUri);
++		return set ? [...set].sort() : [];
++	}
++
++	isBot(workspaceFolderUri: string, login: string): boolean {
++		const set = this.bots.get(workspaceFolderUri);
++		if (!set) {
++			return false;
++		}
++		return set.has(login.toLowerCase());
++	}
++
++	addBot(workspaceFolderUri: string, login: string): void {
++		const normalized = login.trim().toLowerCase();
++		if (!normalized) {
++			return;
++		}
++		const set = this.bots.get(workspaceFolderUri) ?? new Set<string>();
++		if (set.has(normalized)) {
++			return;
++		}
++		set.add(normalized);
++		this.bots.set(workspaceFolderUri, set);
++		this.write();
++		this._onDidChange.fire(workspaceFolderUri);
++	}
++
++	removeBot(workspaceFolderUri: string, login: string): void {
++		const normalized = login.trim().toLowerCase();
++		const set = this.bots.get(workspaceFolderUri);
++		if (!set || !set.has(normalized)) {
++			return;
++		}
++		set.delete(normalized);
++		if (set.size === 0) {
++			this.bots.delete(workspaceFolderUri);
++		}
++		this.write();
++		this._onDidChange.fire(workspaceFolderUri);
++	}
++
++	private read(): Map<string, Set<string>> {
++		const raw = this.storageService.get(STORAGE_KEY, StorageScope.APPLICATION);
++		if (!raw) {
++			return new Map();
++		}
++		try {
++			const parsed = JSON.parse(raw) as PersistedEnvelope;
++			if (parsed.version !== 1 || !parsed.bots) {
++				return new Map();
++			}
++			const out = new Map<string, Set<string>>();
++			for (const [folderUri, logins] of Object.entries(parsed.bots)) {
++				if (Array.isArray(logins)) {
++					out.set(folderUri, new Set(logins.map(l => l.toLowerCase())));
++				}
++			}
++			return out;
++		} catch (err) {
++			this.logService.warn('[krt] botListService: failed to parse storage envelope', err);
++			return new Map();
++		}
++	}
++
++	private write(): void {
++		const out: { [folderUri: string]: string[] } = {};
++		for (const [folderUri, set] of this.bots) {
++			out[folderUri] = [...set].sort();
++		}
++		const envelope: PersistedEnvelope = {
++			version: 1,
++			bots: out,
++		};
++		this.storageService.store(
++			STORAGE_KEY,
++			JSON.stringify(envelope),
++			StorageScope.APPLICATION,
++			StorageTarget.MACHINE,
++		);
++	}
++}
+diff --git a/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditor.contribution.ts b/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditor.contribution.ts
+index 281197595f4..5e7023e1b56 100644
+--- a/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditor.contribution.ts
++++ b/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditor.contribution.ts
+@@ -16,6 +16,7 @@ import { EditorPaneDescriptor, IEditorPaneRegistry } from '../../../../browser/e
+ import { EditorExtensions, IEditorFactoryRegistry, IEditorSerializer } from '../../../../common/editor.js';
+ import { CommentContextKeys } from '../../../comments/common/commentContextKeys.js';
+ import './krtCommentsView.contribution.js';
++import './krtBotList.contribution.js';
+ import { IKrtPrCommentController, KrtPrCommentController, KRT_PR_COMMENT_OWNER } from './krtPrCommentController.js';
+ import { IKrtReviewDraftService, KrtReviewDraftService } from './krtReviewDraftService.js';
+ import { KrtPullRequestEditorInput } from './krtPullRequestEditorInput.js';
+diff --git a/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.ts b/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.ts
+index 2120f9ac9db..ef831553d91 100644
+--- a/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.ts
++++ b/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.ts
+@@ -28,6 +28,7 @@ import { IFileService } from '../../../../../platform/files/common/files.js';
+ import { getWorkspacePreFlight, KrtPreFlight } from '../workspace/krtVcs.js';
+ import { returnFrom, switchTo } from '../workspace/krtSwitchOps.js';
+ import { IKrtSwitchResumeService, ResumeToken } from '../workspace/krtSwitchResume.js';
++import { IKrtBotListService } from './krtBotListService.js';
+ import { IKrtReviewDraftService } from './krtReviewDraftService.js';
+ import { isKrtError } from '../../../../../platform/krt/common/errors.js';
+ import { Chapter, EdgeKind, EDGE_KINDS, TourVariant } from '../ai/krtTourTypes.js';
+@@ -177,6 +178,7 @@ export class KrtPullRequestEditorPane extends EditorPane {
+ 		@IFileService private readonly fileService: IFileService,
+ 		@IKrtPrCommentController private readonly krtCommentController: IKrtPrCommentController,
+ 		@IKrtReviewDraftService private readonly reviewDraftService: IKrtReviewDraftService,
++		@IKrtBotListService private readonly botListService: IKrtBotListService,
+ 	) {
+ 		super(KrtPullRequestEditorPane.ID, group, telemetryService, themeService, krtStorageService);
+ 		// Re-check the workspace's HEAD whenever the resume token
+@@ -195,6 +197,19 @@ export class KrtPullRequestEditorPane extends EditorPane {
+ 				this.updateHeaderActionsEnablement();
+ 			}
+ 		}));
++		// Phase 10 Batch 4: bot list changes for the current PR's
++		// workspace re-bucket Discussion / Automation. Re-render the PR
++		// view so the timeline reflects the new classification.
++		this._register(this.botListService.onDidChange(folderUri => {
++			const pr = this.currentPr;
++			if (!pr || this.subMode !== 'pr') {
++				return;
++			}
++			const workspace = this.workspaceRegistry.findByOwnerRepo(pr.owner, pr.repo);
++			if (workspace?.folderUri === folderUri) {
++				this.renderLoaded(pr);
++			}
++		}));
+ 	}
+ 
+ 	protected createEditor(parent: HTMLElement): void {
+@@ -969,12 +984,18 @@ export class KrtPullRequestEditorPane extends EditorPane {
+ 		const heading = DOM.append(tabs, DOM.$('span.krt-pr-activity-heading'));
+ 		heading.textContent = localize('krt.pr.activity', "Activity");
+ 
++		const { discussionComments, botComments } = this.partitionCommentsByBot(pr);
++		// Automation count: events + bot-routed comments. The events
++		// list lazy-loads on tab open, so the count reflects whatever's
++		// known so far.
++		const automationCount = (this.automationEvents?.length ?? 0) + botComments.length;
++
+ 		const discussion = this.makeTabButton(tabs, 'discussion',
+ 			localize('krt.pr.activity.discussion', "Discussion"),
+-			this.liveComments.length);
++			discussionComments.length);
+ 		const automation = this.makeTabButton(tabs, 'automation',
+ 			localize('krt.pr.activity.automation', "Automation"),
+-			this.automationEvents?.length);
++			automationCount);
+ 
+ 		const content = DOM.append(section, DOM.$('.krt-pr-activity-content'));
+ 
+@@ -983,9 +1004,9 @@ export class KrtPullRequestEditorPane extends EditorPane {
+ 			discussion.button.classList.toggle('active', this.activityTab === 'discussion');
+ 			automation.button.classList.toggle('active', this.activityTab === 'automation');
+ 			if (this.activityTab === 'discussion') {
+-				this.renderDiscussion(content);
++				this.renderDiscussion(content, discussionComments);
+ 			} else {
+-				this.renderAutomation(content, pr);
++				this.renderAutomation(content, pr, botComments);
+ 			}
+ 		};
+ 
+@@ -998,7 +1019,7 @@ export class KrtPullRequestEditorPane extends EditorPane {
+ 			renderActiveTab();
+ 			if (this.automationEvents === undefined && !this.automationLoading) {
+ 				this.loadAutomation(pr, () => {
+-					automation.count.textContent = countLabel(this.automationEvents?.length);
++					automation.count.textContent = countLabel((this.automationEvents?.length ?? 0) + botComments.length);
+ 					if (this.activityTab === 'automation') {
+ 						renderActiveTab();
+ 					}
+@@ -1020,14 +1041,37 @@ export class KrtPullRequestEditorPane extends EditorPane {
+ 		return { button: btn, count: countEl };
+ 	}
+ 
+-	private renderDiscussion(parent: HTMLElement): void {
+-		if (this.liveComments.length === 0) {
++	/**
++	 * Splits `liveComments` into Discussion vs Automation buckets by
++	 * looking up each author against the active workspace's bot list.
++	 * No workspace registered → no bots → everyone lands in Discussion
++	 * (preserves the pre-Phase-10 behaviour).
++	 */
++	private partitionCommentsByBot(pr: PullRequest): { discussionComments: Comment[]; botComments: Comment[] } {
++		const workspace = this.workspaceRegistry.findByOwnerRepo(pr.owner, pr.repo);
++		if (!workspace) {
++			return { discussionComments: [...this.liveComments], botComments: [] };
++		}
++		const discussionComments: Comment[] = [];
++		const botComments: Comment[] = [];
++		for (const c of this.liveComments) {
++			if (this.botListService.isBot(workspace.folderUri, c.author.login)) {
++				botComments.push(c);
++			} else {
++				discussionComments.push(c);
++			}
++		}
++		return { discussionComments, botComments };
++	}
++
++	private renderDiscussion(parent: HTMLElement, comments: readonly Comment[]): void {
++		if (comments.length === 0) {
+ 			const empty = DOM.append(parent, DOM.$('.krt-pr-empty'));
+ 			empty.textContent = localize('krt.pr.noDiscussion', "No discussion yet. Be the first to comment.");
+ 			return;
+ 		}
+ 		const timeline = DOM.append(parent, DOM.$('.krt-pr-timeline'));
+-		for (const comment of this.liveComments) {
++		for (const comment of comments) {
+ 			this.renderCommentCard(timeline, comment);
+ 		}
+ 	}
+@@ -1057,7 +1101,7 @@ export class KrtPullRequestEditorPane extends EditorPane {
+ 		}
+ 	}
+ 
+-	private renderAutomation(parent: HTMLElement, pr: PullRequest): void {
++	private renderAutomation(parent: HTMLElement, _pr: PullRequest, botComments: readonly Comment[]): void {
+ 		if (this.automationLoading) {
+ 			const loading = DOM.append(parent, DOM.$('.krt-pr-empty'));
+ 			loading.textContent = localize('krt.pr.automationLoading', "Loading automation events…");
+@@ -1068,14 +1112,30 @@ export class KrtPullRequestEditorPane extends EditorPane {
+ 			err.textContent = this.automationError;
+ 			return;
+ 		}
+-		if (!this.automationEvents || this.automationEvents.length === 0) {
++		const events = this.automationEvents ?? [];
++		if (events.length === 0 && botComments.length === 0) {
+ 			const empty = DOM.append(parent, DOM.$('.krt-pr-empty'));
+ 			empty.textContent = localize('krt.pr.noAutomation', "No automation events.");
+ 			return;
+ 		}
++		// Merge timeline events and bot-routed comments by timestamp so
++		// the row order tracks chronology rather than separating bot
++		// chatter into its own block.
++		type Entry =
++			| { readonly kind: 'event'; readonly ev: AutomationEvent; readonly at: string }
++			| { readonly kind: 'comment'; readonly c: Comment; readonly at: string };
++		const entries: Entry[] = [
++			...events.map((ev): Entry => ({ kind: 'event', ev, at: ev.at })),
++			...botComments.map((c): Entry => ({ kind: 'comment', c, at: c.createdAt })),
++		].sort((a, b) => a.at < b.at ? -1 : a.at > b.at ? 1 : 0);
++
+ 		const timeline = DOM.append(parent, DOM.$('.krt-pr-timeline'));
+-		for (const ev of this.automationEvents) {
+-			this.renderAutomationRow(timeline, ev);
++		for (const entry of entries) {
++			if (entry.kind === 'event') {
++				this.renderAutomationRow(timeline, entry.ev);
++			} else {
++				this.renderCommentCard(timeline, entry.c);
++			}
+ 		}
+ 	}
+ 
+-- 
+2.52.0
+

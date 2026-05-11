@@ -1,0 +1,48 @@
+From e9c1106d522235be6c6f5d56dddd19293e9d740e Mon Sep 17 00:00:00 2001
+From: Kol Crooks <kol.crooks@datadoghq.com>
+Date: Thu, 7 May 2026 16:33:39 -0400
+Subject: [PATCH] Phase D polish: bump sticky diff header z-index above review
+ widgets
+
+Reported: native review-comment widgets render above the sticky
+diff card headers as the user scrolls.
+
+Monaco's `commentThreadZoneWidget` and the underlying
+`zoneWidget` are layered at z-index 10 (thread frames) and 20
+(resize/action overlays). My sticky header was at z-index 5 --
+under both -- so a thread anchored near the top of the file
+floated over the sticky header.
+
+Bump the header to z-index 30, comfortably above the review
+layer. Documented the reasoning + paths in the CSS comment so the
+next reader knows what we're racing.
+
+Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+---
+ .../contrib/krt/browser/pr/krtPullRequestEditorPane.css   | 8 +++++---
+ 1 file changed, 5 insertions(+), 3 deletions(-)
+
+diff --git a/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.css b/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.css
+index 2af0801889f..e0926ee9c86 100644
+--- a/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.css
++++ b/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.css
+@@ -844,11 +844,13 @@
+ 	/* Sticks to the top of the outer pane scroll while the user is
+ 	 * inside this file's diff. When the user scrolls past the card,
+ 	 * the next card's sticky header takes over naturally. z-index
+-	 * above the editor's overlay so the header isn't covered by
+-	 * Monaco's gutter / minimap. */
++	 * has to beat Monaco's review-thread zone widgets (z-index 10
++	 * for thread frames, 20 for the resize/action overlays inside
++	 * them — see vs/workbench/contrib/comments/browser/media/
++	 * review.css). 30 keeps us comfortably above. */
+ 	position: sticky;
+ 	top: 0;
+-	z-index: 5;
++	z-index: 30;
+ }
+ 
+ .krt-pr-flat-diff-head:hover {
+-- 
+2.52.0
+

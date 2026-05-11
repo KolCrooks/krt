@@ -1,0 +1,619 @@
+From adae00ee2338cf60ad537fd748d5c3cb202a1e9f Mon Sep 17 00:00:00 2001
+From: Kol Crooks <kol.crooks@datadoghq.com>
+Date: Wed, 6 May 2026 11:06:45 -0400
+Subject: [PATCH] Phase 8.5: Monaco-backed diff views
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Replaces the hand-rolled <div>-based unified-diff renderer with embedded
+Monaco DiffEditorWidgets in both the Diff sub-mode and Tour mini-diffs.
+Headline win: real syntax highlighting via TextMate grammars + intra-line
+word-level diff colouring, plus a foundation for LSP hover / go-to-def
+once Phase 8.6's workspace registry feeds real file:// URIs.
+
+- krtPatchReconstruct.ts — pure module that walks a unified-diff patch
+  and returns { base, head } strings with empty-line padding so model
+  line numbers map directly to real file line numbers. Monaco's
+  hideUnchangedRegions option compresses the padded gaps in the UI.
+- krtMonacoDiff.ts — KrtMonacoDiffView class. Owns two virtual
+  text models (krt-pr-base://owner/repo/sha/path and krt-pr-head://...)
+  and a DiffEditorWidget. Auto-sizes the container to getContentHeight
+  capped at 2000px. Exposes addLineZone({ side, afterLine, domNode })
+  for inline review comments + the composer, plus onLineNumberClick
+  for the comment-trigger affordance.
+- krtPullRequestEditorPane.ts — diff sub-mode and tour mini-diffs both
+  swap their parsePatch + per-line DOM rendering for KrtMonacoDiffView.
+  Inline review-comment threads + the composer become Monaco view zones
+  instead of DOM siblings of patch lines. Composer trigger moves from
+  per-line "+" buttons to line-number clicks (more native to Monaco).
+- Cleanup: drop PatchLine, parsePatch, HUNK_HEADER_RE, renderPatchLine.
+---
+ .../contrib/krt/browser/pr/krtMonacoDiff.ts   | 213 ++++++++++++++++++
+ .../krt/browser/pr/krtPatchReconstruct.ts     |  90 ++++++++
+ .../browser/pr/krtPullRequestEditorPane.css   |  14 ++
+ .../browser/pr/krtPullRequestEditorPane.ts    | 164 ++++----------
+ 4 files changed, 362 insertions(+), 119 deletions(-)
+ create mode 100644 src/vs/workbench/contrib/krt/browser/pr/krtMonacoDiff.ts
+ create mode 100644 src/vs/workbench/contrib/krt/browser/pr/krtPatchReconstruct.ts
+
+diff --git a/src/vs/workbench/contrib/krt/browser/pr/krtMonacoDiff.ts b/src/vs/workbench/contrib/krt/browser/pr/krtMonacoDiff.ts
+new file mode 100644
+index 00000000000..8af56c2e5a3
+--- /dev/null
++++ b/src/vs/workbench/contrib/krt/browser/pr/krtMonacoDiff.ts
+@@ -0,0 +1,213 @@
++/*---------------------------------------------------------------------------------------------
++ *  Copyright (c) Microsoft Corporation. All rights reserved.
++ *  Licensed under the MIT License. See License.txt in the project root for license information.
++ *--------------------------------------------------------------------------------------------*/
++
++import * as DOM from '../../../../../base/browser/dom.js';
++import { Disposable, DisposableStore, IDisposable, toDisposable } from '../../../../../base/common/lifecycle.js';
++import { URI } from '../../../../../base/common/uri.js';
++import { ICodeEditor, MouseTargetType } from '../../../../../editor/browser/editorBrowser.js';
++import { DiffEditorWidget } from '../../../../../editor/browser/widget/diffEditor/diffEditorWidget.js';
++import { ILanguageService } from '../../../../../editor/common/languages/language.js';
++import { IModelService } from '../../../../../editor/common/services/model.js';
++import { IInstantiationService } from '../../../../../platform/instantiation/common/instantiation.js';
++import { PullRequestFile } from '../../../../../platform/krt/common/krt.js';
++import { reconstructFromPatch } from './krtPatchReconstruct.js';
++
++export type DiffSide = 'LEFT' | 'RIGHT';
++
++export interface IKrtMonacoDiffViewOptions {
++	readonly owner: string;
++	readonly repo: string;
++	readonly baseSha: string;
++	readonly headSha: string;
++	readonly file: PullRequestFile;
++}
++
++interface ILineZoneOptions {
++	readonly side: DiffSide;
++	readonly afterLine: number;
++	readonly domNode: HTMLElement;
++}
++
++const MAX_HEIGHT_PX = 2000;
++
++/**
++ * Embeds Monaco's `DiffEditorWidget` in a container, populates it with
++ * patch-reconstructed base/head models, and exposes a tiny API for
++ * attaching review-comment view zones.
++ *
++ * Owns the two text models it creates and disposes them on `dispose()`.
++ * Auto-sizes the container height to the diff's content height (capped
++ * at `MAX_HEIGHT_PX` to keep giant patches scrollable).
++ */
++export class KrtMonacoDiffView extends Disposable {
++
++	private readonly widget: DiffEditorWidget;
++	private readonly container: HTMLElement;
++	private readonly zoneDisposables = this._register(new DisposableStore());
++
++	constructor(
++		parent: HTMLElement,
++		opts: IKrtMonacoDiffViewOptions,
++		@IInstantiationService instantiationService: IInstantiationService,
++		@IModelService modelService: IModelService,
++		@ILanguageService languageService: ILanguageService,
++	) {
++		super();
++
++		this.container = DOM.append(parent, DOM.$('.krt-pr-diff-monaco'));
++		this.container.style.height = '0px';
++
++		this.widget = this._register(instantiationService.createInstance(
++			DiffEditorWidget,
++			this.container,
++			{
++				readOnly: true,
++				originalEditable: false,
++				renderSideBySide: true,
++				useInlineViewWhenSpaceIsLimited: true,
++				hideUnchangedRegions: {
++					enabled: true,
++					contextLineCount: 3,
++					minimumLineCount: 4,
++				},
++				renderOverviewRuler: false,
++				automaticLayout: false,
++				scrollBeyondLastLine: false,
++				minimap: { enabled: false },
++				scrollbar: {
++					alwaysConsumeMouseWheel: false,
++					handleMouseWheel: false,
++				},
++				lineNumbersMinChars: 4,
++			},
++			{
++				originalEditor: { contributions: [] },
++				modifiedEditor: { contributions: [] },
++			},
++		));
++
++		const { base, head } = reconstructFromPatch(opts.file.patch ?? '');
++		const path = opts.file.path;
++		const previousPath = opts.file.previousPath ?? path;
++		const baseUri = URI.parse(`krt-pr-base://${encodeURIComponent(opts.owner)}/${encodeURIComponent(opts.repo)}/${encodeURIComponent(opts.baseSha)}/${encodeURI(previousPath)}`);
++		const headUri = URI.parse(`krt-pr-head://${encodeURIComponent(opts.owner)}/${encodeURIComponent(opts.repo)}/${encodeURIComponent(opts.headSha)}/${encodeURI(path)}`);
++
++		const baseModel = modelService.createModel(
++			base,
++			languageService.createByFilepathOrFirstLine(baseUri),
++			baseUri,
++			false,
++		);
++		const headModel = modelService.createModel(
++			head,
++			languageService.createByFilepathOrFirstLine(headUri),
++			headUri,
++			false,
++		);
++		this._register(toDisposable(() => baseModel.dispose()));
++		this._register(toDisposable(() => headModel.dispose()));
++
++		this.widget.setModel({ original: baseModel, modified: headModel });
++
++		// Initial size + dynamic refit.
++		this.layoutToContent();
++		this._register(this.widget.onDidContentSizeChange(() => this.layoutToContent()));
++	}
++
++	private layoutToContent(): void {
++		const contentHeight = Math.min(this.widget.getContentHeight(), MAX_HEIGHT_PX);
++		// Add a small chrome margin so the bottom row isn't flush against
++		// the section's border.
++		const target = Math.max(contentHeight + 8, 60);
++		if (this.container.clientHeight !== target) {
++			this.container.style.height = `${target}px`;
++			this.widget.layout();
++		}
++	}
++
++	/**
++	 * Attach a DOM node as a Monaco view zone after the given line on the
++	 * specified side. Returns a disposable that removes the zone.
++	 *
++	 * The caller's `domNode` is wrapped in a host div before being handed
++	 * to Monaco — Monaco writes `style.height` directly onto whatever
++	 * node we hand it, and a non-`box-sizing: content-box` host avoids
++	 * the height-feedback loop where padding/borders bump `offsetHeight`
++	 * past the assigned height on every observer pass.
++	 */
++	addLineZone(opts: ILineZoneOptions): IDisposable {
++		const editor = opts.side === 'RIGHT' ? this.widget.getModifiedEditor() : this.widget.getOriginalEditor();
++		const host = document.createElement('div');
++		host.className = 'krt-pr-diff-zone-host';
++		host.style.boxSizing = 'border-box';
++		host.appendChild(opts.domNode);
++
++		let zoneId: string | null = null;
++		editor.changeViewZones(accessor => {
++			zoneId = accessor.addZone({
++				afterLineNumber: opts.afterLine,
++				domNode: host,
++				heightInPx: Math.max(host.offsetHeight, 80),
++			});
++		});
++
++		// Resize whenever the inner DOM grows (e.g. markdown finishes
++		// rendering or the user expands a long comment).
++		const observer = new ResizeObserver(() => {
++			if (zoneId === null) {
++				return;
++			}
++			const measured = opts.domNode.offsetHeight + 16; // host padding budget
++			editor.changeViewZones(accessor => {
++				accessor.layoutZone(zoneId!);
++			});
++			if (host.offsetHeight !== measured && measured > 0) {
++				editor.changeViewZones(accessor => {
++					accessor.removeZone(zoneId!);
++					zoneId = accessor.addZone({
++						afterLineNumber: opts.afterLine,
++						domNode: host,
++						heightInPx: measured,
++					});
++				});
++			}
++		});
++		observer.observe(opts.domNode);
++
++		const dispose = toDisposable(() => {
++			observer.disconnect();
++			if (zoneId !== null) {
++				editor.changeViewZones(accessor => accessor.removeZone(zoneId!));
++				zoneId = null;
++			}
++		});
++		this.zoneDisposables.add(dispose);
++		return dispose;
++	}
++
++	/**
++	 * Wire a click handler on both editors' line-number gutters. The
++	 * callback receives the side ('LEFT' | 'RIGHT') and the file's real
++	 * line number on that side. Used by the diff sub-mode to open the
++	 * inline composer when a reviewer clicks a line number.
++	 */
++	onLineNumberClick(callback: (side: DiffSide, line: number) => void): IDisposable {
++		const wire = (editor: ICodeEditor, side: DiffSide) =>
++			editor.onMouseDown(e => {
++				if (e.target.type !== MouseTargetType.GUTTER_LINE_NUMBERS) {
++					return;
++				}
++				const line = e.target.position?.lineNumber;
++				if (line !== undefined) {
++					callback(side, line);
++				}
++			});
++		const store = new DisposableStore();
++		store.add(wire(this.widget.getModifiedEditor(), 'RIGHT'));
++		store.add(wire(this.widget.getOriginalEditor(), 'LEFT'));
++		this._register(store);
++		return store;
++	}
++}
+diff --git a/src/vs/workbench/contrib/krt/browser/pr/krtPatchReconstruct.ts b/src/vs/workbench/contrib/krt/browser/pr/krtPatchReconstruct.ts
+new file mode 100644
+index 00000000000..a604dd5baf5
+--- /dev/null
++++ b/src/vs/workbench/contrib/krt/browser/pr/krtPatchReconstruct.ts
+@@ -0,0 +1,90 @@
++/*---------------------------------------------------------------------------------------------
++ *  Copyright (c) Microsoft Corporation. All rights reserved.
++ *  Licensed under the MIT License. See License.txt in the project root for license information.
++ *--------------------------------------------------------------------------------------------*/
++
++/**
++ * Reconstructs the base and head sides of a unified-diff `patch` string
++ * into two text bodies whose line numbers map directly to the real file
++ * line numbers — the gap between hunks is padded with empty strings so
++ * that line N in the returned `base`/`head` corresponds to line N in
++ * the original file.
++ *
++ * Used by `KrtMonacoDiffView` to populate Monaco text models without
++ * fetching the full base/head file content from GitHub. Monaco's
++ * `hideUnchangedRegions` option compresses the padded gaps so the diff
++ * view doesn't show acres of blank lines.
++ *
++ * Format reminder (unified diff):
++ *
++ *   @@ -<oldStart>,<oldLines> +<newStart>,<newLines> @@ optional
++ *    context line                                          (' ' prefix)
++ *   -removed line                                           ('-' prefix)
++ *   +added line                                             ('+' prefix)
++ *   \ No newline at end of file                             ('\' prefix — skip)
++ *
++ * `<oldLines>` and `<newLines>` are optional; default to 1 when absent.
++ */
++
++const HUNK_HEADER_RE = /^@@\s+-(?<oldStart>\d+)(?:,(?<oldLines>\d+))?\s+\+(?<newStart>\d+)(?:,(?<newLines>\d+))?\s+@@/;
++
++export function reconstructFromPatch(patch: string): { readonly base: string; readonly head: string } {
++	const baseLines: string[] = [];
++	const headLines: string[] = [];
++
++	// Track the *next* line number we're about to emit on each side.
++	// Start at 1 (first file line); the patch's hunk headers are 1-indexed.
++	let baseLine = 1;
++	let headLine = 1;
++
++	const padTo = (target: string[], current: number, target1Indexed: number) => {
++		while (current < target1Indexed) {
++			target.push('');
++			current++;
++		}
++		return current;
++	};
++
++	for (const raw of patch.split('\n')) {
++		const header = HUNK_HEADER_RE.exec(raw);
++		if (header) {
++			const oldStart = Number(header.groups!.oldStart);
++			const newStart = Number(header.groups!.newStart);
++			// Pad both sides up to the hunk's starting line so subsequent
++			// pushes land at the correct index.
++			baseLine = padTo(baseLines, baseLine, oldStart);
++			headLine = padTo(headLines, headLine, newStart);
++			continue;
++		}
++		if (raw.startsWith('\\')) {
++			// `\ No newline at end of file` — informational, doesn't
++			// belong on either side.
++			continue;
++		}
++		if (raw.startsWith('+')) {
++			headLines.push(raw.slice(1));
++			headLine++;
++			continue;
++		}
++		if (raw.startsWith('-')) {
++			baseLines.push(raw.slice(1));
++			baseLine++;
++			continue;
++		}
++		if (raw.startsWith(' ')) {
++			const content = raw.slice(1);
++			baseLines.push(content);
++			headLines.push(content);
++			baseLine++;
++			headLine++;
++			continue;
++		}
++		// Empty line in the patch (rare — only happens at the very end of
++		// some `git diff` outputs) or non-hunk metadata. Skip silently.
++	}
++
++	return {
++		base: baseLines.join('\n'),
++		head: headLines.join('\n'),
++	};
++}
+diff --git a/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.css b/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.css
+index da9fae3d4c4..7281a428c1c 100644
+--- a/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.css
++++ b/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.css
+@@ -954,6 +954,20 @@
+ 	font-style: italic;
+ }
+ 
++/* Phase 8.5 — embedded Monaco diff. The view sets its own height to */
++/* match `getContentHeight()` (capped at MAX_HEIGHT_PX). */
++.krt-pr-diff-monaco {
++	width: 100%;
++	overflow: hidden;
++}
++
++.krt-pr-diff-zone-host {
++	padding: 6px 8px;
++	background: var(--vscode-editorWidget-background, rgba(127, 127, 127, 0.06));
++	border-top: 1px solid var(--vscode-editorWidget-border, rgba(127, 127, 127, 0.3));
++	border-bottom: 1px solid var(--vscode-editorWidget-border, rgba(127, 127, 127, 0.3));
++}
++
+ .krt-pr-diff-line {
+ 	display: grid;
+ 	grid-template-columns: 48px 48px 24px 1fr;
+diff --git a/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.ts b/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.ts
+index 35adbf756e6..2fd8c80f390 100644
+--- a/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.ts
++++ b/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.ts
+@@ -14,11 +14,13 @@ import { URI } from '../../../../../base/common/uri.js';
+ import { localize } from '../../../../../nls.js';
+ import { ICommandService } from '../../../../../platform/commands/common/commands.js';
+ import { IEditorOptions } from '../../../../../platform/editor/common/editor.js';
++import { IInstantiationService } from '../../../../../platform/instantiation/common/instantiation.js';
+ import { IStorageService } from '../../../../../platform/storage/common/storage.js';
+ import { ITelemetryService } from '../../../../../platform/telemetry/common/telemetry.js';
+ import { IThemeService } from '../../../../../platform/theme/common/themeService.js';
+ import { ILogService } from '../../../../../platform/log/common/log.js';
+ import { IOpenerService } from '../../../../../platform/opener/common/opener.js';
++import { KrtMonacoDiffView } from './krtMonacoDiff.js';
+ import { isKrtError } from '../../../../../platform/krt/common/errors.js';
+ import { Chapter, EdgeKind, EDGE_KINDS, TourVariant } from '../ai/krtTourTypes.js';
+ import { expandEmojiShortcodes } from '../ai/krtEmoji.js';
+@@ -59,15 +61,6 @@ interface TourState {
+ 	readonly usage?: TourTokenUsage;
+ }
+ 
+-interface PatchLine {
+-	readonly raw: string;
+-	readonly kind: 'context' | 'add' | 'del' | 'hunk' | 'meta';
+-	/** Right-side (new file) line number, when applicable. */
+-	readonly newLine?: number;
+-	/** Left-side (old file) line number, when applicable. */
+-	readonly oldLine?: number;
+-}
+-
+ /**
+  * Phase 5 PR view. Two-column layout: main column (header,
+  * description, activity, reply box) + sidebar (Reviewers, Checks,
+@@ -145,6 +138,7 @@ export class KrtPullRequestEditorPane extends EditorPane {
+ 		@IOpenerService private readonly openerService: IOpenerService,
+ 		@ITourGenerator private readonly tourGenerator: ITourGenerator,
+ 		@ICommandService private readonly commandService: ICommandService,
++		@IInstantiationService private readonly instantiationService: IInstantiationService,
+ 	) {
+ 		super(KrtPullRequestEditorPane.ID, group, telemetryService, themeService, krtStorageService);
+ 	}
+@@ -881,58 +875,37 @@ export class KrtPullRequestEditorPane extends EditorPane {
+ 			return section;
+ 		}
+ 
+-		const lines = parsePatch(file.patch);
+-		const linesByNewLine = new Map<number, HTMLElement>();
+-		const linesByOldLine = new Map<number, HTMLElement>();
+-		for (const line of lines) {
+-			const row = this.renderPatchLine(body, pr, file, line);
+-			if (line.newLine !== undefined && line.kind !== 'del') {
+-				linesByNewLine.set(line.newLine, row);
+-			}
+-			if (line.oldLine !== undefined && line.kind !== 'add') {
+-				linesByOldLine.set(line.oldLine, row);
+-			}
+-		}
++		// Phase 8.5 — embedded Monaco diff editor instead of plain-text
++		// patch rows. Patch reconstruction populates two virtual models;
++		// `hideUnchangedRegions` collapses the padded gaps so the user
++		// only sees changed regions plus 3 lines of real context.
++		const view = this.instantiationService.createInstance(
++			KrtMonacoDiffView,
++			body,
++			{
++				owner: pr.owner,
++				repo: pr.repo,
++				baseSha: pr.base.sha,
++				headSha: pr.head.sha,
++				file,
++			},
++		);
++		this.bodyDisposables.add(view);
+ 
+-		// Render existing review comments anchored to lines on this file.
+-		this.renderReviewCommentsForFile(file, linesByNewLine, linesByOldLine);
++		// Inline review comments + composer attach as Monaco view zones.
++		this.attachReviewCommentZones(view, file);
++
++		// Line-number click → open the inline composer at that location.
++		this.bodyDisposables.add(view.onLineNumberClick((side, line) => {
++			this.composingAt = { path: file.path, line, side };
++			this.renderLoaded(pr);
++		}));
+ 
+ 		return section;
+ 	}
+ 
+-	private renderPatchLine(parent: HTMLElement, pr: PullRequest, file: PullRequestFile, line: PatchLine): HTMLElement {
+-		const row = DOM.append(parent, DOM.$('.krt-pr-diff-line'));
+-		row.classList.add(line.kind);
+-		const oldNo = DOM.append(row, DOM.$('span.krt-pr-diff-lineno.old'));
+-		oldNo.textContent = line.oldLine !== undefined ? String(line.oldLine) : '';
+-		const newNo = DOM.append(row, DOM.$('span.krt-pr-diff-lineno.new'));
+-		newNo.textContent = line.newLine !== undefined ? String(line.newLine) : '';
+-		const gutter = DOM.append(row, DOM.$('span.krt-pr-diff-gutter'));
+-		gutter.textContent = '';
+-		// Comment-affordance "+" button on add/context lines (right side
+-		// has a real new-line number); del lines anchor to the LEFT side.
+-		if (line.kind === 'add' || line.kind === 'context' || line.kind === 'del') {
+-			const addBtn = DOM.append(gutter, DOM.$('button.krt-pr-diff-add-comment'));
+-			addBtn.setAttribute('type', 'button');
+-			addBtn.title = localize('krt.pr.addInlineComment', "Add a comment on this line");
+-			addBtn.textContent = '+';
+-			const side: 'LEFT' | 'RIGHT' = line.kind === 'del' ? 'LEFT' : 'RIGHT';
+-			const lineNo = side === 'LEFT' ? line.oldLine : line.newLine;
+-			if (lineNo !== undefined) {
+-				this.bodyDisposables.add(DOM.addDisposableListener(addBtn, 'click', e => {
+-					e.stopPropagation();
+-					this.composingAt = { path: file.path, line: lineNo, side };
+-					this.renderLoaded(pr);
+-				}));
+-			}
+-		}
+-		const content = DOM.append(row, DOM.$('span.krt-pr-diff-line-content'));
+-		const prefix = line.kind === 'add' ? '+' : line.kind === 'del' ? '-' : line.kind === 'hunk' ? '' : ' ';
+-		content.textContent = line.kind === 'hunk' ? line.raw : `${prefix}${line.raw}`;
+-		return row;
+-	}
+ 
+-	private renderReviewCommentsForFile(file: PullRequestFile, linesByNewLine: Map<number, HTMLElement>, linesByOldLine: Map<number, HTMLElement>): void {
++	private attachReviewCommentZones(view: KrtMonacoDiffView, file: PullRequestFile): void {
+ 		const all = [...(this.reviewComments ?? []), ...this.liveReviewComments];
+ 		const groups = new Map<string, { side: 'LEFT' | 'RIGHT'; line: number; comments: Comment[] }>();
+ 		for (const c of all) {
+@@ -950,26 +923,19 @@ export class KrtPullRequestEditorPane extends EditorPane {
+ 			}
+ 		}
+ 		for (const { side, line, comments } of groups.values()) {
+-			const anchorRow = side === 'RIGHT' ? linesByNewLine.get(line) : linesByOldLine.get(line);
+-			if (!anchorRow) {
+-				continue;
+-			}
+ 			const block = DOM.$('.krt-pr-diff-thread');
+-			anchorRow.after(block);
+ 			for (const c of comments.sort((a, b) => a.createdAt < b.createdAt ? -1 : a.createdAt > b.createdAt ? 1 : 0)) {
+ 				this.renderReviewCommentCard(block, c);
+ 			}
++			this.bodyDisposables.add(view.addLineZone({ side, afterLine: line, domNode: block }));
+ 		}
+ 
+ 		// Inline composer.
+ 		if (this.composingAt && this.composingAt.path === file.path) {
+ 			const target = this.composingAt;
+-			const anchorRow = target.side === 'RIGHT' ? linesByNewLine.get(target.line) : linesByOldLine.get(target.line);
+-			if (anchorRow) {
+-				const composer = DOM.$('.krt-pr-diff-composer');
+-				anchorRow.after(composer);
+-				this.renderInlineComposer(composer, target);
+-			}
++			const composer = DOM.$('.krt-pr-diff-composer');
++			this.renderInlineComposer(composer, target);
++			this.bodyDisposables.add(view.addLineZone({ side: target.side, afterLine: target.line, domNode: composer }));
+ 		}
+ 	}
+ 
+@@ -1441,19 +1407,19 @@ export class KrtPullRequestEditorPane extends EditorPane {
+ 					: localize('krt.pr.diffNoPatchAvailable', "No patch available (binary or too large).");
+ 				continue;
+ 			}
+-			for (const line of parsePatch(file.patch)) {
+-				const row = DOM.append(body, DOM.$('.krt-pr-diff-line'));
+-				row.classList.add(line.kind);
+-				const oldNo = DOM.append(row, DOM.$('span.krt-pr-diff-lineno.old'));
+-				oldNo.textContent = line.oldLine !== undefined ? String(line.oldLine) : '';
+-				const newNo = DOM.append(row, DOM.$('span.krt-pr-diff-lineno.new'));
+-				newNo.textContent = line.newLine !== undefined ? String(line.newLine) : '';
+-				const gutter = DOM.append(row, DOM.$('span.krt-pr-diff-gutter'));
+-				gutter.textContent = '';
+-				const content = DOM.append(row, DOM.$('span.krt-pr-diff-line-content'));
+-				const prefix = line.kind === 'add' ? '+' : line.kind === 'del' ? '-' : line.kind === 'hunk' ? '' : ' ';
+-				content.textContent = line.kind === 'hunk' ? line.raw : `${prefix}${line.raw}`;
+-			}
++			// Phase 8.5 — Monaco mini-diff. Read-only, no comments / composer.
++			const view = this.instantiationService.createInstance(
++				KrtMonacoDiffView,
++				body,
++				{
++					owner: pr.owner,
++					repo: pr.repo,
++					baseSha: pr.base.sha,
++					headSha: pr.head.sha,
++					file,
++				},
++			);
++			this.bodyDisposables.add(view);
+ 		}
+ 	}
+ 
+@@ -2503,46 +2469,6 @@ function groupFilesByFolder(files: readonly PullRequestFile[]): readonly FolderG
+ 	return folders.map(folder => ({ folder, files: byFolder.get(folder)! }));
+ }
+ 
+-const HUNK_HEADER_RE = /^@@ -(?<oldStart>\d+)(?:,\d+)? \+(?<newStart>\d+)(?:,\d+)? @@/;
+-
+-function parsePatch(patch: string): readonly PatchLine[] {
+-	const out: PatchLine[] = [];
+-	let oldLine = 0;
+-	let newLine = 0;
+-	for (const raw of patch.split('\n')) {
+-		if (raw.startsWith('@@')) {
+-			const m = HUNK_HEADER_RE.exec(raw);
+-			if (m?.groups) {
+-				oldLine = Number(m.groups.oldStart);
+-				newLine = Number(m.groups.newStart);
+-			}
+-			out.push({ raw, kind: 'hunk' });
+-			continue;
+-		}
+-		if (raw.startsWith('+')) {
+-			out.push({ raw: raw.slice(1), kind: 'add', newLine });
+-			newLine++;
+-			continue;
+-		}
+-		if (raw.startsWith('-')) {
+-			out.push({ raw: raw.slice(1), kind: 'del', oldLine });
+-			oldLine++;
+-			continue;
+-		}
+-		if (raw.startsWith('\\')) {
+-			// "\ No newline at end of file" — render as meta, no line numbers.
+-			out.push({ raw, kind: 'meta' });
+-			continue;
+-		}
+-		// Context line (leading space, or empty trailing line).
+-		const content = raw.startsWith(' ') ? raw.slice(1) : raw;
+-		out.push({ raw: content, kind: 'context', oldLine, newLine });
+-		oldLine++;
+-		newLine++;
+-	}
+-	return out;
+-}
+-
+ function relativeTime(iso: string): string {
+ 	if (!iso) {
+ 		return '';
+-- 
+2.52.0
+

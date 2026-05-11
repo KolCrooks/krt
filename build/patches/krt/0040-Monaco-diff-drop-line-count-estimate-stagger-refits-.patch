@@ -1,0 +1,99 @@
+From 694e6e79595abc0f8a0f041df460b22b8e8e4c24 Mon Sep 17 00:00:00 2001
+From: Kol Crooks <kol.crooks@datadoghq.com>
+Date: Wed, 6 May 2026 13:20:29 -0400
+Subject: [PATCH] Monaco diff: drop line-count estimate, stagger refits past
+ hideUnchangedRegions
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The previous fix sized the container from `headModel.getLineCount() *
+19`, but for big files where most lines collapse via
+`hideUnchangedRegions` that's 4-10× too tall — the diff renders correctly
+inside but the container floats with a huge empty area below.
+
+`hideUnchangedRegions` fires its `setHiddenAreas` calls inside a
+reactive autorun that runs in a later microtask than `waitForDiff()`'s
+`.then` callback, so my single post-waitForDiff `layoutToContent` was
+reading the pre-collapse content height. Once the autorun applied the
+hidden areas, `onDidContentSizeChange` *should* have fired, but the
+fire was getting lost in the same transaction.
+
+Fix:
+- Drop the line-count-derived initial. Stay at 240px so the editors
+  have space to render their first frame.
+- After `waitForDiff()`, schedule layoutToContent at 0/50/200/500ms.
+  The 500ms one catches stragglers without waiting forever; the early
+  ones make the right size visible quickly.
+- Track timers on a disposable so a torn-down view doesn't fire a
+  refit against a disposed widget.
+---
+ .../contrib/krt/browser/pr/krtMonacoDiff.ts   | 44 ++++++++++++-------
+ 1 file changed, 27 insertions(+), 17 deletions(-)
+
+diff --git a/src/vs/workbench/contrib/krt/browser/pr/krtMonacoDiff.ts b/src/vs/workbench/contrib/krt/browser/pr/krtMonacoDiff.ts
+index 55eaae48eee..74db8d8fedc 100644
+--- a/src/vs/workbench/contrib/krt/browser/pr/krtMonacoDiff.ts
++++ b/src/vs/workbench/contrib/krt/browser/pr/krtMonacoDiff.ts
+@@ -72,12 +72,11 @@ export class KrtMonacoDiffView extends Disposable {
+ 		super();
+ 
+ 		this.container = DOM.append(parent, DOM.$('.krt-pr-diff-monaco'));
+-		// Start with a generous-ish placeholder height so the inner code
+-		// editors actually render their first frame. With
+-		// `automaticLayout: false` and a 0-height container, Monaco's
+-		// `getContentHeight()` stays 0 forever and `layoutToContent`
+-		// can't recover. Real height is computed below from the head
+-		// model's line count, then refined post-`waitForDiff()`.
++		// Start with a placeholder height so the inner code editors
++		// render their first frame. With `automaticLayout: false` and a
++		// 0-height container, Monaco's `getContentHeight()` stays 0
++		// forever and `layoutToContent` can't recover. Final height is
++		// driven by the staggered refits below + `onDidContentSizeChange`.
+ 		this.container.style.height = '240px';
+ 
+ 		this.widget = this._register(instantiationService.createInstance(
+@@ -204,18 +203,29 @@ export class KrtMonacoDiffView extends Disposable {
+ 		// Leave them in `IModelService` for the workbench's lifetime; they
+ 		// share a URI per (owner, repo, sha, path) so memory stays bounded.
+ 
+-		// Estimate initial height from the head model's line count so the
+-		// container is big enough on first paint. Refine after the diff
+-		// computation settles.
+-		const lineHeight = 19;
+-		const chrome = 24;
+-		const lineCount = headModel.getLineCount();
+-		this.container.style.height = `${Math.min(
+-			Math.max(lineCount * lineHeight + chrome, 80),
+-			MAX_HEIGHT_PX,
+-		)}px`;
+ 		this.widget.layout();
+-		void this.widget.waitForDiff().then(() => this.layoutToContent());
++		// Staggered refits catch `hideUnchangedRegions` collapsing — its
++		// autorun fires after `waitForDiff` resolves but inside a later
++		// reactive tick, so a single post-`waitForDiff` refit reads the
++		// pre-collapse height. Multiple delayed refits converge on the
++		// actual visible height; the timers are tracked on the disposable
++		// store so they don't fire against a torn-down widget.
++		const timers = new Set<ReturnType<typeof setTimeout>>();
++		this._register(toDisposable(() => {
++			for (const t of timers) {
++				clearTimeout(t);
++			}
++			timers.clear();
++		}));
++		void this.widget.waitForDiff().then(() => {
++			for (const delay of [0, 50, 200, 500]) {
++				const t = setTimeout(() => {
++					timers.delete(t);
++					this.layoutToContent();
++				}, delay);
++				timers.add(t);
++			}
++		});
+ 
+ 		// Dynamic refit on subsequent content-size changes (e.g. user
+ 		// expands "Show unchanged regions").
+-- 
+2.52.0
+

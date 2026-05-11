@@ -1,0 +1,301 @@
+From 32500f0da9f58755dffe35d16f673d22a0fd81e3 Mon Sep 17 00:00:00 2001
+From: Kol Crooks <kol.crooks@datadoghq.com>
+Date: Thu, 7 May 2026 15:46:53 -0400
+Subject: [PATCH] Phase D (rebuild): MultiDiffEditor in Tour and Storyboard
+
+Tour mini-diffs and Storyboard's chapter-scoped diff panel now
+mount the same `KrtPrMultiDiff` instance the main Diff sub-mode
+uses, scoped to the chapter's file list. Same URIs (file:// for
+modified, krt-git:// for original) -> LSP and inline comments
+work in those sub-modes too without any per-feature plumbing.
+
+Tour:
+  - `renderTourMiniDiffs` filters `pr.files` to the chapter's
+    paths, renders the existing per-file status header strip
+    (status dot, path, +/- counts) for at-a-glance scanning, then
+    mounts one `KrtPrMultiDiff` below scoped to those files.
+  - Strict gate matches the main sub-mode but in a compact form so
+    the chapter prose / bullets / summaries keep rendering even
+    when the user hasn't checked out the PR -- just the diff
+    bodies fall back to a one-line CTA pointing at the Check Out
+    button.
+
+Storyboard:
+  - `renderStoryboardDiffPanel` keeps the chapter file tree on the
+    left, mounts a `KrtPrMultiDiff` in the right stack scoped to
+    `orderedFiles`. Tree-row clicks reveal the file in the widget
+    via `multiDiff.revealFile`.
+  - Same strict gate as the main sub-mode (full CTA card with
+    Add Workspace / Check Out hints).
+
+`refreshCheckoutStatus` re-render path now triggers for `tour`
+and `storyboard` too, so the chapter mini-diffs flip from CTA to
+live diff (or back) as the working tree's HEAD changes.
+
+CSS: `.krt-pr-tour-mini-host` (chapter-scoped widget host, shorter
+than the main one -- chapters are usually a few files), and
+`.krt-pr-tour-mini-cta` for the compact in-tour gate banner.
+
+Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+---
+ .../browser/pr/krtPullRequestEditorPane.css   |  21 +++
+ .../browser/pr/krtPullRequestEditorPane.ts    | 174 +++++++++++++-----
+ 2 files changed, 150 insertions(+), 45 deletions(-)
+
+diff --git a/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.css b/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.css
+index 5c964c11231..7fcae0eb7a3 100644
+--- a/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.css
++++ b/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.css
+@@ -1574,6 +1574,27 @@
+ 	font-style: italic;
+ }
+ 
++/* Phase 10/D — host for the chapter-scoped MultiDiffEditorWidget.
++ * Shorter than the main Diff sub-mode's host because chapters are
++ * usually a handful of files, not the whole PR. */
++.krt-pr-tour-mini-host {
++	position: relative;
++	min-height: 50vh;
++	max-height: calc(100vh - 280px);
++	border: 1px solid var(--vscode-widget-border, rgba(127, 127, 127, 0.3));
++	border-radius: 6px;
++	overflow: hidden;
++}
++
++.krt-pr-tour-mini-cta {
++	padding: 14px 16px;
++	border: 1px dashed var(--vscode-widget-border, rgba(127, 127, 127, 0.3));
++	border-radius: 6px;
++	color: var(--vscode-descriptionForeground);
++	font-size: 12.5px;
++	line-height: 1.5;
++}
++
+ .krt-pr-tour-reading {
+ 	display: flex;
+ 	flex-direction: column;
+diff --git a/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.ts b/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.ts
+index 05a8bc52f7d..f2e44885a29 100644
+--- a/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.ts
++++ b/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.ts
+@@ -295,7 +295,7 @@ export class KrtPullRequestEditorPane extends EditorPane {
+ 				// `isCheckedOut`. Flipping it from false to true (or back)
+ 				// has to re-render so the gate either reveals the diff or
+ 				// shows the Check Out CTA.
+-				if (this.subMode === 'diff' && this.currentPr) {
++				if ((this.subMode === 'diff' || this.subMode === 'tour' || this.subMode === 'storyboard') && this.currentPr) {
+ 					this.renderLoaded(this.currentPr);
+ 				}
+ 			}
+@@ -308,7 +308,7 @@ export class KrtPullRequestEditorPane extends EditorPane {
+ 			if (this.isCheckedOut) {
+ 				this.isCheckedOut = false;
+ 				this.updateHeaderActionsEnablement();
+-				if (this.subMode === 'diff' && this.currentPr) {
++				if ((this.subMode === 'diff' || this.subMode === 'tour' || this.subMode === 'storyboard') && this.currentPr) {
+ 					this.renderLoaded(this.currentPr);
+ 				}
+ 			}
+@@ -1542,11 +1542,8 @@ export class KrtPullRequestEditorPane extends EditorPane {
+ 	}
+ 
+ 	private renderTourMiniDiffs(parent: HTMLElement, pr: PullRequest, paths: readonly string[]): void {
+-		const filesByPath = new Map<string, PullRequestFile>();
+-		for (const f of this.diffFiles ?? []) {
+-			filesByPath.set(f.path, f);
+-		}
+ 		const wrap = DOM.append(parent, DOM.$('.krt-pr-tour-mini-diffs'));
++
+ 		if (this.diffFiles === undefined) {
+ 			const note = DOM.append(wrap, DOM.$('.krt-pr-empty'));
+ 			note.textContent = localize('krt.pr.tour.diffPending', "Loading file patches…");
+@@ -1555,45 +1552,79 @@ export class KrtPullRequestEditorPane extends EditorPane {
+ 			}
+ 			return;
+ 		}
+-		for (const path of paths) {
+-			const file = filesByPath.get(path);
+-			const section = DOM.append(wrap, DOM.$('.krt-pr-tour-mini-section'));
+-			const head = DOM.append(section, DOM.$('.krt-pr-tour-mini-head'));
+-			const status = DOM.append(head, DOM.$('span.krt-pr-diff-status-dot'));
+-			const headPath = DOM.append(head, DOM.$('span.krt-pr-tour-mini-path'));
+-			headPath.textContent = path;
+-			if (!file) {
+-				status.classList.add('changed');
+-				status.textContent = '·';
+-				const note = DOM.append(section, DOM.$('.krt-pr-tour-mini-empty'));
+-				note.textContent = localize('krt.pr.tour.fileMissing', "(file is not in the PR's changed-files list)");
+-				continue;
+-			}
++
++		// Filter PR files to the chapter's paths, preserving the
++		// chapter's order; phantom paths (rare, usually stale model
++		// output) are dropped silently. Status badges per-file render
++		// in a header strip above the multi-diff so the user still
++		// sees +/- counts at a glance.
++		const filesByPath = new Map<string, PullRequestFile>();
++		for (const f of this.diffFiles) {
++			filesByPath.set(f.path, f);
++		}
++		const orderedFiles = paths
++			.map(p => filesByPath.get(p))
++			.filter((f): f is PullRequestFile => !!f);
++
++		if (orderedFiles.length === 0) {
++			const empty = DOM.append(wrap, DOM.$('.krt-pr-tour-mini-empty'));
++			empty.textContent = localize('krt.pr.tour.noFiles', "This chapter's files aren't in the PR's diff.");
++			return;
++		}
++
++		// Per-file status header strip (status dot, path, +/- counts) —
++		// kept from the prior design so the user can scan the chapter's
++		// files without scrolling through the embedded multi-diff. The
++		// actual diff bodies live in one shared `KrtPrMultiDiff`
++		// instance below the strip.
++		for (const file of orderedFiles) {
++			const row = DOM.append(wrap, DOM.$('.krt-pr-tour-mini-head'));
++			const status = DOM.append(row, DOM.$('span.krt-pr-diff-status-dot'));
+ 			status.classList.add(file.status);
+ 			status.textContent = statusGlyph(file.status);
+-			const counts = DOM.append(head, DOM.$('span.krt-pr-tour-mini-counts'));
++			const headPath = DOM.append(row, DOM.$('span.krt-pr-tour-mini-path'));
++			headPath.textContent = file.path;
++			const counts = DOM.append(row, DOM.$('span.krt-pr-tour-mini-counts'));
+ 			const add = DOM.append(counts, DOM.$('span.add'));
+ 			add.textContent = `+${file.additions}`;
+ 			const del = DOM.append(counts, DOM.$('span.del'));
+ 			del.textContent = `-${file.deletions}`;
+-			const body = DOM.append(section, DOM.$('.krt-pr-tour-mini-body'));
+-			if (!file.patch) {
+-				const empty = DOM.append(body, DOM.$('.krt-pr-tour-mini-empty'));
+-				empty.textContent = file.status === 'renamed'
+-					? localize('krt.pr.diffRenameOnly', "Rename only — no content change.")
+-					: localize('krt.pr.diffNoPatchAvailable', "No patch available (binary or too large).");
+-				continue;
+-			}
+-			// Phase A (rebuild) — mini-diff rendering temporarily stripped.
+-			// Tour chapter summaries / files / prose still render; the per-
+-			// file mini-diff body comes back when Phase D migrates Tour to
+-			// the new MultiDiffEditor stack.
+-			const placeholder = DOM.append(body, DOM.$('.krt-pr-tour-mini-empty'));
+-			placeholder.textContent = localize(
+-				'krt.pr.diffRebuilding',
+-				"Diff view is being rebuilt on top of VS Code's MultiDiffEditor. Coming back shortly.",
++		}
++
++		// Strict gate, same shape as the main Diff sub-mode but in a
++		// compact form so the rest of the tour UI keeps rendering.
++		const workspace = this.workspaceRegistry.findByOwnerRepo(pr.owner, pr.repo);
++		if (!workspace) {
++			const cta = DOM.append(wrap, DOM.$('.krt-pr-tour-mini-cta'));
++			cta.textContent = localize(
++				'krt.pr.tour.workspaceHint',
++				"Add a workspace for {0}/{1} to see chapter diffs with LSP support.",
++				pr.owner,
++				pr.repo,
++			);
++			return;
++		}
++		if (!this.isCheckedOut) {
++			const cta = DOM.append(wrap, DOM.$('.krt-pr-tour-mini-cta'));
++			cta.textContent = localize(
++				'krt.pr.tour.checkoutHint',
++				"Check out PR #{0} (button in the header above) to see chapter diffs.",
++				pr.number,
+ 			);
++			return;
+ 		}
++
++		// Lazy-load review comments so threads populate as they arrive.
++		if (this.reviewComments === undefined && !this.reviewCommentsLoading) {
++			this.loadReviewComments(pr);
++		}
++
++		const host = DOM.append(wrap, DOM.$('.krt-pr-tour-mini-host'));
++		const multiDiff = this.instantiationService.createInstance(KrtPrMultiDiff, host);
++		this.bodyDisposables.add(multiDiff);
++		void multiDiff.setPullRequest(pr, orderedFiles, workspace, {
++			renderSideBySide: this.diffRenderMode === 'side-by-side',
++		});
+ 	}
+ 
+ 	private refreshTourSubheading(): void {
+@@ -1965,14 +1996,67 @@ export class KrtPullRequestEditorPane extends EditorPane {
+ 
+ 		const treeRows = new Map<string, HTMLElement>();
+ 		this.renderDiffTree(tree, orderedFiles, treeRows);
+-		// Phase A (rebuild) — chapter-scoped diff rendering temporarily
+-		// stripped. Phase D rebuilds this on top of `KrtPrMultiDiff`
+-		// scoped to `orderedFiles` so LSP + comments work here too.
+-		const placeholder = DOM.append(stack, DOM.$('.krt-pr-empty'));
+-		placeholder.textContent = localize(
+-			'krt.pr.diffRebuilding',
+-			"Diff view is being rebuilt on top of VS Code's MultiDiffEditor. Coming back shortly.",
+-		);
++
++		// Strict gate (same shape as the main Diff sub-mode): no
++		// workspace registered for the repo → "Add Workspace" CTA;
++		// not on PR head → Check Out CTA. Both fall through to a
++		// banner where the diff would go, leaving the chapter graph
++		// + tree rendering above so the user keeps context.
++		const workspace = this.workspaceRegistry.findByOwnerRepo(pr.owner, pr.repo);
++		if (!workspace) {
++			const cta = DOM.append(stack, DOM.$('.krt-pr-diff-cta'));
++			const heading = DOM.append(cta, DOM.$('.krt-pr-diff-cta-heading'));
++			heading.textContent = localize('krt.pr.storyboard.diffCtaNoWorkspace', "No workspace registered for {0}/{1}", pr.owner, pr.repo);
++			const body = DOM.append(cta, DOM.$('.krt-pr-diff-cta-body'));
++			body.textContent = localize(
++				'krt.pr.storyboard.diffCtaNoWorkspace.body',
++				"Add a local clone for this repo to render the chapter's diff with full LSP support.",
++			);
++			const btn = DOM.append(cta, DOM.$('button.krt-pr-diff-cta-btn')) as HTMLButtonElement;
++			btn.type = 'button';
++			btn.textContent = localize('krt.pr.diffCtaNoWorkspace.add', "Add Workspace…");
++			this.bodyDisposables.add(DOM.addDisposableListener(btn, 'click', () => {
++				void this.commandService.executeCommand('krt.workspace.add');
++			}));
++			return;
++		}
++		if (!this.isCheckedOut) {
++			const cta = DOM.append(stack, DOM.$('.krt-pr-diff-cta'));
++			const heading = DOM.append(cta, DOM.$('.krt-pr-diff-cta-heading'));
++			heading.textContent = localize('krt.pr.storyboard.diffCtaCheckout', "Check out PR #{0} to review the chapter", pr.number);
++			const body = DOM.append(cta, DOM.$('.krt-pr-diff-cta-body'));
++			body.textContent = localize(
++				'krt.pr.storyboard.diffCtaCheckout.body',
++				"Click Check out in the PR header. KRT switches the working tree non-destructively and the chapter's diff appears here with full LSP.",
++			);
++			return;
++		}
++
++		// Mount a chapter-scoped multi-diff. Same widget the main Diff
++		// sub-mode uses, just filtered to the chapter's files.
++		const multiDiff = this.instantiationService.createInstance(KrtPrMultiDiff, stack);
++		this.bodyDisposables.add(multiDiff);
++		void multiDiff.setPullRequest(pr, orderedFiles, workspace, {
++			renderSideBySide: this.diffRenderMode === 'side-by-side',
++		});
++
++		// Tree clicks → reveal the file inside the widget.
++		for (const [path, row] of treeRows) {
++			const file = orderedFiles.find(f => f.path === path);
++			if (!file) {
++				continue;
++			}
++			const previousPath = file.previousPath ?? file.path;
++			const modifiedUri = file.status !== 'removed'
++				? URI.joinPath(URI.file(workspace.folderPath), file.path)
++				: undefined;
++			const originalUri = file.status !== 'added'
++				? encodeKrtGit(workspace.folderUri, workspace.folderPath, pr.base.sha, previousPath)
++				: undefined;
++			this.bodyDisposables.add(DOM.addDisposableListener(row, 'click', () => {
++				multiDiff.revealFile(modifiedUri, originalUri);
++			}));
++		}
+ 	}
+ 
+ 	private renderStoryboardGraph(parent: HTMLElement, pr: PullRequest, chapters: readonly Chapter[]): void {
+-- 
+2.52.0
+

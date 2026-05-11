@@ -1,0 +1,65 @@
+From eb0f14d9a318f3a1d4b10c8ea7dcbe0167320f41 Mon Sep 17 00:00:00 2001
+From: Kol Crooks <kol.crooks@datadoghq.com>
+Date: Fri, 8 May 2026 14:01:43 -0400
+Subject: [PATCH] Phase 10 Batch 1 fix: stop double-mounting native comment
+ widgets
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+`KrtPrCommentController.refreshUri` and `createCommentThreadTemplate`
+were each firing both `updateComments` (delta) AND `setDocumentComments`
+(snapshot). Both reach `editor.contrib.review`:
+- `updateComments` → `onDidUpdateCommentThreads` → `handleCommentAdded`
+  pushes a `ReviewZoneWidget` per `added` thread.
+- `setDocumentComments` → `onDidSetResourceCommentInfos` → `setComments`
+  calls `removeCommentWidgetsAndStoreCache` and then re-mounts a
+  `ReviewZoneWidget` for every thread in the snapshot.
+
+When both fire in sequence, `setComments` wipes the widgets the delta
+just created and re-creates them. The transient overlap leaves
+`_commentWidgets` with stacked viewzones for the same `threadId` —
+visible to the user as multiple comment widgets on one line.
+
+`updateComments` alone is sufficient for delta updates after the initial
+provider attach (the workbench's first compute pulls a snapshot via
+`getDocumentComments` already). Drop the `setDocumentComments` calls.
+---
+ .../krt/browser/pr/krtPrCommentController.ts       | 14 ++++++++++++--
+ 1 file changed, 12 insertions(+), 2 deletions(-)
+
+diff --git a/src/vs/workbench/contrib/krt/browser/pr/krtPrCommentController.ts b/src/vs/workbench/contrib/krt/browser/pr/krtPrCommentController.ts
+index 528bc309afe..388136a03b5 100644
+--- a/src/vs/workbench/contrib/krt/browser/pr/krtPrCommentController.ts
++++ b/src/vs/workbench/contrib/krt/browser/pr/krtPrCommentController.ts
+@@ -285,7 +285,9 @@ export class KrtPrCommentController extends Disposable implements ICommentContro
+ 		this.commentService.updateComments(KRT_PR_COMMENT_OWNER, {
+ 			added: [template], removed, changed: [], pending: [],
+ 		});
+-		this.commentService.setDocumentComments(uri, [this.commentInfoForUri(uri)]);
++		// See `refreshUri` — `setDocumentComments` would re-mount the
++		// widgets `editor.contrib.review` is about to create from this
++		// `updateComments` delta.
+ 		for (const t of removed) { t.dispose(); }
+ 		this.publishWorkspaceSnapshot();
+ 	}
+@@ -425,7 +427,15 @@ export class KrtPrCommentController extends Disposable implements ICommentContro
+ 				added, removed, changed, pending: [],
+ 			});
+ 		}
+-		this.commentService.setDocumentComments(uri, [this.commentInfoForUri(uri)]);
++		// NB: deliberately not calling `setDocumentComments` here.
++		// `updateComments` already fires deltas to every listening editor
++		// (`editor.contrib.review` updates `_commentWidgets` against
++		// `added` / `removed` / `changed`). `setDocumentComments` triggers
++		// a wipe-and-re-add (`setComments` → `removeCommentWidgetsAndStoreCache`
++		// then `displayCommentThread` per thread), which duplicates the
++		// work and — critically — re-mounts widgets the diff handler
++		// already created, leaving multiple `ReviewZoneWidget` viewzones
++		// stacked on the same line.
+ 		for (const t of removed) { t.dispose(); }
+ 		this.publishWorkspaceSnapshot();
+ 	}
+-- 
+2.52.0
+

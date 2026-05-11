@@ -1,0 +1,714 @@
+From 0a6fef7bf1f8b24e54bd7a4a26819566280298a4 Mon Sep 17 00:00:00 2001
+From: Kol Crooks <kol.crooks@datadoghq.com>
+Date: Thu, 7 May 2026 14:04:27 -0400
+Subject: [PATCH] Phase B (rebuild): MultiDiffEditorWidget for the Diff
+ sub-mode
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Replaces the per-file custom DiffEditorWidget stack with a single
+embedded MultiDiffEditorWidget — same widget upstream's SCM source
+control uses. Each PR file becomes a `IDocumentDiffItem` whose
+original/modified models are resolved via
+`ITextModelService.createModelReference` against:
+
+  modified: file://${workspace.folderPath}/${path}
+  original: krt-git://${workspace}/${baseSha}/${previousPath}
+
+The modified `file://` URI runs through `IFileService` on the
+workbench's normal file-loading path, so language extensions activate
+naturally — rust-analyzer hover, goto-def, peek, find-references,
+etc. all work in the diff. The original `krt-git://` URI is served by
+Phase 8.6's existing content provider via `git show baseSha:path`,
+read-only, no LSP (the base side rarely needs it).
+
+Strict gate sits in the editor pane:
+  - No workspace registered for (owner, repo) → CTA explaining and
+    invoking `krt.workspace.add`.
+  - Working tree not on PR head → CTA pointing at the Check Out
+    button in the PR header (Phase 8.7's existing flow).
+  - Both satisfied → mount the widget.
+
+The gate keys off `isCheckedOut`, which `refreshCheckoutStatus`
+already populates from `getHeadSha`. Hooked the post-flip path so
+that going from "not checked out" → "checked out" (or back)
+re-renders the diff sub-mode if active.
+
+`KrtPrMultiDiff` (new file) wraps the widget, builds the model from
+the PR's file list, and exposes `revealFile(modifiedUri,
+originalUri)` for tree-row clicks. The widget self-virtualises and
+self-scrolls; the host element's height is `min(70vh, 100vh - 200px)`
+for a sensible viewport fit.
+
+File tree on the left preserved — clicking a row reveals the
+corresponding file inside the widget. Mark-reviewed UI temporarily
+gone (the per-file checkbox lived in the deleted
+`renderDiffFileSection`); Phase D adds it back via context menu on
+the widget's per-file headers.
+
+Storyboard chapter diff panel kept its Phase A placeholder — Phase
+D rebuilds it on `KrtPrMultiDiff` scoped to chapter files.
+
+Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+---
+ .../contrib/krt/browser/pr/krtPrMultiDiff.ts  | 188 +++++++++++++
+ .../browser/pr/krtPullRequestEditorPane.css   |  57 ++++
+ .../browser/pr/krtPullRequestEditorPane.ts    | 265 +++++++-----------
+ 3 files changed, 340 insertions(+), 170 deletions(-)
+ create mode 100644 src/vs/workbench/contrib/krt/browser/pr/krtPrMultiDiff.ts
+
+diff --git a/src/vs/workbench/contrib/krt/browser/pr/krtPrMultiDiff.ts b/src/vs/workbench/contrib/krt/browser/pr/krtPrMultiDiff.ts
+new file mode 100644
+index 00000000000..889f259b776
+--- /dev/null
++++ b/src/vs/workbench/contrib/krt/browser/pr/krtPrMultiDiff.ts
+@@ -0,0 +1,188 @@
++/*---------------------------------------------------------------------------------------------
++ *  Copyright (c) Microsoft Corporation. All rights reserved.
++ *  Licensed under the MIT License. See License.txt in the project root for license information.
++ *--------------------------------------------------------------------------------------------*/
++
++import { Disposable, DisposableStore, IDisposable, IReference } from '../../../../../base/common/lifecycle.js';
++import { observableValue, ValueWithChangeEventFromObservable } from '../../../../../base/common/observable.js';
++import { URI } from '../../../../../base/common/uri.js';
++import { MultiDiffEditorWidget } from '../../../../../editor/browser/widget/multiDiffEditor/multiDiffEditorWidget.js';
++import { IDocumentDiffItem, IMultiDiffEditorModel } from '../../../../../editor/browser/widget/multiDiffEditor/model.js';
++import { IResourceLabel, IWorkbenchUIElementFactory } from '../../../../../editor/browser/widget/multiDiffEditor/workbenchUIElementFactory.js';
++import { RefCounted } from '../../../../../editor/browser/widget/diffEditor/utils.js';
++import { IResolvedTextEditorModel, ITextModelService } from '../../../../../editor/common/services/resolverService.js';
++import { IInstantiationService } from '../../../../../platform/instantiation/common/instantiation.js';
++import { ILogService } from '../../../../../platform/log/common/log.js';
++import { PullRequest, PullRequestFile } from '../../../../../platform/krt/common/krt.js';
++import { ResourceLabel } from '../../../../browser/labels.js';
++import { encodeKrtGit } from '../workspace/krtGitContentProvider.js';
++import { KrtWorkspace } from '../workspace/krtWorkspaceRegistry.js';
++
++/**
++ * Phase 10/B — owns the embedded `MultiDiffEditorWidget` for KRT's
++ * Diff sub-mode. One instance per render. The widget self-virtualises
++ * the file list and self-scrolls internally; KRT's job is to feed it
++ * the right `(originalUri, modifiedUri)` pairs and let the workbench's
++ * normal model resolution handle everything else (LSP activation on
++ * the modified `file://` URI, content via `git show` for the
++ * `krt-git://` original, etc.).
++ *
++ * URI strategy:
++ *   - **modifiedUri** = `file://${workspace.folderPath}/${path}` for any
++ *     file whose `status !== 'removed'`. The workbench loads this via
++ *     `IFileService` through its normal file-loading path → language
++ *     extensions activate.
++ *   - **originalUri** = `krt-git://${workspace}/${baseSha}/${previousPath}`
++ *     for any file whose `status !== 'added'`. The Phase 8.6
++ *     `KrtGitContentProvider` shells `git show baseSha:path` for the
++ *     content. Read-only, no LSP — but the base side rarely needs it.
++ *
++ * Strict gate: callers should only construct this when the workspace
++ * is registered AND the working tree's HEAD matches `pr.head.sha`.
++ * Without that, the `file://` content would reflect a different
++ * commit and the diff would lie. The gate lives in the editor pane
++ * because the pane already tracks `isCheckedOut`.
++ */
++export class KrtPrMultiDiff extends Disposable {
++
++	private readonly widget: MultiDiffEditorWidget;
++	private currentModel: { dispose(): void } | undefined;
++
++	constructor(
++		container: HTMLElement,
++		@IInstantiationService private readonly instantiationService: IInstantiationService,
++		@ITextModelService private readonly textModelService: ITextModelService,
++		@ILogService private readonly logService: ILogService,
++	) {
++		super();
++		const factory = this.instantiationService.createInstance(KrtMultiDiffUIElementFactory);
++		this.widget = this._register(this.instantiationService.createInstance(
++			MultiDiffEditorWidget,
++			container,
++			factory,
++		));
++	}
++
++	/**
++	 * Build a `MultiDiffEditorViewModel` from the PR's file list and
++	 * push it into the widget. Resolves each side via
++	 * `ITextModelService.createModelReference` so the workbench's
++	 * normal lifetime/sharing rules apply. References live until the
++	 * model is replaced or this view disposes.
++	 *
++	 * Files whose resolution fails on either side (e.g. the base SHA
++	 * isn't fetched locally) get skipped with a warning log — the
++	 * remaining files still render. A more nuanced "couldn't load
++	 * this file's base" UI can land in a polish pass.
++	 */
++	async setPullRequest(pr: PullRequest, files: readonly PullRequestFile[], workspace: KrtWorkspace): Promise<void> {
++		const previous = this.currentModel;
++
++		const items: RefCounted<IDocumentDiffItem>[] = [];
++		for (const file of files) {
++			const itemStore = new DisposableStore();
++			const previousPath = file.previousPath ?? file.path;
++			const originalUri = file.status !== 'added'
++				? encodeKrtGit(workspace.folderUri, pr.base.sha, previousPath)
++				: undefined;
++			const modifiedUri = file.status !== 'removed'
++				? URI.joinPath(URI.file(workspace.folderPath), file.path)
++				: undefined;
++
++			let original: IReference<IResolvedTextEditorModel> | undefined;
++			let modified: IReference<IResolvedTextEditorModel> | undefined;
++			try {
++				[original, modified] = await Promise.all([
++					originalUri ? this.textModelService.createModelReference(originalUri) : undefined,
++					modifiedUri ? this.textModelService.createModelReference(modifiedUri) : undefined,
++				]);
++			} catch (err) {
++				this.logService.warn(`[krt] multi-diff: skipping ${file.path} — model resolution failed`, err);
++				original?.dispose();
++				modified?.dispose();
++				itemStore.dispose();
++				continue;
++			}
++
++			if (this._store.isDisposed) {
++				original?.dispose();
++				modified?.dispose();
++				itemStore.dispose();
++				return;
++			}
++
++			if (original) { itemStore.add(original); }
++			if (modified) { itemStore.add(modified); }
++
++			const item: IDocumentDiffItem = {
++				original: original?.object.textEditorModel,
++				modified: modified?.object.textEditorModel,
++				options: {
++					readOnly: true,
++					originalEditable: false,
++					renderSideBySide: true,
++					hideUnchangedRegions: { enabled: true, contextLineCount: 3, minimumLineCount: 4 },
++				},
++			};
++			items.push(RefCounted.createOfNonDisposable(item, itemStore));
++		}
++
++		if (this._store.isDisposed) {
++			for (const item of items) { item.dispose(); }
++			return;
++		}
++
++		const documents = observableValue<readonly RefCounted<IDocumentDiffItem>[] | 'loading'>('krt.pr.multiDiff.documents', items);
++		const model: IMultiDiffEditorModel & IDisposable = {
++			documents: new ValueWithChangeEventFromObservable(documents),
++			dispose: () => {
++				for (const item of items) { item.dispose(); }
++			},
++		};
++
++		const vm = this.widget.createViewModel(model);
++		this.widget.setViewModel(vm);
++		this.currentModel = model;
++
++		// Drop the previous model after the swap so the widget never
++		// holds a destroyed text model. (Mirrors the pattern in
++		// upstream's `MultiDiffEditor.clearInput`.)
++		previous?.dispose();
++	}
++
++	revealFile(modifiedUri: URI | undefined, originalUri: URI | undefined): void {
++		this.widget.reveal({ modified: modifiedUri, original: originalUri }, { highlight: false });
++	}
++
++	override dispose(): void {
++		this.widget.setViewModel(undefined);
++		this.currentModel?.dispose();
++		this.currentModel = undefined;
++		super.dispose();
++	}
++}
++
++/**
++ * Tiny `IWorkbenchUIElementFactory` impl — the widget asks us to
++ * create file labels for its per-item header. Mirrors upstream's
++ * private `WorkbenchUIElementFactory` in `multiDiffEditor.ts`.
++ */
++class KrtMultiDiffUIElementFactory implements IWorkbenchUIElementFactory {
++	constructor(
++		@IInstantiationService private readonly instantiationService: IInstantiationService,
++	) { }
++
++	createResourceLabel(element: HTMLElement): IResourceLabel {
++		const label = this.instantiationService.createInstance(ResourceLabel, element, {});
++		return {
++			setUri: (uri, options = {}) => {
++				if (!uri) {
++					label.element.clear();
++				} else {
++					label.element.setFile(uri, { strikethrough: options.strikethrough });
++				}
++			},
++			dispose: () => label.dispose(),
++		};
++	}
++}
+diff --git a/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.css b/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.css
+index 664e38d21cf..5c964c11231 100644
+--- a/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.css
++++ b/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.css
+@@ -795,6 +795,63 @@
+ 	width: 100%;
+ }
+ 
++/* Phase 10/B host for the embedded MultiDiffEditorWidget. The widget
++ * virtualises its file list and self-scrolls internally, so the host
++ * needs an explicit height. min-height anchors the bottom of the
++ * viewport on tall pages without forcing a layout when the user has
++ * something else above; max-height caps it on short viewports so the
++ * widget stays within the pane. */
++.krt-pr-multidiff-host {
++	position: relative;
++	min-height: 70vh;
++	max-height: calc(100vh - 200px);
++	border: 1px solid var(--vscode-widget-border, rgba(127, 127, 127, 0.3));
++	border-radius: 6px;
++	overflow: hidden;
++}
++
++/* CTA shown when the diff is gated (no workspace registered, or the
++ * working tree isn't on the PR head). Mirrors the Search overlay's
++ * empty-state look. */
++.krt-pr-diff-cta {
++	display: flex;
++	flex-direction: column;
++	gap: 10px;
++	align-items: flex-start;
++	padding: 24px;
++	border: 1px solid var(--vscode-widget-border, rgba(127, 127, 127, 0.3));
++	border-radius: 6px;
++	background: var(--vscode-editor-background);
++}
++
++.krt-pr-diff-cta-heading {
++	font-size: 14px;
++	font-weight: 600;
++}
++
++.krt-pr-diff-cta-body {
++	font-size: 12.5px;
++	color: var(--vscode-descriptionForeground);
++	max-width: 60ch;
++	line-height: 1.55;
++}
++
++.krt-pr-diff-cta-btn {
++	font: inherit;
++	font-size: 12px;
++	font-weight: 500;
++	background: var(--krt-accent, var(--vscode-button-background));
++	color: var(--vscode-button-foreground, white);
++	border: none;
++	border-radius: 4px;
++	padding: 6px 14px;
++	cursor: pointer;
++}
++
++.krt-pr-diff-cta-btn:hover {
++	background: var(--krt-accent-2, var(--vscode-button-hoverBackground));
++}
++
+ .krt-pr-diff-tree {
+ 	display: flex;
+ 	flex-direction: column;
+diff --git a/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.ts b/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.ts
+index ebd1883f82d..94223909d5f 100644
+--- a/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.ts
++++ b/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.ts
+@@ -14,6 +14,7 @@ import { URI } from '../../../../../base/common/uri.js';
+ import { localize } from '../../../../../nls.js';
+ import { ICommandService } from '../../../../../platform/commands/common/commands.js';
+ import { IEditorOptions } from '../../../../../platform/editor/common/editor.js';
++import { IInstantiationService } from '../../../../../platform/instantiation/common/instantiation.js';
+ import { IStorageService, StorageScope, StorageTarget } from '../../../../../platform/storage/common/storage.js';
+ import { ITelemetryService } from '../../../../../platform/telemetry/common/telemetry.js';
+ import { IThemeService } from '../../../../../platform/theme/common/themeService.js';
+@@ -56,7 +57,9 @@ import { IEditorGroup } from '../../../../services/editor/common/editorGroupsSer
+ import { recordRecentPullRequest } from '../krtRecentPullRequests.js';
+ import { KrtPullRequestEditorInput } from './krtPullRequestEditorInput.js';
+ import { getCached, getInFlight, invalidate as invalidatePrCache, putActivity, putFiles, putPr, putReviewComments, putSubMode, trackFetch } from './krtPrCache.js';
+-import { readReviewedPaths, writeReviewedPaths } from './krtPrReviewed.js';
++import { KrtPrMultiDiff } from './krtPrMultiDiff.js';
++import { readReviewedPaths } from './krtPrReviewed.js';
++import { encodeKrtGit } from '../workspace/krtGitContentProvider.js';
+ 
+ const DIFF_MODE_STORAGE_KEY = 'krt.pr.diffMode.v1';
+ 
+@@ -120,7 +123,6 @@ export class KrtPullRequestEditorPane extends EditorPane {
+ 	private diffFilesLoading = false;
+ 	private diffFilesError: string | undefined;
+ 	private reviewedPaths: Set<string> = new Set();
+-	private collapsedDiffFiles: Set<string> = new Set();
+ 	private diffRenderMode: 'side-by-side' | 'inline' = 'side-by-side';
+ 	/**
+ 	 * `true` when the registered workspace's current HEAD SHA matches
+@@ -133,7 +135,6 @@ export class KrtPullRequestEditorPane extends EditorPane {
+ 	private reviewComments: readonly Comment[] | undefined;
+ 	private reviewCommentsLoading = false;
+ 	private diffTreeRowsByPath = new Map<string, HTMLElement>();
+-	private diffTreeCountEl: HTMLElement | undefined;
+ 
+ 	// Tour sub-mode state
+ 	private tourState: TourState | undefined;
+@@ -165,6 +166,7 @@ export class KrtPullRequestEditorPane extends EditorPane {
+ 		@IOpenerService private readonly openerService: IOpenerService,
+ 		@ITourGenerator private readonly tourGenerator: ITourGenerator,
+ 		@ICommandService private readonly commandService: ICommandService,
++		@IInstantiationService private readonly instantiationService: IInstantiationService,
+ 		@IKrtWorkspaceRegistry private readonly workspaceRegistry: IKrtWorkspaceRegistry,
+ 		@IKrtGitService private readonly krtGitService: IKrtGitService,
+ 		@IKrtSwitchResumeService private readonly switchResumeService: IKrtSwitchResumeService,
+@@ -287,6 +289,13 @@ export class KrtPullRequestEditorPane extends EditorPane {
+ 			if (this.isCheckedOut !== matches) {
+ 				this.isCheckedOut = matches;
+ 				this.updateHeaderActionsEnablement();
++				// Phase 10/B — the Diff sub-mode's strict gate keys off
++				// `isCheckedOut`. Flipping it from false to true (or back)
++				// has to re-render so the gate either reveals the diff or
++				// shows the Check Out CTA.
++				if (this.subMode === 'diff' && this.currentPr) {
++					this.renderLoaded(this.currentPr);
++				}
+ 			}
+ 		} catch (err) {
+ 			// `getHeadSha` can fail if the folder isn't a git repo, etc.
+@@ -297,6 +306,9 @@ export class KrtPullRequestEditorPane extends EditorPane {
+ 			if (this.isCheckedOut) {
+ 				this.isCheckedOut = false;
+ 				this.updateHeaderActionsEnablement();
++				if (this.subMode === 'diff' && this.currentPr) {
++					this.renderLoaded(this.currentPr);
++				}
+ 			}
+ 		}
+ 	}
+@@ -483,7 +495,6 @@ export class KrtPullRequestEditorPane extends EditorPane {
+ 		this.reviewComments = undefined;
+ 		this.reviewCommentsLoading = false;
+ 		this.reviewedPaths = new Set(readReviewedPaths(this.krtStorageService, input.owner, input.repo, input.number));
+-		this.collapsedDiffFiles = new Set();
+ 		this.diffRenderMode = readDiffRenderMode(this.krtStorageService);
+ 		// Restore the previous sub-mode for this PR if we have one.
+ 		// `setInput` resets `subMode` to 'pr' above, so cache hits here
+@@ -567,7 +578,6 @@ export class KrtPullRequestEditorPane extends EditorPane {
+ 		this.currentPr = undefined;
+ 		this.fetchToken++;
+ 		this.diffTreeRowsByPath = new Map();
+-		this.diffTreeCountEl = undefined;
+ 		this.tourSubheadingEl = undefined;
+ 		this.tourStreamingBadgeEl = undefined;
+ 		this.storyboardSubheadingEl = undefined;
+@@ -1008,10 +1018,10 @@ export class KrtPullRequestEditorPane extends EditorPane {
+ 		this.renderDiffTopBar(this.bodyElement, pr);
+ 		const wrap = DOM.append(this.bodyElement, DOM.$('.krt-pr-diff'));
+ 		const tree = DOM.append(wrap, DOM.$('.krt-pr-diff-tree'));
+-		const stack = DOM.append(wrap, DOM.$('.krt-pr-diff-stack'));
++		const host = DOM.append(wrap, DOM.$('.krt-pr-multidiff-host'));
+ 
+ 		if (this.diffFiles === undefined) {
+-			const empty = DOM.append(stack, DOM.$('.krt-pr-empty'));
++			const empty = DOM.append(host, DOM.$('.krt-pr-empty'));
+ 			empty.textContent = this.diffFilesLoading
+ 				? localize('krt.pr.diffLoading', "Loading changed files…")
+ 				: localize('krt.pr.diffPending', "Fetching changed files…");
+@@ -1023,73 +1033,96 @@ export class KrtPullRequestEditorPane extends EditorPane {
+ 			return;
+ 		}
+ 		if (this.diffFilesError) {
+-			const err = DOM.append(stack, DOM.$('.krt-pr-empty.error'));
++			const err = DOM.append(host, DOM.$('.krt-pr-empty.error'));
+ 			err.textContent = this.diffFilesError;
+ 			const treeErr = DOM.append(tree, DOM.$('.krt-pr-side-empty'));
+ 			treeErr.textContent = localize('krt.pr.diffTreeError', "Couldn't load files.");
+ 			return;
+ 		}
+ 		if (this.diffFiles.length === 0) {
+-			const empty = DOM.append(stack, DOM.$('.krt-pr-empty'));
++			const empty = DOM.append(host, DOM.$('.krt-pr-empty'));
+ 			empty.textContent = localize('krt.pr.diffNoFiles', "This PR has no file changes.");
+ 			return;
+ 		}
+ 
+-		// Kick off review comments fetch lazily.
++		// Phase 10/B strict gate — the diff is a real Monaco multi-diff
++		// editor backed by file:// (modified) + krt-git:// (original)
++		// URIs. For the file:// URI to give the right content the
++		// working tree must be on the PR's head SHA, which means a
++		// workspace must be registered for the repo AND that workspace
++		// must currently be checked out to the PR head. Without that we
++		// can't honour requirement #1 (Monaco pane with LSP) — fall
++		// through to a CTA that nudges the user toward the existing
++		// Check Out button in the PR header.
++		const workspace = this.workspaceRegistry.findByOwnerRepo(pr.owner, pr.repo);
++		if (!workspace) {
++			const treeEmpty = DOM.append(tree, DOM.$('.krt-pr-side-empty'));
++			treeEmpty.textContent = localize('krt.pr.diffTreeNoWorkspace', "No workspace");
++			const cta = DOM.append(host, DOM.$('.krt-pr-diff-cta'));
++			const heading = DOM.append(cta, DOM.$('.krt-pr-diff-cta-heading'));
++			heading.textContent = localize('krt.pr.diffCtaNoWorkspace.heading', "No workspace registered for {0}/{1}", pr.owner, pr.repo);
++			const body = DOM.append(cta, DOM.$('.krt-pr-diff-cta-body'));
++			body.textContent = localize(
++				'krt.pr.diffCtaNoWorkspace.body',
++				"KRT renders the diff using files from the local clone so language extensions (rust-analyzer, gopls, …) light up. Add a workspace for this repo to enable the diff view.",
++			);
++			const btn = DOM.append(cta, DOM.$('button.krt-pr-diff-cta-btn')) as HTMLButtonElement;
++			btn.type = 'button';
++			btn.textContent = localize('krt.pr.diffCtaNoWorkspace.add', "Add Workspace…");
++			this.bodyDisposables.add(DOM.addDisposableListener(btn, 'click', () => {
++				void this.commandService.executeCommand('krt.workspace.add');
++			}));
++			return;
++		}
++		if (!this.isCheckedOut) {
++			const treeEmpty = DOM.append(tree, DOM.$('.krt-pr-side-empty'));
++			treeEmpty.textContent = localize('krt.pr.diffTreeNeedsCheckout', "Check out PR");
++			const cta = DOM.append(host, DOM.$('.krt-pr-diff-cta'));
++			const heading = DOM.append(cta, DOM.$('.krt-pr-diff-cta-heading'));
++			heading.textContent = localize('krt.pr.diffCtaCheckout.heading', "Check out PR #{0} to review the diff", pr.number);
++			const body = DOM.append(cta, DOM.$('.krt-pr-diff-cta-body'));
++			body.textContent = localize(
++				'krt.pr.diffCtaCheckout.body',
++				"KRT renders the diff against the working tree at the PR's head commit. Click Check out in the header above; KRT switches the working tree non-destructively (jj op restore / git stash) and the diff appears here with full LSP support.",
++			);
++			return;
++		}
++
++		// Kick off review comments fetch lazily so Phase C has data
++		// to push through the native Comments API once the controller
++		// lands.
+ 		if (this.reviewComments === undefined && !this.reviewCommentsLoading) {
+ 			this.loadReviewComments(pr);
+ 		}
+ 
+-		// File tree.
++		// File tree on the left — preserves Mark Reviewed UI and gives
++		// the user a quick navigation surface. Click → reveal the file
++		// inside the multi-diff widget.
+ 		this.diffTreeRowsByPath = new Map();
+ 		this.renderDiffTree(tree, this.diffFiles, this.diffTreeRowsByPath);
+-		const treeRows = this.diffTreeRowsByPath;
+ 
+-		// Stacked patch sections.
+-		const sectionByPath = new Map<string, HTMLElement>();
+-		for (const file of this.diffFiles) {
+-			const section = this.renderDiffFileSection(stack, pr, file);
+-			sectionByPath.set(file.path, section);
+-		}
++		// Mount the multi-diff widget in the host. The widget owns its
++		// own virtualised stack + internal scroll.
++		const multiDiff = this.instantiationService.createInstance(KrtPrMultiDiff, host);
++		this.bodyDisposables.add(multiDiff);
++		void multiDiff.setPullRequest(pr, this.diffFiles, workspace);
+ 
+-		// Scroll-sync: pane root is the single scroll surface (tree is sticky).
+-		// Highlight the tree row whose section is closest to the viewport top.
+-		const setActive = (path: string) => {
+-			for (const [p, row] of treeRows) {
+-				row.classList.toggle('active', p === path);
+-			}
+-		};
+-		const onScroll = () => {
+-			const rootTop = this.root.getBoundingClientRect().top;
+-			let activePath: string | undefined;
+-			let bestDelta = Number.POSITIVE_INFINITY;
+-			for (const [p, section] of sectionByPath) {
+-				const delta = section.getBoundingClientRect().top - rootTop;
+-				if (delta <= 80 && Math.abs(delta) < bestDelta) {
+-					bestDelta = Math.abs(delta);
+-					activePath = p;
+-				}
+-			}
+-			if (!activePath && this.diffFiles && this.diffFiles.length > 0) {
+-				activePath = this.diffFiles[0].path;
+-			}
+-			if (activePath) {
+-				setActive(activePath);
++		// Tree clicks → reveal the file inside the widget. The URIs
++		// here mirror what `KrtPrMultiDiff` builds internally.
++		for (const [path, row] of this.diffTreeRowsByPath) {
++			const file = this.diffFiles.find(f => f.path === path);
++			if (!file) {
++				continue;
+ 			}
+-		};
+-		this.bodyDisposables.add(DOM.addDisposableListener(this.root, 'scroll', onScroll));
+-		// Initial highlight.
+-		if (this.diffFiles.length > 0) {
+-			setActive(this.diffFiles[0].path);
+-		}
+-
+-		// Tree clicks scroll to the section.
+-		for (const [path, row] of treeRows) {
++			const previousPath = file.previousPath ?? file.path;
++			const modifiedUri = file.status !== 'removed'
++				? URI.joinPath(URI.file(workspace.folderPath), file.path)
++				: undefined;
++			const originalUri = file.status !== 'added'
++				? encodeKrtGit(workspace.folderUri, pr.base.sha, previousPath)
++				: undefined;
+ 			this.bodyDisposables.add(DOM.addDisposableListener(row, 'click', () => {
+-				const section = sectionByPath.get(path);
+-				if (section) {
+-					section.scrollIntoView({ behavior: 'smooth', block: 'start' });
+-				}
++				multiDiff.revealFile(modifiedUri, originalUri);
+ 			}));
+ 		}
+ 	}
+@@ -1102,7 +1135,6 @@ export class KrtPullRequestEditorPane extends EditorPane {
+ 		const reviewedCount = files.filter(f => this.reviewedPaths.has(f.path)).length;
+ 		headCount.textContent = `${reviewedCount}/${files.length}`;
+ 
+-		this.diffTreeCountEl = headCount;
+ 		const list = DOM.append(parent, DOM.$('.krt-pr-diff-tree-list'));
+ 		const groups = groupFilesByFolder(files);
+ 		for (const group of groups) {
+@@ -1171,107 +1203,6 @@ export class KrtPullRequestEditorPane extends EditorPane {
+ 		}));
+ 	}
+ 
+-	private renderDiffFileSection(parent: HTMLElement, pr: PullRequest, file: PullRequestFile): HTMLElement {
+-		const section = DOM.append(parent, DOM.$('.krt-pr-diff-section'));
+-		section.setAttribute('data-path', file.path);
+-		if (this.reviewedPaths.has(file.path)) {
+-			section.classList.add('reviewed');
+-		}
+-		if (this.collapsedDiffFiles.has(file.path)) {
+-			section.classList.add('collapsed');
+-		}
+-
+-		const head = DOM.append(section, DOM.$('.krt-pr-diff-section-head'));
+-		// Click anywhere on the header (except interactive children — the
+-		// Reviewed checkbox label) toggles the file's collapsed state.
+-		// Interactive children stop propagation themselves below.
+-		this.bodyDisposables.add(DOM.addDisposableListener(head, 'click', e => {
+-			const target = e.target as HTMLElement | null;
+-			if (target?.closest('label, input, button, a')) {
+-				return;
+-			}
+-			if (this.collapsedDiffFiles.has(file.path)) {
+-				this.collapsedDiffFiles.delete(file.path);
+-				section.classList.remove('collapsed');
+-			} else {
+-				this.collapsedDiffFiles.add(file.path);
+-				section.classList.add('collapsed');
+-				// Anchor at the just-collapsed header. Without this, the
+-				// outer pane's content shifts up when the body disappears
+-				// and the user lands somewhere ahead of where they were
+-				// reading.
+-				section.scrollIntoView({ block: 'start' });
+-			}
+-		}));
+-		DOM.append(head, DOM.$('span.krt-pr-diff-section-caret.codicon.codicon-chevron-down'));
+-		const status = DOM.append(head, DOM.$('span.krt-pr-diff-status-dot'));
+-		status.classList.add(file.status);
+-		status.textContent = statusGlyph(file.status);
+-		const path = DOM.append(head, DOM.$('span.krt-pr-diff-section-path'));
+-		path.textContent = file.path;
+-		if (file.previousPath && file.previousPath !== file.path) {
+-			const renamed = DOM.append(head, DOM.$('span.krt-pr-diff-section-renamed'));
+-			renamed.textContent = localize('krt.pr.renamedFrom', "from {0}", file.previousPath);
+-		}
+-		const counts = DOM.append(head, DOM.$('span.krt-pr-diff-section-counts'));
+-		const add = DOM.append(counts, DOM.$('span.add'));
+-		add.textContent = `+${file.additions}`;
+-		const del = DOM.append(counts, DOM.$('span.del'));
+-		del.textContent = `-${file.deletions}`;
+-
+-		const reviewedLbl = DOM.append(head, DOM.$('label.krt-pr-diff-reviewed'));
+-		const reviewedBox = DOM.append(reviewedLbl, DOM.$('input')) as HTMLInputElement;
+-		reviewedBox.type = 'checkbox';
+-		reviewedBox.checked = this.reviewedPaths.has(file.path);
+-		const reviewedTxt = DOM.append(reviewedLbl, DOM.$('span'));
+-		reviewedTxt.textContent = localize('krt.pr.reviewedCheck', "Reviewed");
+-		this.bodyDisposables.add(DOM.addDisposableListener(reviewedBox, 'change', () => {
+-			this.toggleReviewed(file.path, reviewedBox.checked);
+-			section.classList.toggle('reviewed', reviewedBox.checked);
+-		}));
+-
+-		const body = DOM.append(section, DOM.$('.krt-pr-diff-section-body'));
+-		if (!file.patch) {
+-			const empty = DOM.append(body, DOM.$('.krt-pr-diff-no-patch'));
+-			empty.textContent = file.status === 'renamed'
+-				? localize('krt.pr.diffRenameOnly', "Rename only — no content change.")
+-				: localize('krt.pr.diffNoPatchAvailable', "No patch available (binary or too large).");
+-			return section;
+-		}
+-
+-		// Phase A (rebuild) — diff rendering temporarily stripped while
+-		// the new MultiDiffEditor-based stack is built. Show a placeholder
+-		// so the user knows the file exists but the diff body is in
+-		// flight. Mark-reviewed and the file header are still functional.
+-		const placeholder = DOM.append(body, DOM.$('.krt-pr-diff-rebuilding'));
+-		placeholder.textContent = localize(
+-			'krt.pr.diffRebuilding',
+-			"Diff view is being rebuilt on top of VS Code's MultiDiffEditor. Coming back shortly.",
+-		);
+-
+-		return section;
+-	}
+-
+-	private toggleReviewed(path: string, reviewed: boolean): void {
+-		if (reviewed) {
+-			this.reviewedPaths.add(path);
+-		} else {
+-			this.reviewedPaths.delete(path);
+-		}
+-		const input = this.currentInput;
+-		if (input) {
+-			writeReviewedPaths(this.krtStorageService, input.owner, input.repo, input.number, this.reviewedPaths);
+-		}
+-		if (this.diffTreeCountEl && this.diffFiles) {
+-			const reviewedCount = this.diffFiles.filter(f => this.reviewedPaths.has(f.path)).length;
+-			this.diffTreeCountEl.textContent = `${reviewedCount}/${this.diffFiles.length}`;
+-		}
+-		const row = this.diffTreeRowsByPath.get(path);
+-		if (row) {
+-			row.classList.toggle('reviewed', reviewed);
+-		}
+-	}
+-
+ 	private async loadDiffFiles(pr: PullRequest): Promise<void> {
+ 		this.diffFilesLoading = true;
+ 		this.diffFilesError = undefined;
+@@ -2015,20 +1946,14 @@ export class KrtPullRequestEditorPane extends EditorPane {
+ 
+ 		const treeRows = new Map<string, HTMLElement>();
+ 		this.renderDiffTree(tree, orderedFiles, treeRows);
+-		const sectionByPath = new Map<string, HTMLElement>();
+-		for (const file of orderedFiles) {
+-			const section = this.renderDiffFileSection(stack, pr, file);
+-			sectionByPath.set(file.path, section);
+-		}
+-		// Tree clicks scroll the editor root to the section.
+-		for (const [path, row] of treeRows) {
+-			this.bodyDisposables.add(DOM.addDisposableListener(row, 'click', () => {
+-				const section = sectionByPath.get(path);
+-				if (section) {
+-					section.scrollIntoView({ behavior: 'smooth', block: 'start' });
+-				}
+-			}));
+-		}
++		// Phase A (rebuild) — chapter-scoped diff rendering temporarily
++		// stripped. Phase D rebuilds this on top of `KrtPrMultiDiff`
++		// scoped to `orderedFiles` so LSP + comments work here too.
++		const placeholder = DOM.append(stack, DOM.$('.krt-pr-empty'));
++		placeholder.textContent = localize(
++			'krt.pr.diffRebuilding',
++			"Diff view is being rebuilt on top of VS Code's MultiDiffEditor. Coming back shortly.",
++		);
+ 	}
+ 
+ 	private renderStoryboardGraph(parent: HTMLElement, pr: PullRequest, chapters: readonly Chapter[]): void {
+-- 
+2.52.0
+

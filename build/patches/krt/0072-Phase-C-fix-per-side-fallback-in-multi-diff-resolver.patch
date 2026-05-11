@@ -1,0 +1,156 @@
+From 4e91aacdffb94e3ad5bfaa673942ffd49272d229 Mon Sep 17 00:00:00 2001
+From: Kol Crooks <kol.crooks@datadoghq.com>
+Date: Thu, 7 May 2026 14:43:56 -0400
+Subject: [PATCH] Phase C fix: per-side fallback in multi-diff resolver
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Reported: a chunk of files in a real Cargo PR rendered as warnings
+("multi-diff: skipping ..., model resolution failed") and disappeared
+from the diff. Underlying error was `git show baseSha:path` failing
+with "path 'X' exists on disk, but not in 'baseSha'". Files in this
+state are conceptually "added" relative to the user's local clone of
+the base SHA — the local base may have predated the file's creation
+upstream, or the PR's classification disagreed with the local view.
+Either way, the file's modified side resolves cleanly and we should
+render it.
+
+Switch the resolver from `Promise.all` (one rejection bails both) to
+per-side `Promise.allSettled`. If only one side fails, render the
+file with the surviving side: an unresolved original looks like an
+added file (empty original), an unresolved modified looks like
+removed (empty modified). Only when both sides fail do we skip.
+
+Also moved the comment-controller URI registration to happen AFTER
+resolution, gated on the side actually resolving — registering a URI
+whose model couldn't load would leak into the bottom Comments panel
+as a thread the user can never navigate to.
+
+Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+---
+ .../contrib/krt/browser/pr/krtPrMultiDiff.ts  | 82 +++++++++++--------
+ 1 file changed, 50 insertions(+), 32 deletions(-)
+
+diff --git a/src/vs/workbench/contrib/krt/browser/pr/krtPrMultiDiff.ts b/src/vs/workbench/contrib/krt/browser/pr/krtPrMultiDiff.ts
+index 99f4c4eedae..4b99ecc970d 100644
+--- a/src/vs/workbench/contrib/krt/browser/pr/krtPrMultiDiff.ts
++++ b/src/vs/workbench/contrib/krt/browser/pr/krtPrMultiDiff.ts
+@@ -73,10 +73,13 @@ export class KrtPrMultiDiff extends Disposable {
+ 	 * normal lifetime/sharing rules apply. References live until the
+ 	 * model is replaced or this view disposes.
+ 	 *
+-	 * Files whose resolution fails on either side (e.g. the base SHA
+-	 * isn't fetched locally) get skipped with a warning log — the
+-	 * remaining files still render. A more nuanced "couldn't load
+-	 * this file's base" UI can land in a polish pass.
++	 * Per-side resolution is independent. If the original side fails
++	 * (e.g. GitHub flagged the file `renamed` from a path the local
++	 * clone of the base SHA doesn't have, or the base SHA simply
++	 * doesn't fetch the file), the file still renders with an empty
++	 * original — same visual as an `added` file. Same for modified
++	 * failure → empty modified, looks like `removed`. Only when BOTH
++	 * sides fail does the file get skipped entirely.
+ 	 */
+ 	async setPullRequest(pr: PullRequest, files: readonly PullRequestFile[], workspace: KrtWorkspace, opts: { renderSideBySide: boolean }): Promise<void> {
+ 		const previous = this.currentModel;
+@@ -93,13 +96,53 @@ export class KrtPrMultiDiff extends Disposable {
+ 				? URI.joinPath(URI.file(workspace.folderPath), file.path)
+ 				: undefined;
+ 
++			// Per-side resolution. `Promise.allSettled` so a one-sided
++			// rejection doesn't leak the other side's reference.
++			const [originalSettled, modifiedSettled] = await Promise.allSettled([
++				originalUri ? this.textModelService.createModelReference(originalUri) : Promise.resolve(undefined),
++				modifiedUri ? this.textModelService.createModelReference(modifiedUri) : Promise.resolve(undefined),
++			]);
++
++			let original: IReference<IResolvedTextEditorModel> | undefined;
++			let modified: IReference<IResolvedTextEditorModel> | undefined;
++			if (originalSettled.status === 'fulfilled') {
++				original = originalSettled.value;
++			} else {
++				this.logService.warn(`[krt] multi-diff: ${file.path} (base side) — ${originalSettled.reason instanceof Error ? originalSettled.reason.message : originalSettled.reason}`);
++			}
++			if (modifiedSettled.status === 'fulfilled') {
++				modified = modifiedSettled.value;
++			} else {
++				this.logService.warn(`[krt] multi-diff: ${file.path} (head side) — ${modifiedSettled.reason instanceof Error ? modifiedSettled.reason.message : modifiedSettled.reason}`);
++			}
++
++			if (this._store.isDisposed) {
++				original?.dispose();
++				modified?.dispose();
++				itemStore.dispose();
++				return;
++			}
++
++			// Both sides failed — nothing to render. Only happens when
++			// the file is genuinely missing on both sides; one-sided
++			// failures fall through with the surviving side.
++			if (!original && !modified) {
++				itemStore.dispose();
++				continue;
++			}
++
++			if (original) { itemStore.add(original); }
++			if (modified) { itemStore.add(modified); }
++
+ 			// Phase 10/C — register URIs with the comment controller so
+ 			// it can fan review comments out to the right side and so
+ 			// the native `+` glyph anchors back to the right
+ 			// `(prUrl, side, path)` tuple on click. LEFT comments
+ 			// anchor at `previousPath` (matters on rename); RIGHT at
+-			// `path`.
+-			if (originalUri) {
++			// `path`. Only register sides that resolved — registering a
++			// URI we couldn't load would leak into the panel as a
++			// thread the user can never reach.
++			if (original && originalUri) {
+ 				this.uriRegistrations.add(this.commentController.registerDiffUri(originalUri, {
+ 					prUrl: pr.url,
+ 					headSha: pr.head.sha,
+@@ -107,7 +150,7 @@ export class KrtPrMultiDiff extends Disposable {
+ 					path: previousPath,
+ 				}));
+ 			}
+-			if (modifiedUri) {
++			if (modified && modifiedUri) {
+ 				this.uriRegistrations.add(this.commentController.registerDiffUri(modifiedUri, {
+ 					prUrl: pr.url,
+ 					headSha: pr.head.sha,
+@@ -116,31 +159,6 @@ export class KrtPrMultiDiff extends Disposable {
+ 				}));
+ 			}
+ 
+-			let original: IReference<IResolvedTextEditorModel> | undefined;
+-			let modified: IReference<IResolvedTextEditorModel> | undefined;
+-			try {
+-				[original, modified] = await Promise.all([
+-					originalUri ? this.textModelService.createModelReference(originalUri) : undefined,
+-					modifiedUri ? this.textModelService.createModelReference(modifiedUri) : undefined,
+-				]);
+-			} catch (err) {
+-				this.logService.warn(`[krt] multi-diff: skipping ${file.path} — model resolution failed`, err);
+-				original?.dispose();
+-				modified?.dispose();
+-				itemStore.dispose();
+-				continue;
+-			}
+-
+-			if (this._store.isDisposed) {
+-				original?.dispose();
+-				modified?.dispose();
+-				itemStore.dispose();
+-				return;
+-			}
+-
+-			if (original) { itemStore.add(original); }
+-			if (modified) { itemStore.add(modified); }
+-
+ 			const item: IDocumentDiffItem = {
+ 				original: original?.object.textEditorModel,
+ 				modified: modified?.object.textEditorModel,
+-- 
+2.52.0
+

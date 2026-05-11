@@ -1,0 +1,78 @@
+From 7027849340c4c55d76b066cbe09179f40700686c Mon Sep 17 00:00:00 2001
+From: Kol Crooks <kol.crooks@datadoghq.com>
+Date: Wed, 6 May 2026 15:19:12 -0400
+Subject: [PATCH] PR pane: always show Check Out, prompt to add workspace if
+ missing
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The button was hidden when no workspace was registered for the PR's
+repo, so users who hadn't run `KRT: Add Workspace…` yet thought the
+feature didn't exist. Always render it; when clicked without a
+matching workspace, show a confirm dialog that walks them through
+the Add Workspace flow.
+
+Tooltip now flips to explain the requirement when no workspace is
+registered.
+---
+ .../browser/pr/krtPullRequestEditorPane.ts    | 33 ++++++++++++++++---
+ 1 file changed, 28 insertions(+), 5 deletions(-)
+
+diff --git a/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.ts b/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.ts
+index e859b82894b..2ad18452781 100644
+--- a/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.ts
++++ b/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.ts
+@@ -212,14 +212,17 @@ export class KrtPullRequestEditorPane extends EditorPane {
+ 		const hasPr = !!this.currentPr;
+ 		this.refreshBtnElement.disabled = !hasPr;
+ 		this.openOnGithubBtnElement.disabled = !hasPr;
+-		// Check Out only meaningful when (a) PR is loaded and (b) the
+-		// workspace is registered for the PR's repo. Otherwise hide the
+-		// button entirely — there's nothing it could do.
++		// Always show Check Out so the affordance is discoverable. When
++		// the workspace isn't registered for the PR's repo, click takes
++		// the user to the Add Workspace flow instead of attempting a
++		// switch.
+ 		const workspace = this.currentPr
+ 			? this.workspaceRegistry.findByOwnerRepo(this.currentPr.owner, this.currentPr.repo)
+ 			: undefined;
+-		this.checkoutBtnElement.hidden = !workspace;
+-		this.checkoutBtnElement.disabled = !hasPr || !workspace;
++		this.checkoutBtnElement.disabled = !hasPr;
++		this.checkoutBtnElement.title = workspace
++			? localize('krt.pr.checkout.tooltip', "Switch the registered workspace's working tree to this PR's head commit")
++			: localize('krt.pr.checkout.tooltip.noWorkspace', "No workspace is registered for this repo. Click to add one.");
+ 	}
+ 
+ 	private async refreshCurrentPr(): Promise<void> {
+@@ -266,6 +269,26 @@ export class KrtPullRequestEditorPane extends EditorPane {
+ 		}
+ 		const workspace = this.workspaceRegistry.findByOwnerRepo(pr.owner, pr.repo);
+ 		if (!workspace) {
++			// No matching workspace. Walk the user through adding one,
++			// then they can click Check Out again.
++			const result = await this.dialogService.confirm({
++				type: 'info',
++				message: localize(
++					'krt.pr.checkout.noWorkspace.message',
++					"No workspace registered for {0}/{1}.",
++					pr.owner,
++					pr.repo,
++				),
++				detail: localize(
++					'krt.pr.checkout.noWorkspace.detail',
++					"KRT needs a local clone of the repo to switch its working tree to this PR. Add one now?",
++				),
++				primaryButton: localize('krt.pr.checkout.noWorkspace.add', "Add Workspace…"),
++				cancelButton: localize('krt.pr.checkout.noWorkspace.cancel', "Cancel"),
++			});
++			if (result.confirmed) {
++				await this.commandService.executeCommand('krt.workspace.add');
++			}
+ 			return;
+ 		}
+ 		// Refuse a second concurrent switch — Phase 8.7 v1's contract
+-- 
+2.52.0
+

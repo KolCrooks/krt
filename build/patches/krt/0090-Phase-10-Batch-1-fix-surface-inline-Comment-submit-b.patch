@@ -1,0 +1,120 @@
+From 85e596757162f83d8f1c6989e2d169f5c2253640 Mon Sep 17 00:00:00 2001
+From: Kol Crooks <kol.crooks@datadoghq.com>
+Date: Fri, 8 May 2026 13:45:24 -0400
+Subject: [PATCH] Phase 10 Batch 1 fix: surface inline Comment submit button
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Set `contextValue = KRT_PR_COMMENT_OWNER` on `KrtPrCommentController` so
+the workbench's `commentThreadWidget` binds the `commentController`
+context key when a krt-pr thread is focused. Without it, our menu
+contribution's `when: commentController == 'krt-pr'` clause never
+matches and the inline `Comment` action button stays hidden — leaving
+keyboard the only way to submit. Upstream's `MainThreadCommentController`
+derives `contextValue` from the controller `id`; we hadn't been doing
+the same.
+
+Also cleans up the lingering empty template thread once a comment is
+submitted (drops it from `threadsByUri` + fires `removed` so the
+workbench can dispose its widget) and implements
+`deleteCommentThreadMain` so the workbench's hide-empty-template path
+actually removes the thread from our state.
+---
+ .../krt/browser/pr/krtPrCommentController.ts  | 52 ++++++++++++++++++-
+ 1 file changed, 50 insertions(+), 2 deletions(-)
+
+diff --git a/src/vs/workbench/contrib/krt/browser/pr/krtPrCommentController.ts b/src/vs/workbench/contrib/krt/browser/pr/krtPrCommentController.ts
+index aeb8a5907f8..528bc309afe 100644
+--- a/src/vs/workbench/contrib/krt/browser/pr/krtPrCommentController.ts
++++ b/src/vs/workbench/contrib/krt/browser/pr/krtPrCommentController.ts
+@@ -74,6 +74,13 @@ export class KrtPrCommentController extends Disposable implements ICommentContro
+ 	readonly label = 'KRT';
+ 	readonly owner = KRT_PR_COMMENT_OWNER;
+ 	readonly features = {};
++	// `commentController == 'krt-pr'` powers the menu `when` clause for
++	// our Submit action. Upstream's `MainThreadCommentController` derives
++	// this from the controller `id` (see `mainThreadComments.ts`). Without
++	// it, `commentThreadWidget.ts` never sets the context key and the
++	// inline Comment button stays hidden, leaving the user no UI affordance
++	// to submit a typed comment (the keyboard shortcut still works).
++	readonly contextValue = KRT_PR_COMMENT_OWNER;
+ 	activeComment: { thread: CommentThread; comment?: LanguageComment } | undefined;
+ 
+ 	/** uri.toString() → metadata for the diff URI mounted there. */
+@@ -204,6 +211,12 @@ export class KrtPrCommentController extends Disposable implements ICommentContro
+ 				side: meta.side,
+ 				body: trimmed,
+ 			});
++			// `addComment` fires `onDidChange`, which rebuilds the URI's
++			// thread set with a pending thread for this line. The
++			// template thread that hosted the input still lives in the
++			// thread set (carry-over preserves it) — drop it here so the
++			// only widget on the line is the new pending thread.
++			this.disposeTemplateForLine(key, meta, line);
+ 			return;
+ 		}
+ 
+@@ -221,6 +234,7 @@ export class KrtPrCommentController extends Disposable implements ICommentContro
+ 			const existing = this.commentsByPr.get(meta.prUrl) ?? [];
+ 			this.commentsByPr.set(meta.prUrl, [...existing, created]);
+ 			this.refreshUri(URI.parse(key), meta);
++			this.disposeTemplateForLine(key, meta, line);
+ 		} catch (err) {
+ 			this.logService.warn(`[krt] postReviewComment failed for ${meta.prUrl} ${meta.path}:${line}`, err);
+ 			throw err;
+@@ -280,8 +294,23 @@ export class KrtPrCommentController extends Disposable implements ICommentContro
+ 		// Phase E: drag-to-extend a template thread's range. Stub for now.
+ 	}
+ 
+-	deleteCommentThreadMain(_commentThreadId: string): void {
+-		// Phase E: thread-level delete. Stub.
++	deleteCommentThreadMain(commentThreadId: string): void {
++		// Workbench calls this when a thread widget hides with no
++		// comments — typically a template thread the user clicked away
++		// from without typing anything. Drop the thread from our state
++		// so it doesn't re-render on the next refresh.
++		for (const [key, threads] of this.threadsByUri) {
++			const target = threads.find(t => t.threadId === commentThreadId);
++			if (!target) { continue; }
++			const remaining = threads.filter(t => t !== target);
++			this.threadsByUri.set(key, remaining);
++			this.commentService.updateComments(KRT_PR_COMMENT_OWNER, {
++				added: [], removed: [target], changed: [], pending: [],
++			});
++			target.dispose();
++			this.publishWorkspaceSnapshot();
++			return;
++		}
+ 	}
+ 
+ 	async toggleReaction(_uri: URI, _thread: CommentThread, _comment: LanguageComment, _reaction: CommentReaction, _token: CancellationToken): Promise<void> {
+@@ -401,6 +430,25 @@ export class KrtPrCommentController extends Disposable implements ICommentContro
+ 		this.publishWorkspaceSnapshot();
+ 	}
+ 
++	/**
++	 * Drop the template thread that hosted the input the user just
++	 * submitted, so the line shows only the consumed thread (real or
++	 * pending) afterwards.
++	 */
++	private disposeTemplateForLine(uriKey: string, meta: IKrtPrUriMeta, line: number): void {
++		const templateId = `krt-pr|template|${meta.prUrl}|${meta.side}|${meta.path}|${line}`;
++		const owned = this.threadsByUri.get(uriKey) ?? [];
++		const template = owned.find(t => t.threadId === templateId);
++		if (!template) { return; }
++		const remaining = owned.filter(t => t !== template);
++		this.threadsByUri.set(uriKey, remaining);
++		this.commentService.updateComments(KRT_PR_COMMENT_OWNER, {
++			added: [], removed: [template], changed: [], pending: [],
++		});
++		template.dispose();
++		this.publishWorkspaceSnapshot();
++	}
++
+ 	private commentInfoForUri(uri: URI): ICommentInfo {
+ 		const key = uri.toString();
+ 		const meta = this.metadataByUri.get(key);
+-- 
+2.52.0
+

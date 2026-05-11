@@ -1,0 +1,87 @@
+From 44926b335864a0f197f1f2b4c528113e1ca16888 Mon Sep 17 00:00:00 2001
+From: Kol Crooks <kol.crooks@datadoghq.com>
+Date: Thu, 7 May 2026 16:14:40 -0400
+Subject: [PATCH] Phase D fix: drop duplicate tour headers + unstick storyboard
+ headers
+
+Reported: tour mode shows the diffs twice -- only the headers on
+the first one; storyboard headers are sticky.
+
+Tour duplication: in switching `renderTourMiniDiffs` to
+`KrtPrFlatDiff`, I left the prior per-file status header strip
+(`.krt-pr-tour-mini-head` rows) in place above the host. The
+flat-diff renders its own per-card header strip per file inside,
+so the user saw a header strip with no body, then the same files
+again as cards-with-headers below. Drop the standalone strip --
+the flat-diff card header is the single source of truth.
+
+Storyboard: two sticky positions -- `.krt-pr-storyboard-header`
+and `.krt-pr-storyboard-diff-head` -- both anchored against the
+outer pane scroll. With the flat-diff layout, sticky headers
+floated over the file-tree column and made navigation feel
+cluttered. Drop `position: sticky` on both; they scroll with the
+rest of the storyboard now.
+
+Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+---
+ .../browser/pr/krtPullRequestEditorPane.css   |  6 ------
+ .../browser/pr/krtPullRequestEditorPane.ts    | 19 -------------------
+ 2 files changed, 25 deletions(-)
+
+diff --git a/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.css b/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.css
+index b45243e1e0f..eff0960857f 100644
+--- a/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.css
++++ b/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.css
+@@ -1838,9 +1838,6 @@
+ 	border-bottom: 1px solid var(--vscode-widget-border, rgba(127, 127, 127, 0.2));
+ 	background: var(--vscode-editor-background, transparent);
+ 	flex-shrink: 0;
+-	position: sticky;
+-	top: 0;
+-	z-index: 3;
+ }
+ 
+ .krt-pr-storyboard-heading {
+@@ -1920,9 +1917,6 @@
+ 	padding: 10px 18px;
+ 	border-bottom: 1px solid var(--vscode-widget-border, rgba(127, 127, 127, 0.18));
+ 	background: var(--vscode-editorWidget-background, transparent);
+-	position: sticky;
+-	top: 0;
+-	z-index: 2;
+ }
+ 
+ .krt-pr-storyboard-diff-heading {
+diff --git a/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.ts b/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.ts
+index 4dc44fb3d63..ac6565ab7d5 100644
+--- a/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.ts
++++ b/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.ts
+@@ -1559,25 +1559,6 @@ export class KrtPullRequestEditorPane extends EditorPane {
+ 			return;
+ 		}
+ 
+-		// Per-file status header strip (status dot, path, +/- counts) —
+-		// kept from the prior design so the user can scan the chapter's
+-		// files without scrolling through the embedded multi-diff. The
+-		// actual diff bodies live in one shared `KrtPrFlatDiff`
+-		// instance below the strip.
+-		for (const file of orderedFiles) {
+-			const row = DOM.append(wrap, DOM.$('.krt-pr-tour-mini-head'));
+-			const status = DOM.append(row, DOM.$('span.krt-pr-diff-status-dot'));
+-			status.classList.add(file.status);
+-			status.textContent = statusGlyph(file.status);
+-			const headPath = DOM.append(row, DOM.$('span.krt-pr-tour-mini-path'));
+-			headPath.textContent = file.path;
+-			const counts = DOM.append(row, DOM.$('span.krt-pr-tour-mini-counts'));
+-			const add = DOM.append(counts, DOM.$('span.add'));
+-			add.textContent = `+${file.additions}`;
+-			const del = DOM.append(counts, DOM.$('span.del'));
+-			del.textContent = `-${file.deletions}`;
+-		}
+-
+ 		// Strict gate, same shape as the main Diff sub-mode but in a
+ 		// compact form so the rest of the tour UI keeps rendering.
+ 		const workspace = this.workspaceRegistry.findByOwnerRepo(pr.owner, pr.repo);
+-- 
+2.52.0
+

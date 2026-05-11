@@ -1,0 +1,129 @@
+From d38dfe57a0c37b788de01e602f37add344f8c5d2 Mon Sep 17 00:00:00 2001
+From: Kol Crooks <kol.crooks@datadoghq.com>
+Date: Fri, 8 May 2026 14:24:37 -0400
+Subject: [PATCH] Phase 10 Batch 6: dedupe Checks tab + relative-time meta
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+GitHub's `commits/{sha}/check-runs` endpoint lists every run on the
+commit, so a re-run leaves both old and new entries in the response
+and the sidebar duplicates the row. `dedupeChecksByName` collapses by
+name keeping the freshest by `completedAt` (falling back to
+`startedAt`) and sorts alphabetically for a stable order.
+
+Each row also grows a right-aligned meta cell: relative time of the
+most recent run, or "running…" in the warn colour for in-flight
+checks. The clickable details arrow now fades in on hover instead of
+showing constantly, matching the demo's chrome.
+
+The deeper "missing checks" audit (statuses API for non-Actions
+sources, paging past 100) is left for a follow-up.
+---
+ .../browser/pr/krtPullRequestEditorPane.css   | 20 +++++++++-
+ .../browser/pr/krtPullRequestEditorPane.ts    | 39 ++++++++++++++++++-
+ 2 files changed, 56 insertions(+), 3 deletions(-)
+
+diff --git a/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.css b/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.css
+index e84b28e120a..c2961d6acd4 100644
+--- a/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.css
++++ b/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.css
+@@ -696,10 +696,28 @@ img.krt-pr-comment-avatar {
+ 	white-space: nowrap;
+ }
+ 
++.krt-pr-check-meta {
++	flex: 0 0 auto;
++	font-size: 10.5px;
++	color: var(--vscode-descriptionForeground);
++	opacity: 0.7;
++	font-family: 'JetBrains Mono', monospace;
++}
++
++.krt-pr-check-meta.pending {
++	color: rgba(204, 152, 0, 1);
++	opacity: 1;
++}
++
+ .krt-pr-check-arrow {
+-	opacity: 0.5;
++	opacity: 0;
+ 	font-size: 11px;
+ 	font-family: 'JetBrains Mono', monospace;
++	transition: opacity 80ms;
++}
++
++.krt-pr-check.clickable:hover .krt-pr-check-arrow {
++	opacity: 0.6;
+ }
+ 
+ .krt-pr-labels {
+diff --git a/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.ts b/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.ts
+index ad63f5fd6e6..1e11f490869 100644
+--- a/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.ts
++++ b/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.ts
+@@ -1262,17 +1262,28 @@ export class KrtPullRequestEditorPane extends EditorPane {
+ 
+ 	private renderChecksCard(parent: HTMLElement, checks: readonly CheckRun[]): void {
+ 		const card = this.makeSidebarCard(parent, localize('krt.pr.checks', "Checks"));
+-		if (checks.length === 0) {
++		const deduped = dedupeChecksByName(checks);
++		if (deduped.length === 0) {
+ 			this.appendCardEmpty(card, localize('krt.pr.noChecks', "No checks reported."));
+ 			return;
+ 		}
+-		for (const c of checks) {
++		for (const c of deduped) {
+ 			const row = DOM.append(card, DOM.$('.krt-pr-check'));
+ 			const status = DOM.append(row, DOM.$('span.krt-pr-check-status'));
+ 			status.classList.add(c.conclusion);
+ 			status.textContent = checkConclusionGlyph(c.conclusion);
+ 			const name = DOM.append(row, DOM.$('span.krt-pr-check-name'));
+ 			name.textContent = c.name;
++			const meta = DOM.append(row, DOM.$('span.krt-pr-check-meta'));
++			if (c.conclusion === 'pending') {
++				meta.classList.add('pending');
++				meta.textContent = localize('krt.pr.checkRunning', "running…");
++			} else {
++				const at = c.completedAt ?? c.startedAt;
++				if (at) {
++					meta.textContent = relativeTime(at);
++				}
++			}
+ 			if (c.detailsUrl) {
+ 				row.classList.add('clickable');
+ 				row.setAttribute('role', 'link');
+@@ -2835,6 +2846,30 @@ function countLabel(n: number | undefined): string {
+ 	return String(n);
+ }
+ 
++/**
++ * Group check-runs by name and keep the freshest one per group. The
++ * GitHub `commits/{sha}/check-runs` endpoint returns every run on the
++ * commit including re-runs, so without dedup the user sees the same
++ * `ci/lint` listed three times after a few retries. Sort by name so
++ * the rendered order is stable across refreshes.
++ */
++function dedupeChecksByName(checks: readonly CheckRun[]): readonly CheckRun[] {
++	const byName = new Map<string, CheckRun>();
++	for (const c of checks) {
++		const existing = byName.get(c.name);
++		if (!existing) {
++			byName.set(c.name, c);
++			continue;
++		}
++		const existingAt = existing.completedAt ?? existing.startedAt ?? '';
++		const candidateAt = c.completedAt ?? c.startedAt ?? '';
++		if (candidateAt > existingAt) {
++			byName.set(c.name, c);
++		}
++	}
++	return [...byName.values()].sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
++}
++
+ /**
+  * GitHub avatar URLs already accept a `s` query parameter for sizing.
+  * Append (or override) it so we don't pull a 460×460 image into a 20px
+-- 
+2.52.0
+

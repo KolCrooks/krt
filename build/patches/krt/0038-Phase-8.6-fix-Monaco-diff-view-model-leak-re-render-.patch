@@ -1,0 +1,184 @@
+From a3c150d2cd2f335200083e4d0020dba8e65b3273 Mon Sep 17 00:00:00 2001
+From: Kol Crooks <kol.crooks@datadoghq.com>
+Date: Wed, 6 May 2026 12:53:03 -0400
+Subject: [PATCH] Phase 8.6 fix: Monaco diff view-model leak + re-render crash
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Two bugs surfaced after Phase 8.6 landed:
+
+1. Diff didn't render. `setModel({original, modified})` constructs a
+   `DiffEditorViewModel` whose `autorunWithStore` blocks layout when
+   the view-model is "leaked" (the public path leaves refcount = 2
+   forever, since neither setModel nor setDiffModel keeps a holder for
+   the base ref it creates). On some Electron versions the diff
+   simply doesn't paint.
+
+2. Sub-mode toggling crashed. `IModelService.createModel` throws
+   "Cannot add model because it already exists" when the same URI is
+   re-created — and KRT rebuilds the diff view on every renderLoaded
+   call. Phase 8.5 hadn't hit this because the previous models hadn't
+   been disposed yet, but Phase 8.6's per-side branching exposed the
+   race more reliably.
+
+Fixes:
+
+- Replace `setModel(...)` with `createViewModel(...)` +
+  `RefCounted.create(viewModel)` + `setDiffModel(ref)`, registering
+  the base ref so our store decrements refcount synchronously on
+  dispose. The widget's internal `createNewRef` brings count to 2;
+  our register + the widget's own dispose chain bring it to 0.
+- Wrap model lookup in a `getOrCreate(uri, value)` helper that reuses
+  the existing model when present and only creates on first miss.
+  Drop the toDisposable that forced model disposal — IModelService
+  caches by URI and the URIs are stable per (owner, repo, sha, path),
+  so memory stays bounded across re-renders.
+
+Both adapted from the original Phase 8.6 doc's "decisions made during
+execution" section — the same workaround the prior implementation
+landed but never made it into the patch series.
+---
+ .../contrib/krt/browser/pr/krtMonacoDiff.ts   | 98 +++++++++++--------
+ 1 file changed, 58 insertions(+), 40 deletions(-)
+
+diff --git a/src/vs/workbench/contrib/krt/browser/pr/krtMonacoDiff.ts b/src/vs/workbench/contrib/krt/browser/pr/krtMonacoDiff.ts
+index e6829d803f4..b5a8b869931 100644
+--- a/src/vs/workbench/contrib/krt/browser/pr/krtMonacoDiff.ts
++++ b/src/vs/workbench/contrib/krt/browser/pr/krtMonacoDiff.ts
+@@ -8,6 +8,7 @@ import { Disposable, DisposableStore, IDisposable, toDisposable } from '../../..
+ import { URI } from '../../../../../base/common/uri.js';
+ import { ICodeEditor, MouseTargetType } from '../../../../../editor/browser/editorBrowser.js';
+ import { DiffEditorWidget } from '../../../../../editor/browser/widget/diffEditor/diffEditorWidget.js';
++import { RefCounted } from '../../../../../editor/browser/widget/diffEditor/utils.js';
+ import { ILanguageService } from '../../../../../editor/common/languages/language.js';
+ import { ITextModel } from '../../../../../editor/common/model.js';
+ import { IModelService } from '../../../../../editor/common/services/model.js';
+@@ -117,30 +118,33 @@ export class KrtMonacoDiffView extends Disposable {
+ 		//      virtual URIs — same as before, no LSP, but syntax + diff.
+ 		const reconstructed = reconstructFromPatch(opts.file.patch ?? '');
+ 
+-		const baseModel = (() => {
++		// `IModelService.createModel` throws if a model already exists at
++		// the same URI — and the same URI re-renders constantly here
++		// (every sub-mode switch builds a new diff view per file). Reuse
++		// the cached model when present; only create on first miss.
++		const getOrCreate = (uri: URI, value: string): ITextModel => {
++			const existing = modelService.getModel(uri);
++			if (existing) {
++				return existing;
++			}
++			return modelService.createModel(
++				value,
++				languageService.createByFilepathOrFirstLine(uri),
++				uri,
++				false,
++			);
++		};
++
++		const baseModel: ITextModel = (() => {
+ 			if (opts.workspace && file.status !== 'added') {
+-				const krtGitUri = encodeKrtGit(opts.workspace.folderUri, opts.baseSha, previousPath);
+-				const existing = modelService.getModel(krtGitUri);
+-				if (existing) {
+-					return existing;
+-				}
+-				// Create an empty model now; the krt-git:// content provider
+-				// fills it in on first model resolution. We populate the
+-				// reconstructed text as a synchronous fallback so the diff
+-				// has *something* to render until the async git-show lands.
+-				return modelService.createModel(
++				return getOrCreate(
++					encodeKrtGit(opts.workspace.folderUri, opts.baseSha, previousPath),
+ 					reconstructed.base,
+-					languageService.createByFilepathOrFirstLine(URI.file(previousPath)),
+-					krtGitUri,
+-					false,
+ 				);
+ 			}
+-			const baseUri = URI.parse(`krt-pr-base://${encodeURIComponent(opts.owner)}/${encodeURIComponent(opts.repo)}/${encodeURIComponent(opts.baseSha)}/${encodeURI(previousPath)}`);
+-			return modelService.createModel(
++			return getOrCreate(
++				URI.parse(`krt-pr-base://${encodeURIComponent(opts.owner)}/${encodeURIComponent(opts.repo)}/${encodeURIComponent(opts.baseSha)}/${encodeURI(previousPath)}`),
+ 				reconstructed.base,
+-				languageService.createByFilepathOrFirstLine(baseUri),
+-				baseUri,
+-				false,
+ 			);
+ 		})();
+ 
+@@ -149,36 +153,50 @@ export class KrtMonacoDiffView extends Disposable {
+ 				const headFileUri = URI.joinPath(URI.file(opts.workspace.folderPath), path);
+ 				const existing = modelService.getModel(headFileUri);
+ 				if (existing) {
+-					// Existing file:// model from the workspace — perfect.
+-					// Don't let our Disposable destroy it on `dispose()`;
++					// Existing file:// model from the open workbench tree —
++					// perfect for LSP. Don't let our Disposable touch it;
+ 					// the workbench owns its lifetime.
+ 					return existing;
+ 				}
+-				// No file:// model exists yet — create a virtual head model
+-				// instead. The demo gate verifies the LSP path; this branch
+-				// is the graceful fallback when the user hasn't opened the
+-				// file in the workbench tree.
++				// No file:// model yet — fall through to the virtual head
++				// model. (Phase 9's editor view will populate file:// as
++				// the user opens files; for now we don't create one here
++				// because language extensions wouldn't activate against a
++				// file:// model whose folder isn't in the workbench.)
+ 			}
+-			const headUri = URI.parse(`krt-pr-head://${encodeURIComponent(opts.owner)}/${encodeURIComponent(opts.repo)}/${encodeURIComponent(opts.headSha)}/${encodeURI(path)}`);
+-			return modelService.createModel(
++			return getOrCreate(
++				URI.parse(`krt-pr-head://${encodeURIComponent(opts.owner)}/${encodeURIComponent(opts.repo)}/${encodeURIComponent(opts.headSha)}/${encodeURI(path)}`),
+ 				reconstructed.head,
+-				languageService.createByFilepathOrFirstLine(headUri),
+-				headUri,
+-				false,
+ 			);
+ 		})();
+ 
+-		// Only dispose models we own (i.e. created above). Models that
+-		// pre-existed (file:// from the open workbench tree) are not ours
+-		// to dispose.
+-		const ownsBase = baseModel.uri.scheme !== 'file';
+-		const ownsHead = headModel.uri.scheme !== 'file';
+-		this._register(toDisposable(() => {
+-			if (ownsBase) { baseModel.dispose(); }
+-			if (ownsHead) { headModel.dispose(); }
+-		}));
++		// Phase 8.5/8.6 — view-model refcount workaround. The public
++		// `setModel({original, modified})` path goes through
++		// `RefCounted.create(...)` once and `createNewRef` once, leaving
++		// refcount = 2 with no caller-owned reference for the base ref.
++		// The widget's `setDiffModel(null)` only releases the cloned ref
++		// (count → 1), so the inner `DiffEditorViewModel` and its
++		// `autorunWithStore` never reach 0 → leaked-disposable warnings
++		// in dev mode and (on some Electron versions) the diff fails to
++		// render at all because the view-model's autoruns block layout.
++		//
++		// Workaround: build the view model ourselves and feed it through
++		// `setDiffModel(RefCounted.create(viewModel))`. Internally
++		// `setDiffModel` calls `createNewRef(this)` (refcount = 2). When
++		// we dispose, the registered base ref decrements to 1; when the
++		// widget disposes (also from our store), `_diffModelSrc` clears
++		// → cloned ref disposes → refcount = 0 → view-model torn down
++		// cleanly.
++		const viewModel = this.widget.createViewModel({ original: baseModel, modified: headModel });
++		const ref = RefCounted.create(viewModel);
++		this._register(toDisposable(() => ref.dispose()));
++		this.widget.setDiffModel(ref);
+ 
+-		this.widget.setModel({ original: baseModel, modified: headModel });
++		// Models we created (non-file://) get cached and reused across
++		// re-renders — disposing them here would force the next render to
++		// hit `createModel` again and risk the "already exists" race.
++		// Leave them in `IModelService` for the workbench's lifetime; they
++		// share a URI per (owner, repo, sha, path) so memory stays bounded.
+ 
+ 		// Initial size + dynamic refit.
+ 		this.layoutToContent();
+-- 
+2.52.0
+

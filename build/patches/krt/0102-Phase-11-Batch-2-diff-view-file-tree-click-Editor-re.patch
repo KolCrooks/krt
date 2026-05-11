@@ -1,0 +1,928 @@
+From 08d797edbcdbfff97a2f125e81fa93781ae8d7a9 Mon Sep 17 00:00:00 2001
+From: Kol Crooks <kol.crooks@datadoghq.com>
+Date: Fri, 8 May 2026 16:17:07 -0400
+Subject: [PATCH 102/102] =?UTF-8?q?Phase=2011=20Batch=202:=20diff=20view?=
+ =?UTF-8?q?=20file=20tree,=20click=E2=86=92Editor,=20reading=20width?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Editor pane wiring on top of Batch 1's data layer:
+
+- KrtDiffFileTree (new) replaces the flat-list file column in the
+  Diff sub-mode and the Storyboard chapter panel. Real folder
+  tree with collapsible folders, per-folder counts (files, +/-),
+  and an inline mark-reviewed checkbox on each row. Single-child
+  folder runs compact into one row (`a/b/c.rs` is one row when
+  every intermediate folder has only one child), mirroring
+  `tree --collapse` and the demo. Collapsed folder set persists
+  per-PR via IStorageService.
+
+- Filename click hands off to the Editor view (Phase 9): opens
+  the file via IEditorService.openEditor in SIDE_GROUP, using
+  the workspace's real file:// URI when checked out, falling
+  back to a krt-git:// URI bound to pr.head.sha when not. The
+  per-row "scroll to file" affordance preserves the previous
+  scroll-into-diff behaviour for users who want it.
+
+- Tour Reading mode drops its 880px max-width — it cramps wide
+  monitors and the diff editors inside read better at full pane
+  width.
+
+- Tour mini-diffs and the Storyboard chapter diff now thread the
+  chapter's `chips` through to KrtPrFlatDiff. The main Diff
+  surface gets the union of every chapter's chips since it has
+  no current-chapter context.
+
+- Storyboard graph filters out the synthetic Coverage chapter:
+  it has no dependsOn edges by design, so it would render as a
+  visually loud free-floating card.
+
+Demo: open a Rust PR, browse the diff with the tree and a
+collapsed folder; click a filename → Editor view opens that
+file with rust-analyzer; flip to Tour, see Coverage at the end
+walking untouched lines, and chips inside the diff at the lines
+the model called out.
+---
+ .../contrib/krt/browser/pr/krtDiffFileTree.ts | 391 ++++++++++++++++++
+ .../browser/pr/krtPullRequestEditorPane.css   | 116 +++++-
+ .../browser/pr/krtPullRequestEditorPane.ts    | 199 +++++----
+ 3 files changed, 591 insertions(+), 115 deletions(-)
+ create mode 100644 src/vs/workbench/contrib/krt/browser/pr/krtDiffFileTree.ts
+
+diff --git a/src/vs/workbench/contrib/krt/browser/pr/krtDiffFileTree.ts b/src/vs/workbench/contrib/krt/browser/pr/krtDiffFileTree.ts
+new file mode 100644
+index 00000000000..63042a760c6
+--- /dev/null
++++ b/src/vs/workbench/contrib/krt/browser/pr/krtDiffFileTree.ts
+@@ -0,0 +1,391 @@
++/*---------------------------------------------------------------------------------------------
++ *  Copyright (c) Microsoft Corporation. All rights reserved.
++ *  Licensed under the MIT License. See License.txt in the project root for license information.
++ *--------------------------------------------------------------------------------------------*/
++
++import * as DOM from '../../../../../base/browser/dom.js';
++import { Disposable, DisposableStore } from '../../../../../base/common/lifecycle.js';
++import { localize } from '../../../../../nls.js';
++import { IStorageService, StorageScope, StorageTarget } from '../../../../../platform/storage/common/storage.js';
++import { PullRequestFile } from '../../../../../platform/krt/common/krt.js';
++
++const COLLAPSED_KEY_PREFIX = 'krt.diff.tree.collapsed.';
++
++function collapsedKey(owner: string, repo: string, number: number): string {
++	return `${COLLAPSED_KEY_PREFIX}${owner}/${repo}#${number}`;
++}
++
++function readCollapsedFolders(storageService: IStorageService, owner: string, repo: string, number: number): Set<string> {
++	const raw = storageService.get(collapsedKey(owner, repo, number), StorageScope.APPLICATION);
++	if (!raw) {
++		return new Set();
++	}
++	try {
++		const parsed = JSON.parse(raw);
++		if (Array.isArray(parsed)) {
++			return new Set(parsed.filter((s): s is string => typeof s === 'string'));
++		}
++	} catch {
++		// fall through
++	}
++	return new Set();
++}
++
++function writeCollapsedFolders(storageService: IStorageService, owner: string, repo: string, number: number, paths: ReadonlySet<string>): void {
++	storageService.store(
++		collapsedKey(owner, repo, number),
++		JSON.stringify([...paths]),
++		StorageScope.APPLICATION,
++		StorageTarget.MACHINE,
++	);
++}
++
++interface FileNode {
++	readonly kind: 'file';
++	readonly path: string;
++	readonly file: PullRequestFile;
++}
++
++interface FolderNode {
++	readonly kind: 'folder';
++	readonly path: string;
++	display: string;
++	children: TreeNode[];
++	fileCount: number;
++	additions: number;
++	deletions: number;
++}
++
++type TreeNode = FileNode | FolderNode;
++
++/**
++ * Build a folder tree from a flat list of PR files. Each file's path
++ * is split on `/`; intermediate folders become `FolderNode`s. After
++ * the initial build we run path-compression: any folder whose only
++ * child is another folder collapses into one row (`a/b/c.rs` shows
++ * as a single row when each intermediate folder has just one child),
++ * mirroring the demo and the standard "compact folders" idiom.
++ */
++function buildTree(files: readonly PullRequestFile[]): FolderNode {
++	const root: FolderNode = {
++		kind: 'folder',
++		path: '',
++		display: '',
++		children: [],
++		fileCount: 0,
++		additions: 0,
++		deletions: 0,
++	};
++	for (const file of files) {
++		const segments = file.path.split('/');
++		let current = root;
++		current.fileCount++;
++		current.additions += file.additions;
++		current.deletions += file.deletions;
++		for (let i = 0; i < segments.length - 1; i++) {
++			const segment = segments[i];
++			const folderPath = segments.slice(0, i + 1).join('/');
++			let child = current.children.find((n): n is FolderNode => n.kind === 'folder' && n.path === folderPath);
++			if (!child) {
++				child = {
++					kind: 'folder',
++					path: folderPath,
++					display: segment,
++					children: [],
++					fileCount: 0,
++					additions: 0,
++					deletions: 0,
++				};
++				current.children.push(child);
++			}
++			child.fileCount++;
++			child.additions += file.additions;
++			child.deletions += file.deletions;
++			current = child;
++		}
++		current.children.push({ kind: 'file', path: file.path, file });
++	}
++	sortChildren(root);
++	compactSingleChildFolders(root);
++	return root;
++}
++
++function sortChildren(folder: FolderNode): void {
++	folder.children.sort((a, b) => {
++		if (a.kind !== b.kind) {
++			return a.kind === 'folder' ? -1 : 1;
++		}
++		const aName = a.kind === 'folder' ? a.display : a.path;
++		const bName = b.kind === 'folder' ? b.display : b.path;
++		return aName.localeCompare(bName);
++	});
++	for (const child of folder.children) {
++		if (child.kind === 'folder') {
++			sortChildren(child);
++		}
++	}
++}
++
++/**
++ * Walk the tree and merge any folder whose only child is another
++ * folder with that child: `a/` containing only `b/` becomes a row
++ * displayed as `a/b`. Continues recursively so chains of arbitrary
++ * length compact into one row. Files always stay separate.
++ */
++function compactSingleChildFolders(folder: FolderNode): void {
++	for (const child of folder.children) {
++		if (child.kind === 'folder') {
++			compactSingleChildFolders(child);
++		}
++	}
++	for (let i = 0; i < folder.children.length; i++) {
++		const child = folder.children[i];
++		if (child.kind !== 'folder') {
++			continue;
++		}
++		while (child.children.length === 1 && child.children[0].kind === 'folder') {
++			const grand = child.children[0];
++			child.display = `${child.display}/${grand.display}`;
++			child.children = grand.children;
++		}
++	}
++}
++
++export interface KrtDiffFileTreeCallbacks {
++	onScrollToFile(path: string): void;
++	onOpenInEditor(path: string): void;
++	onToggleReviewed(path: string, reviewed: boolean): void;
++}
++
++/**
++ * Folder-tree file list for the Diff sub-mode. Phase 11 polish over
++ * the prior flat list: collapsible folders with persistent state per
++ * PR, per-folder counts, an inline mark-reviewed checkbox on each
++ * file row, and a "open in Editor" affordance that hands off to the
++ * Phase 9 Editor view.
++ *
++ * The tree is built once per `setFiles` call and re-rendered in
++ * place. Toggling collapse mutates DOM display directly (no
++ * re-render) so user state — focus, hover, scroll — survives the
++ * interaction.
++ */
++export class KrtDiffFileTree extends Disposable {
++
++	private readonly renderStore = this._register(new DisposableStore());
++	private readonly collapsed: Set<string>;
++	private reviewedPaths: Set<string>;
++	private currentRoot: FolderNode | undefined;
++	private headCountEl: HTMLElement | undefined;
++	private rowsByPath = new Map<string, HTMLElement>();
++	private reviewedBoxesByPath = new Map<string, HTMLInputElement>();
++	private filesCount = 0;
++
++	constructor(
++		private readonly container: HTMLElement,
++		private readonly storageService: IStorageService,
++		private readonly owner: string,
++		private readonly repo: string,
++		private readonly number: number,
++		reviewedPaths: ReadonlySet<string>,
++		private readonly callbacks: KrtDiffFileTreeCallbacks,
++	) {
++		super();
++		this.collapsed = readCollapsedFolders(storageService, owner, repo, number);
++		this.reviewedPaths = new Set(reviewedPaths);
++		this.container.classList.add('krt-pr-diff-tree');
++	}
++
++	setFiles(files: readonly PullRequestFile[]): void {
++		this.renderStore.clear();
++		DOM.clearNode(this.container);
++		this.rowsByPath.clear();
++		this.reviewedBoxesByPath.clear();
++
++		this.currentRoot = buildTree(files);
++		this.filesCount = files.length;
++
++		const head = DOM.append(this.container, DOM.$('.krt-pr-diff-tree-head'));
++		const headTitle = DOM.append(head, DOM.$('span.krt-pr-diff-tree-title'));
++		headTitle.textContent = localize('krt.pr.files', "Files");
++		this.headCountEl = DOM.append(head, DOM.$('span.krt-pr-diff-tree-count'));
++		this.refreshHeadCount();
++
++		const list = DOM.append(this.container, DOM.$('.krt-pr-diff-tree-list'));
++		for (const child of this.currentRoot.children) {
++			this.renderNode(list, child, 0);
++		}
++	}
++
++	/**
++	 * Re-applies the `.reviewed` class for each file row to match a
++	 * (possibly-changed) external set, e.g. when something other than
++	 * a tree-row checkbox toggled state.
++	 */
++	syncReviewedPaths(reviewedPaths: ReadonlySet<string>): void {
++		this.reviewedPaths = new Set(reviewedPaths);
++		for (const [path, row] of this.rowsByPath) {
++			const reviewed = this.reviewedPaths.has(path);
++			row.classList.toggle('reviewed', reviewed);
++			const box = this.reviewedBoxesByPath.get(path);
++			if (box) {
++				box.checked = reviewed;
++			}
++		}
++		this.refreshHeadCount();
++	}
++
++	private renderNode(parent: HTMLElement, node: TreeNode, depth: number): void {
++		if (node.kind === 'folder') {
++			this.renderFolder(parent, node, depth);
++		} else {
++			this.renderFile(parent, node, depth);
++		}
++	}
++
++	private renderFolder(parent: HTMLElement, node: FolderNode, depth: number): void {
++		const row = DOM.append(parent, DOM.$('.krt-pr-diff-tree-folder-row'));
++		row.style.paddingLeft = `${10 + depth * 12}px`;
++		row.setAttribute('role', 'button');
++		row.setAttribute('tabindex', '0');
++
++		const isCollapsed = this.collapsed.has(node.path);
++		const caret = DOM.append(row, DOM.$('span.codicon'));
++		caret.classList.add(isCollapsed ? 'codicon-chevron-right' : 'codicon-chevron-down');
++		const folderIcon = DOM.append(row, DOM.$('span.codicon.codicon-folder.krt-pr-diff-tree-folder-icon'));
++		folderIcon.style.marginRight = '4px';
++		const name = DOM.append(row, DOM.$('span.krt-pr-diff-tree-folder-name'));
++		name.textContent = node.display;
++		const counts = DOM.append(row, DOM.$('span.krt-pr-diff-tree-folder-counts'));
++		counts.textContent = formatFolderCounts(node);
++
++		const childrenWrap = DOM.append(parent, DOM.$('.krt-pr-diff-tree-children'));
++		if (isCollapsed) {
++			childrenWrap.style.display = 'none';
++		}
++		for (const child of node.children) {
++			this.renderNode(childrenWrap, child, depth + 1);
++		}
++
++		const toggle = () => {
++			const willCollapse = !this.collapsed.has(node.path);
++			if (willCollapse) {
++				this.collapsed.add(node.path);
++				caret.classList.remove('codicon-chevron-down');
++				caret.classList.add('codicon-chevron-right');
++				childrenWrap.style.display = 'none';
++			} else {
++				this.collapsed.delete(node.path);
++				caret.classList.remove('codicon-chevron-right');
++				caret.classList.add('codicon-chevron-down');
++				childrenWrap.style.display = '';
++			}
++			writeCollapsedFolders(this.storageService, this.owner, this.repo, this.number, this.collapsed);
++		};
++
++		this.renderStore.add(DOM.addDisposableListener(row, 'click', () => toggle()));
++		this.renderStore.add(DOM.addDisposableListener(row, 'keydown', e => {
++			if (e.key === 'Enter' || e.key === ' ') {
++				e.preventDefault();
++				toggle();
++			}
++		}));
++	}
++
++	private renderFile(parent: HTMLElement, node: FileNode, depth: number): void {
++		const row = DOM.append(parent, DOM.$('.krt-pr-diff-tree-row'));
++		row.style.paddingLeft = `${10 + depth * 12}px`;
++		if (this.reviewedPaths.has(node.path)) {
++			row.classList.add('reviewed');
++		}
++		this.rowsByPath.set(node.path, row);
++
++		const reviewedBox = DOM.append(row, DOM.$('input.krt-pr-diff-tree-reviewed')) as HTMLInputElement;
++		reviewedBox.type = 'checkbox';
++		reviewedBox.checked = this.reviewedPaths.has(node.path);
++		reviewedBox.title = localize('krt.pr.diffTree.markReviewed', "Mark as reviewed");
++		this.reviewedBoxesByPath.set(node.path, reviewedBox);
++
++		const dot = DOM.append(row, DOM.$('span.krt-pr-diff-status-dot'));
++		dot.classList.add(node.file.status);
++		dot.textContent = statusGlyph(node.file.status);
++
++		const name = DOM.append(row, DOM.$('span.krt-pr-diff-tree-name'));
++		const slash = node.path.lastIndexOf('/');
++		name.textContent = slash >= 0 ? node.path.slice(slash + 1) : node.path;
++		name.title = node.path;
++		name.setAttribute('role', 'button');
++		name.setAttribute('tabindex', '0');
++
++		const counts = DOM.append(row, DOM.$('span.krt-pr-diff-tree-counts'));
++		const add = DOM.append(counts, DOM.$('span.add'));
++		add.textContent = `+${node.file.additions}`;
++		const del = DOM.append(counts, DOM.$('span.del'));
++		del.textContent = `-${node.file.deletions}`;
++
++		const scrollBtn = DOM.append(row, DOM.$('button.krt-pr-diff-tree-scroll')) as HTMLButtonElement;
++		scrollBtn.type = 'button';
++		scrollBtn.title = localize('krt.pr.diffTree.scrollToFile', "Reveal in diff");
++		scrollBtn.classList.add('codicon', 'codicon-arrow-right');
++
++		this.renderStore.add(DOM.addDisposableListener(reviewedBox, 'change', e => {
++			e.stopPropagation();
++			const reviewed = reviewedBox.checked;
++			if (reviewed) {
++				this.reviewedPaths.add(node.path);
++				row.classList.add('reviewed');
++			} else {
++				this.reviewedPaths.delete(node.path);
++				row.classList.remove('reviewed');
++			}
++			this.refreshHeadCount();
++			this.callbacks.onToggleReviewed(node.path, reviewed);
++		}));
++
++		const openInEditor = () => this.callbacks.onOpenInEditor(node.path);
++		this.renderStore.add(DOM.addDisposableListener(name, 'click', e => {
++			e.stopPropagation();
++			openInEditor();
++		}));
++		this.renderStore.add(DOM.addDisposableListener(name, 'keydown', e => {
++			if (e.key === 'Enter' || e.key === ' ') {
++				e.preventDefault();
++				openInEditor();
++			}
++		}));
++
++		this.renderStore.add(DOM.addDisposableListener(scrollBtn, 'click', e => {
++			e.stopPropagation();
++			this.callbacks.onScrollToFile(node.path);
++		}));
++	}
++
++	private refreshHeadCount(): void {
++		if (!this.headCountEl) {
++			return;
++		}
++		let reviewed = 0;
++		for (const path of this.rowsByPath.keys()) {
++			if (this.reviewedPaths.has(path)) {
++				reviewed++;
++			}
++		}
++		this.headCountEl.textContent = `${reviewed}/${this.filesCount}`;
++	}
++}
++
++function formatFolderCounts(node: FolderNode): string {
++	return `${node.fileCount} · +${node.additions} -${node.deletions}`;
++}
++
++function statusGlyph(status: PullRequestFile['status']): string {
++	switch (status) {
++		case 'added': return 'A';
++		case 'removed': return 'D';
++		case 'modified': return 'M';
++		case 'renamed': return 'R';
++		case 'copied': return 'C';
++		case 'changed': return 'M';
++		case 'unchanged':
++		default: return '·';
++	}
++}
+diff --git a/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.css b/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.css
+index 3ae439cf320..762d7b86a5b 100644
+--- a/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.css
++++ b/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.css
+@@ -1082,21 +1082,54 @@ img.krt-pr-comment-avatar {
+ 	padding: 4px 0;
+ }
+ 
+-.krt-pr-diff-tree-folder {
+-	padding: 6px 10px 2px;
++.krt-pr-diff-tree-folder-row {
++	display: grid;
++	grid-template-columns: 14px 16px 1fr auto;
++	align-items: center;
++	gap: 4px;
++	padding: 3px 10px;
++	cursor: pointer;
++	color: var(--vscode-foreground);
++}
++
++.krt-pr-diff-tree-folder-row:hover {
++	background: var(--vscode-list-hoverBackground, rgba(127, 127, 127, 0.08));
++}
++
++.krt-pr-diff-tree-folder-row .codicon-chevron-right,
++.krt-pr-diff-tree-folder-row .codicon-chevron-down {
++	font-size: 14px;
++	opacity: 0.85;
++}
++
++.krt-pr-diff-tree-folder-icon {
++	font-size: 14px;
++	opacity: 0.85;
++	color: var(--vscode-descriptionForeground);
++}
++
++.krt-pr-diff-tree-folder-name {
++	overflow: hidden;
++	text-overflow: ellipsis;
++	white-space: nowrap;
++}
++
++.krt-pr-diff-tree-folder-counts {
++	font-family: 'JetBrains Mono', monospace;
+ 	font-size: 10.5px;
+-	text-transform: uppercase;
+-	letter-spacing: 0.04em;
+ 	color: var(--vscode-descriptionForeground);
+ }
+ 
++.krt-pr-diff-tree-children {
++	display: block;
++}
++
+ .krt-pr-diff-tree-row {
+ 	display: grid;
+-	grid-template-columns: 16px 1fr auto;
++	grid-template-columns: 14px 16px 1fr auto 16px;
+ 	align-items: center;
+ 	gap: 6px;
+-	padding: 4px 10px;
+-	cursor: pointer;
++	padding: 3px 10px;
+ }
+ 
+ .krt-pr-diff-tree-row:hover {
+@@ -1111,10 +1144,39 @@ img.krt-pr-comment-avatar {
+ 	opacity: 0.55;
+ }
+ 
++.krt-pr-diff-tree-row .krt-pr-diff-tree-reviewed {
++	margin: 0;
++	cursor: pointer;
++}
++
+ .krt-pr-diff-tree-name {
+ 	overflow: hidden;
+ 	text-overflow: ellipsis;
+ 	white-space: nowrap;
++	cursor: pointer;
++}
++
++.krt-pr-diff-tree-name:hover {
++	text-decoration: underline;
++}
++
++.krt-pr-diff-tree-scroll {
++	all: unset;
++	width: 16px;
++	height: 16px;
++	display: inline-flex;
++	align-items: center;
++	justify-content: center;
++	border-radius: 3px;
++	color: var(--vscode-descriptionForeground);
++	cursor: pointer;
++	font-size: 12px;
++	opacity: 0.6;
++}
++
++.krt-pr-diff-tree-scroll:hover {
++	background: var(--vscode-toolbar-hoverBackground, rgba(127, 127, 127, 0.15));
++	opacity: 1;
+ }
+ 
+ .krt-pr-diff-tree-counts {
+@@ -1507,8 +1569,7 @@ img.krt-pr-comment-avatar {
+ 	display: flex;
+ 	flex-direction: column;
+ 	gap: 28px;
+-	max-width: 880px;
+-	margin: 0 auto;
++	width: 100%;
+ }
+ 
+ .krt-pr-tour-chapter {
+@@ -2289,3 +2350,40 @@ img.krt-pr-comment-avatar {
+ .krt-pr-storyboard-mark-btn:hover {
+ 	background: var(--krt-accent-2, var(--vscode-button-hoverBackground, var(--vscode-focusBorder)));
+ }
++
++/* ---------- Phase 11 — AI inline chips ---------- */
++
++/*
++ * Chips render as Monaco "after" injected text. The selectors target
++ * the inline class we set on the decoration (`krt-tour-chip` plus a
++ * severity modifier). Text is intentionally a tiny pill — hover
++ * exposes the full body via Monaco's standard hover system.
++ */
++.krt-tour-chip {
++	font-size: 11px;
++	padding: 0 6px;
++	margin-left: 8px;
++	border-radius: 999px;
++	border: 1px solid transparent;
++	letter-spacing: 0.01em;
++	font-style: normal;
++	white-space: nowrap;
++}
++
++.krt-tour-chip-info {
++	color: var(--vscode-descriptionForeground, #888);
++	background: rgba(110, 118, 129, 0.18);
++	border-color: rgba(110, 118, 129, 0.35);
++}
++
++.krt-tour-chip-note {
++	color: var(--vscode-textLink-foreground, #4493f8);
++	background: rgba(80, 110, 230, 0.16);
++	border-color: rgba(80, 110, 230, 0.35);
++}
++
++.krt-tour-chip-warn {
++	color: var(--vscode-editorWarning-foreground, #c2c200);
++	background: rgba(194, 194, 0, 0.16);
++	border-color: rgba(194, 194, 0, 0.45);
++}
+diff --git a/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.ts b/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.ts
+index 389073abd35..df2a963b7a0 100644
+--- a/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.ts
++++ b/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.ts
+@@ -33,7 +33,7 @@ import { IKrtSwitchResumeService, ResumeToken } from '../workspace/krtSwitchResu
+ import { IKrtBotListService } from './krtBotListService.js';
+ import { IKrtReviewDraftService } from './krtReviewDraftService.js';
+ import { isKrtError } from '../../../../../platform/krt/common/errors.js';
+-import { Chapter, EdgeKind, EDGE_KINDS, TourVariant } from '../ai/krtTourTypes.js';
++import { Chapter, ChapterChip, EdgeKind, EDGE_KINDS, TourVariant } from '../ai/krtTourTypes.js';
+ import { expandEmojiShortcodes } from '../ai/krtEmoji.js';
+ import { ITourGenerator, TourGenerationStatus, TourTokenUsage } from '../ai/krtTourGenerator.js';
+ import { DEFAULT_LAYOUT_OPTIONS as DEFAULT_STORYBOARD_LAYOUT, layoutStoryboard } from '../ai/krtStoryboardLayout.js';
+@@ -64,7 +64,10 @@ import { KrtPullRequestEditorInput } from './krtPullRequestEditorInput.js';
+ import { getCached, getInFlight, invalidate as invalidatePrCache, putActivity, putFiles, putPr, putReviewComments, putSubMode, trackFetch } from './krtPrCache.js';
+ import { IKrtPrCommentController } from './krtPrCommentController.js';
+ import { KrtPrFlatDiff } from './krtPrFlatDiff.js';
+-import { readReviewedPaths } from './krtPrReviewed.js';
++import { KrtDiffFileTree } from './krtDiffFileTree.js';
++import { readReviewedPaths, writeReviewedPaths } from './krtPrReviewed.js';
++import { encodeKrtGit } from '../workspace/krtGitContentProvider.js';
++import { IEditorService, SIDE_GROUP } from '../../../../services/editor/common/editorService.js';
+ 
+ const DIFF_MODE_STORAGE_KEY = 'krt.pr.diffMode.v1';
+ 
+@@ -140,7 +143,7 @@ export class KrtPullRequestEditorPane extends EditorPane {
+ 	private isCheckedOut = false;
+ 	private reviewComments: readonly Comment[] | undefined;
+ 	private reviewCommentsLoading = false;
+-	private diffTreeRowsByPath = new Map<string, HTMLElement>();
++	private diffFileTree: KrtDiffFileTree | undefined;
+ 
+ 	// Tour sub-mode state
+ 	private tourState: TourState | undefined;
+@@ -183,6 +186,7 @@ export class KrtPullRequestEditorPane extends EditorPane {
+ 		@IKrtReviewDraftService private readonly reviewDraftService: IKrtReviewDraftService,
+ 		@IKrtBotListService private readonly botListService: IKrtBotListService,
+ 		@IContextMenuService private readonly contextMenuService: IContextMenuService,
++		@IEditorService private readonly editorService: IEditorService,
+ 	) {
+ 		super(KrtPullRequestEditorPane.ID, group, telemetryService, themeService, krtStorageService);
+ 		// Re-check the workspace's HEAD whenever the resume token
+@@ -903,7 +907,7 @@ export class KrtPullRequestEditorPane extends EditorPane {
+ 		this.currentInput = undefined;
+ 		this.currentPr = undefined;
+ 		this.fetchToken++;
+-		this.diffTreeRowsByPath = new Map();
++		this.diffFileTree = undefined;
+ 		this.tourSubheadingEl = undefined;
+ 		this.tourStreamingBadgeEl = undefined;
+ 		this.storyboardSubheadingEl = undefined;
+@@ -1554,12 +1558,6 @@ export class KrtPullRequestEditorPane extends EditorPane {
+ 			this.loadReviewComments(pr);
+ 		}
+ 
+-		// File tree on the left — preserves Mark Reviewed UI and gives
+-		// the user a quick navigation surface. Click → reveal the file
+-		// inside the multi-diff widget.
+-		this.diffTreeRowsByPath = new Map();
+-		this.renderDiffTree(tree, this.diffFiles, this.diffTreeRowsByPath);
+-
+ 		// Mount the flat-diff stack. Each file gets its own
+ 		// `DiffEditorWidget` sized to fit its content; the outer pane
+ 		// is the scroll surface, so the user scrolls naturally through
+@@ -1568,59 +1566,63 @@ export class KrtPullRequestEditorPane extends EditorPane {
+ 		// the new render mode.
+ 		const flatDiff = this.instantiationService.createInstance(KrtPrFlatDiff, host);
+ 		this.bodyDisposables.add(flatDiff);
++		// Phase 11 — show every chapter's chips on the main Diff
++		// surface; this view doesn't have a single "current chapter"
++		// the way Tour does, so the union of all chips is the right
++		// signal to surface here.
++		const allChips = this.tourState
++			? this.tourState.chapters.flatMap(c => c.chips)
++			: [];
+ 		void flatDiff.setPullRequest(pr, this.diffFiles, workspace, {
+ 			renderSideBySide: this.diffRenderMode === 'side-by-side',
++			chips: allChips,
+ 		});
+ 
+-		// Tree clicks scroll the outer pane to the file's diff card.
+-		for (const [path, row] of this.diffTreeRowsByPath) {
+-			this.bodyDisposables.add(DOM.addDisposableListener(row, 'click', () => {
+-				flatDiff.scrollToFile(path);
+-			}));
+-		}
++		// File tree on the left — folder-grouped with collapsible
++		// folders and persistent expand state per PR. Filename click
++		// hands off to the Code editor view (Phase 9). Per-file
++		// scroll-to-card affordance + inline mark-reviewed checkbox
++		// kept on each row.
++		this.diffFileTree = this.bodyDisposables.add(new KrtDiffFileTree(
++			tree,
++			this.krtStorageService,
++			pr.owner,
++			pr.repo,
++			pr.number,
++			this.reviewedPaths,
++			{
++				onScrollToFile: path => flatDiff.scrollToFile(path),
++				onOpenInEditor: path => this.openFileInEditor(pr, workspace, path),
++				onToggleReviewed: (path, reviewed) => this.toggleFileReviewed(path, reviewed),
++			},
++		));
++		this.diffFileTree.setFiles(this.diffFiles);
++	}
++
++	private openFileInEditor(pr: PullRequest, workspace: KrtWorkspace, path: string): void {
++		// Prefer the workspace's real file:// URI when the working tree
++		// is on the PR head — that's what Phase 9's Editor view expects
++		// (live LSP, edits) and matches the diff's modified side. When
++		// not checked out, fall back to a krt-git:// URI bound to the
++		// PR head so the user still sees the PR's content (read-only).
++		const resource = this.isCheckedOut
++			? URI.joinPath(URI.file(workspace.folderPath), path)
++			: encodeKrtGit(workspace.folderUri, workspace.folderPath, pr.head.sha, path);
++		void this.editorService.openEditor(
++			{ resource, options: { pinned: true, preserveFocus: false } },
++			SIDE_GROUP,
++		);
+ 	}
+ 
+-	private renderDiffTree(parent: HTMLElement, files: readonly PullRequestFile[], rowsOut: Map<string, HTMLElement>): void {
+-		const heading = DOM.append(parent, DOM.$('.krt-pr-diff-tree-head'));
+-		const headTitle = DOM.append(heading, DOM.$('span.krt-pr-diff-tree-title'));
+-		headTitle.textContent = localize('krt.pr.files', "Files");
+-		const headCount = DOM.append(heading, DOM.$('span.krt-pr-diff-tree-count'));
+-		const reviewedCount = files.filter(f => this.reviewedPaths.has(f.path)).length;
+-		headCount.textContent = `${reviewedCount}/${files.length}`;
+-
+-		const list = DOM.append(parent, DOM.$('.krt-pr-diff-tree-list'));
+-		const groups = groupFilesByFolder(files);
+-		for (const group of groups) {
+-			if (group.folder) {
+-				const folder = DOM.append(list, DOM.$('.krt-pr-diff-tree-folder'));
+-				folder.textContent = group.folder;
+-			}
+-			for (const file of group.files) {
+-				const row = DOM.append(list, DOM.$('.krt-pr-diff-tree-row'));
+-				row.setAttribute('role', 'button');
+-				row.setAttribute('tabindex', '0');
+-				if (this.reviewedPaths.has(file.path)) {
+-					row.classList.add('reviewed');
+-				}
+-				const dot = DOM.append(row, DOM.$('span.krt-pr-diff-status-dot'));
+-				dot.classList.add(file.status);
+-				dot.textContent = statusGlyph(file.status);
+-				const name = DOM.append(row, DOM.$('span.krt-pr-diff-tree-name'));
+-				name.textContent = group.folder ? file.path.slice(group.folder.length + 1) : file.path;
+-				name.title = file.path;
+-				const counts = DOM.append(row, DOM.$('span.krt-pr-diff-tree-counts'));
+-				const add = DOM.append(counts, DOM.$('span.add'));
+-				add.textContent = `+${file.additions}`;
+-				const del = DOM.append(counts, DOM.$('span.del'));
+-				del.textContent = `-${file.deletions}`;
+-				rowsOut.set(file.path, row);
+-				this.bodyDisposables.add(DOM.addDisposableListener(row, 'keydown', e => {
+-					if (e.key === 'Enter' || e.key === ' ') {
+-						e.preventDefault();
+-						row.click();
+-					}
+-				}));
+-			}
++	private toggleFileReviewed(path: string, reviewed: boolean): void {
++		if (reviewed) {
++			this.reviewedPaths.add(path);
++		} else {
++			this.reviewedPaths.delete(path);
++		}
++		const input = this.currentInput;
++		if (input) {
++			writeReviewedPaths(this.krtStorageService, input.owner, input.repo, input.number, this.reviewedPaths);
+ 		}
+ 	}
+ 
+@@ -1928,7 +1930,7 @@ export class KrtPullRequestEditorPane extends EditorPane {
+ 		const focusPath = chapter.diffFile && chapter.files.includes(chapter.diffFile)
+ 			? chapter.diffFile
+ 			: chapter.files[0];
+-		this.renderTourMiniDiffs(parent, pr, [focusPath, ...chapter.files.filter(p => p !== focusPath)]);
++		this.renderTourMiniDiffs(parent, pr, [focusPath, ...chapter.files.filter(p => p !== focusPath)], chapter.chips);
+ 	}
+ 
+ 	private renderTourReading(parent: HTMLElement, pr: PullRequest, chapters: readonly Chapter[]): void {
+@@ -1973,11 +1975,11 @@ export class KrtPullRequestEditorPane extends EditorPane {
+ 					renderChapterMarkdown(li, b, this.bodyDisposables, { inline: true });
+ 				}
+ 			}
+-			this.renderTourMiniDiffs(block, pr, chapter.files);
++			this.renderTourMiniDiffs(block, pr, chapter.files, chapter.chips);
+ 		}
+ 	}
+ 
+-	private renderTourMiniDiffs(parent: HTMLElement, pr: PullRequest, paths: readonly string[]): void {
++	private renderTourMiniDiffs(parent: HTMLElement, pr: PullRequest, paths: readonly string[], chips?: readonly ChapterChip[]): void {
+ 		const wrap = DOM.append(parent, DOM.$('.krt-pr-tour-mini-diffs'));
+ 
+ 		if (this.diffFiles === undefined) {
+@@ -2041,6 +2043,7 @@ export class KrtPullRequestEditorPane extends EditorPane {
+ 		this.bodyDisposables.add(flatDiff);
+ 		void flatDiff.setPullRequest(pr, orderedFiles, workspace, {
+ 			renderSideBySide: this.diffRenderMode === 'side-by-side',
++			chips,
+ 		});
+ 	}
+ 
+@@ -2339,11 +2342,19 @@ export class KrtPullRequestEditorPane extends EditorPane {
+ 			return;
+ 		}
+ 
+-		this.renderStoryboardGraph(body, pr, this.tourState.chapters);
++		// The synthetic Coverage chapter (Phase 11) is intentionally
++		// excluded from the storyboard graph: it has no `dependsOn`
++		// edges by design, so it renders as a free-floating card that
++		// adds noise without adding meaning. It still appears in the
++		// Tour Chapters / Reading variants, where the linear list
++		// makes "files the tour didn't otherwise touch" the right
++		// closing chapter.
++		const graphChapters = this.tourState.chapters.filter(c => c.synthetic !== 'coverage');
++		this.renderStoryboardGraph(body, pr, graphChapters);
+ 
+ 		const diffPanel = DOM.append(this.bodyElement, DOM.$('.krt-pr-storyboard-diff'));
+ 		this.storyboardDiffPanelEl = diffPanel;
+-		const initialId = this.storyboardSelectedId ?? this.tourState.chapters[0]?.id;
++		const initialId = this.storyboardSelectedId ?? graphChapters[0]?.id;
+ 		if (initialId) {
+ 			this.renderStoryboardDiffPanel(pr, initialId);
+ 		}
+@@ -2411,14 +2422,11 @@ export class KrtPullRequestEditorPane extends EditorPane {
+ 			this.loadReviewComments(pr);
+ 		}
+ 
+-		const treeRows = new Map<string, HTMLElement>();
+-		this.renderDiffTree(tree, orderedFiles, treeRows);
+-
+ 		// Strict gate (same shape as the main Diff sub-mode): no
+ 		// workspace registered for the repo → "Add Workspace" CTA;
+ 		// not on PR head → Check Out CTA. Both fall through to a
+ 		// banner where the diff would go, leaving the chapter graph
+-		// + tree rendering above so the user keeps context.
++		// rendering above so the user keeps context.
+ 		const workspace = this.workspaceRegistry.findByOwnerRepo(pr.owner, pr.repo);
+ 		if (!workspace) {
+ 			const cta = DOM.append(stack, DOM.$('.krt-pr-diff-cta'));
+@@ -2455,14 +2463,27 @@ export class KrtPullRequestEditorPane extends EditorPane {
+ 		this.bodyDisposables.add(flatDiff);
+ 		void flatDiff.setPullRequest(pr, orderedFiles, workspace, {
+ 			renderSideBySide: this.diffRenderMode === 'side-by-side',
++			chips: chapter.chips,
+ 		});
+ 
+-		// Tree clicks scroll the outer pane to the file's diff card.
+-		for (const [path, row] of treeRows) {
+-			this.bodyDisposables.add(DOM.addDisposableListener(row, 'click', () => {
+-				flatDiff.scrollToFile(path);
+-			}));
+-		}
++		// Chapter-scoped file tree: same component as the main Diff
++		// sub-mode, just initialised with the chapter's files. Filename
++		// click hands off to the Editor view; the scroll-to-file
++		// affordance reveals the file inside this chapter's stack.
++		const chapterTree = this.bodyDisposables.add(new KrtDiffFileTree(
++			tree,
++			this.krtStorageService,
++			pr.owner,
++			pr.repo,
++			pr.number,
++			this.reviewedPaths,
++			{
++				onScrollToFile: path => flatDiff.scrollToFile(path),
++				onOpenInEditor: path => this.openFileInEditor(pr, workspace, path),
++				onToggleReviewed: (path, reviewed) => this.toggleFileReviewed(path, reviewed),
++			},
++		));
++		chapterTree.setFiles(orderedFiles);
+ 	}
+ 
+ 	private renderStoryboardGraph(parent: HTMLElement, pr: PullRequest, chapters: readonly Chapter[]): void {
+@@ -3145,40 +3166,6 @@ function edgeKindDash(kind: EdgeKind): string | undefined {
+ 	}
+ }
+ 
+-function statusGlyph(status: PullRequestFile['status']): string {
+-	switch (status) {
+-		case 'added': return 'A';
+-		case 'removed': return 'D';
+-		case 'modified': return 'M';
+-		case 'renamed': return 'R';
+-		case 'copied': return 'C';
+-		case 'changed': return 'M';
+-		case 'unchanged':
+-		default: return '·';
+-	}
+-}
+-
+-interface FolderGroup {
+-	readonly folder: string;
+-	readonly files: readonly PullRequestFile[];
+-}
+-
+-function groupFilesByFolder(files: readonly PullRequestFile[]): readonly FolderGroup[] {
+-	const byFolder = new Map<string, PullRequestFile[]>();
+-	for (const f of files) {
+-		const slash = f.path.lastIndexOf('/');
+-		const folder = slash >= 0 ? f.path.slice(0, slash) : '';
+-		const arr = byFolder.get(folder);
+-		if (arr) {
+-			arr.push(f);
+-		} else {
+-			byFolder.set(folder, [f]);
+-		}
+-	}
+-	const folders = [...byFolder.keys()].sort((a, b) => a.localeCompare(b));
+-	return folders.map(folder => ({ folder, files: byFolder.get(folder)! }));
+-}
+-
+ function relativeTime(iso: string): string {
+ 	if (!iso) {
+ 		return '';
+-- 
+2.52.0
+

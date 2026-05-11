@@ -1,0 +1,54 @@
+From 203fc6f151e5fbc5f84d14be4eeceb6430db50d8 Mon Sep 17 00:00:00 2001
+From: Kol Crooks <kol.crooks@datadoghq.com>
+Date: Thu, 7 May 2026 15:39:51 -0400
+Subject: [PATCH] Phase C fix: re-publish snapshot after bumpDataProvider
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Reported: inline comment widgets render correctly but the bottom
+Comments panel stays empty even though `setWorkspaceComments` is
+called from `publishWorkspaceSnapshot()`.
+
+Cause: `commentService.unregisterCommentController(owner)` does
+more than just remove the controller from `_commentControls` — it
+also calls `commentsModel.deleteCommentsByOwner(owner)` which
+wipes the owner's threads from the panel's data model. So my
+`bumpDataProvider`'s unregister/re-register sequence:
+  1. Initial publish via `setWorkspaceComments` populates the
+     panel's commentsModel.
+  2. `bumpDataProvider` unregisters → `commentsModel`'s entries
+     for `krt-pr` deleted.
+  3. `bumpDataProvider` re-registers → controller is back, but
+     the model is empty.
+
+Fix: call `publishWorkspaceSnapshot()` again at the end of
+`bumpDataProvider` to restore the snapshot. Inline widgets weren't
+affected because they read from a different code path (the
+editor's CommentController contribution polls our
+`getDocumentComments`).
+
+Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+---
+ .../contrib/krt/browser/pr/krtPrCommentController.ts         | 5 +++++
+ 1 file changed, 5 insertions(+)
+
+diff --git a/src/vs/workbench/contrib/krt/browser/pr/krtPrCommentController.ts b/src/vs/workbench/contrib/krt/browser/pr/krtPrCommentController.ts
+index 99bc2960186..4031222a748 100644
+--- a/src/vs/workbench/contrib/krt/browser/pr/krtPrCommentController.ts
++++ b/src/vs/workbench/contrib/krt/browser/pr/krtPrCommentController.ts
+@@ -161,6 +161,11 @@ export class KrtPrCommentController extends Disposable implements ICommentContro
+ 	bumpDataProvider(): void {
+ 		this.commentService.unregisterCommentController(KRT_PR_COMMENT_OWNER);
+ 		this.commentService.registerCommentController(KRT_PR_COMMENT_OWNER, this);
++		// `unregisterCommentController` calls
++		// `commentsModel.deleteCommentsByOwner(...)` which wipes our
++		// thread set from the panel's data model. Re-publish the
++		// snapshot so the bottom Comments view gets the threads back.
++		this.publishWorkspaceSnapshot();
+ 	}
+ 
+ 	async submitNewComment(thread: CommentThread<IRange>, text: string): Promise<void> {
+-- 
+2.52.0
+

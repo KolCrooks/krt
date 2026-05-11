@@ -1,0 +1,234 @@
+From e5111ab9f8c9657a7bdd4c8c1dba588c24c20446 Mon Sep 17 00:00:00 2001
+From: Kol Crooks <kol.crooks@datadoghq.com>
+Date: Thu, 7 May 2026 15:31:28 -0400
+Subject: [PATCH] Phase C fix: bump data provider after setViewModel + restore
+ Comments view
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The setCommentsForPr / registerDiffUri logs appeared but no
+getDocumentComments fired and no native comment widgets appeared.
+Two compounding issues:
+
+1. **Editor `editor.contrib.review` is `AfterFirstRender`** —
+   instantiated up to ~50ms after the inner editor's model attaches.
+   Our controller registers eagerly at singleton init, well before
+   any KRT diff editor exists. The `onDidSetDataProvider` event we
+   fire then has no listeners; subsequent `onDidSetResourceComment-
+   Infos` and `onDidUpdateCommentThreads` fall on the same gap. By
+   the time the editor's CommentController instantiates, the events
+   it relies on for its initial compute are gone, so it never queries
+   our `getDocumentComments`.
+
+   Fix: `bumpDataProvider()` on the controller — unregister + re-
+   register, which re-fires `onDidSetDataProvider`.
+   `KrtPrMultiDiff.setPullRequest` schedules a bump 150ms after
+   `setViewModel`, comfortably past the `AfterFirstRender` 50ms
+   idle-timeout. The newly-listening editors trigger their initial
+   compute and pick up the threads we already published.
+
+2. **Comments view (bottom panel) was missing** — Phase A's strip
+   removed `krtCommentsView.contribution.ts`, which Phase 9.5 had
+   added because upstream's `MainThreadComments` only registers the
+   Comments view when an extension declares the `comments`
+   contribution. KRT has no such extension, so without this we
+   register the view ourselves. Restored as `hideIfEmpty: true` —
+   appears once `setWorkspaceComments` publishes a non-empty thread
+   set.
+
+Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+---
+ .../pr/krtCommentsView.contribution.ts        | 65 +++++++++++++++++++
+ .../krt/browser/pr/krtPrCommentController.ts  | 34 +++++++++-
+ .../contrib/krt/browser/pr/krtPrMultiDiff.ts  | 16 +++++
+ .../pr/krtPullRequestEditor.contribution.ts   |  1 +
+ 4 files changed, 115 insertions(+), 1 deletion(-)
+ create mode 100644 src/vs/workbench/contrib/krt/browser/pr/krtCommentsView.contribution.ts
+
+diff --git a/src/vs/workbench/contrib/krt/browser/pr/krtCommentsView.contribution.ts b/src/vs/workbench/contrib/krt/browser/pr/krtCommentsView.contribution.ts
+new file mode 100644
+index 00000000000..bd76d21b61b
+--- /dev/null
++++ b/src/vs/workbench/contrib/krt/browser/pr/krtCommentsView.contribution.ts
+@@ -0,0 +1,65 @@
++/*---------------------------------------------------------------------------------------------
++ *  Copyright (c) Microsoft Corporation. All rights reserved.
++ *  Licensed under the MIT License. See License.txt in the project root for license information.
++ *--------------------------------------------------------------------------------------------*/
++
++import { Codicon } from '../../../../../base/common/codicons.js';
++import { localize } from '../../../../../nls.js';
++import { SyncDescriptor } from '../../../../../platform/instantiation/common/descriptors.js';
++import { Registry } from '../../../../../platform/registry/common/platform.js';
++import { registerIcon } from '../../../../../platform/theme/common/iconRegistry.js';
++import { ViewPaneContainer } from '../../../../browser/parts/views/viewPaneContainer.js';
++import {
++	Extensions as ViewExtensions,
++	IViewContainersRegistry,
++	IViewsRegistry,
++	ViewContainerLocation,
++} from '../../../../common/views.js';
++import { CommentsPanel } from '../../../comments/browser/commentsView.js';
++import {
++	COMMENTS_VIEW_ID,
++	COMMENTS_VIEW_STORAGE_ID,
++	COMMENTS_VIEW_TITLE,
++} from '../../../comments/browser/commentsTreeViewer.js';
++
++/**
++ * Register the workbench's standard Comments view at boot. Upstream's
++ * `MainThreadComments` is the only thing that normally registers
++ * this view, and it only runs when an extension declares the
++ * `comments` contribution. KRT has no such extension — its
++ * review-comment data flows through `KrtPrCommentController`
++ * directly — so without this contribution the Comments view never
++ * appears in the panel and the user has no aggregated thread list.
++ *
++ * `hideIfEmpty: true` keeps the view out of the panel when there are
++ * no threads anywhere; it appears as soon as `KrtPrCommentController`
++ * pushes its first batch through `setWorkspaceComments`.
++ */
++
++const commentsViewIcon = registerIcon(
++	'krt-comments-view-icon',
++	Codicon.commentDiscussion,
++	localize('krt.commentsViewIcon', "View icon of the comments view."),
++);
++
++const VIEW_CONTAINER = Registry.as<IViewContainersRegistry>(ViewExtensions.ViewContainersRegistry).registerViewContainer({
++	id: COMMENTS_VIEW_ID,
++	title: COMMENTS_VIEW_TITLE,
++	ctorDescriptor: new SyncDescriptor(ViewPaneContainer, [COMMENTS_VIEW_ID, { mergeViewWithContainerWhenSingleView: true }]),
++	storageId: COMMENTS_VIEW_STORAGE_ID,
++	hideIfEmpty: true,
++	icon: commentsViewIcon,
++	order: 10,
++}, ViewContainerLocation.Panel);
++
++Registry.as<IViewsRegistry>(ViewExtensions.ViewsRegistry).registerViews([{
++	id: COMMENTS_VIEW_ID,
++	name: COMMENTS_VIEW_TITLE,
++	canToggleVisibility: false,
++	ctorDescriptor: new SyncDescriptor(CommentsPanel),
++	canMoveView: true,
++	containerIcon: commentsViewIcon,
++	focusCommand: {
++		id: 'workbench.action.focusCommentsPanel',
++	},
++}], VIEW_CONTAINER);
+diff --git a/src/vs/workbench/contrib/krt/browser/pr/krtPrCommentController.ts b/src/vs/workbench/contrib/krt/browser/pr/krtPrCommentController.ts
+index a578e4fc368..99bc2960186 100644
+--- a/src/vs/workbench/contrib/krt/browser/pr/krtPrCommentController.ts
++++ b/src/vs/workbench/contrib/krt/browser/pr/krtPrCommentController.ts
+@@ -51,6 +51,7 @@ export interface IKrtPrCommentController {
+ 	setCommentsForPr(prUrl: string, comments: readonly KrtComment[]): void;
+ 	clearCommentsForPr(prUrl: string): void;
+ 	submitNewComment(thread: CommentThread<IRange>, text: string): Promise<void>;
++	bumpDataProvider(): void;
+ }
+ 
+ export const IKrtPrCommentController = createDecorator<IKrtPrCommentController>('krtPrCommentController');
+@@ -99,6 +100,7 @@ export class KrtPrCommentController extends Disposable implements ICommentContro
+ 	registerDiffUri(uri: URI, meta: IKrtPrUriMeta): IDisposable {
+ 		const key = uri.toString();
+ 		this.metadataByUri.set(key, meta);
++		this.logService.info(`[krt] commentController: registered ${meta.side} ${meta.prUrl} ${meta.path} -> ${key}`);
+ 		this.refreshUri(uri, meta);
+ 		return toDisposable(() => {
+ 			if (this.metadataByUri.get(key) === meta) {
+@@ -118,6 +120,8 @@ export class KrtPrCommentController extends Disposable implements ICommentContro
+ 
+ 	setCommentsForPr(prUrl: string, comments: readonly KrtComment[]): void {
+ 		this.commentsByPr.set(prUrl, comments);
++		const reviewCount = comments.filter(c => c.location.kind === 'review').length;
++		this.logService.info(`[krt] commentController: setCommentsForPr ${prUrl} -> ${comments.length} comments (${reviewCount} review)`);
+ 		for (const [key, meta] of this.metadataByUri) {
+ 			if (meta.prUrl === prUrl) {
+ 				this.refreshUri(URI.parse(key), meta);
+@@ -134,6 +138,31 @@ export class KrtPrCommentController extends Disposable implements ICommentContro
+ 		}
+ 	}
+ 
++	/**
++	 * Re-fire `onDidSetDataProvider` so freshly-mounted code editors
++	 * trigger their initial compute against this controller.
++	 *
++	 * The workbench's `editor.contrib.review` is `AfterFirstRender`
++	 * (instantiated up to ~50ms after the inner editor's model
++	 * attaches) and only computes via these events:
++	 *   - `onDidSetDataProvider` (a controller registered)
++	 *   - `onDidDeleteDataProvider` (a controller unregistered)
++	 *   - `onDidUpdateCommentingRanges`
++	 *   - `onDidSetResourceCommentInfos` (matching the editor's URI)
++	 *   - `onDidUpdateCommentThreads` (after an initial compute)
++	 *
++	 * KRT registers this controller eagerly at singleton init time —
++	 * before any KRT diff editor exists — so `onDidSetDataProvider`
++	 * fires for nobody. After the multi-diff mounts and editors render,
++	 * `KrtPrMultiDiff` calls this method to re-fire the event so any
++	 * newly-listening `editor.contrib.review` triggers compute and
++	 * picks up the threads we already published.
++	 */
++	bumpDataProvider(): void {
++		this.commentService.unregisterCommentController(KRT_PR_COMMENT_OWNER);
++		this.commentService.registerCommentController(KRT_PR_COMMENT_OWNER, this);
++	}
++
+ 	async submitNewComment(thread: CommentThread<IRange>, text: string): Promise<void> {
+ 		const key = thread.resource;
+ 		if (!key) { return; }
+@@ -166,7 +195,10 @@ export class KrtPrCommentController extends Disposable implements ICommentContro
+ 	// ----- ICommentController -----
+ 
+ 	async getDocumentComments(resource: URI, _token: CancellationToken): Promise<ICommentInfo<IRange>> {
+-		return this.commentInfoForUri(resource);
++		const info = this.commentInfoForUri(resource);
++		const meta = this.metadataByUri.get(resource.toString());
++		this.logService.info(`[krt] commentController: getDocumentComments ${resource.toString()} -> ${info.threads.length} threads, meta=${meta ? `${meta.side} ${meta.path}` : 'none'}`);
++		return info;
+ 	}
+ 
+ 	async getNotebookComments(_resource: URI, _token: CancellationToken): Promise<INotebookCommentInfo> {
+diff --git a/src/vs/workbench/contrib/krt/browser/pr/krtPrMultiDiff.ts b/src/vs/workbench/contrib/krt/browser/pr/krtPrMultiDiff.ts
+index dab88df2cf3..fe1561a25c3 100644
+--- a/src/vs/workbench/contrib/krt/browser/pr/krtPrMultiDiff.ts
++++ b/src/vs/workbench/contrib/krt/browser/pr/krtPrMultiDiff.ts
+@@ -234,6 +234,22 @@ export class KrtPrMultiDiff extends Disposable {
+ 		// `MultiDiffEditor.clearInput`.)
+ 		previousViewModel?.dispose();
+ 		previous?.dispose();
++
++		// Phase 10/C — kick the comment controller's data-provider
++		// registration so the editors that just mounted via
++		// `setViewModel` trigger their initial compute. Their
++		// `editor.contrib.review` is `AfterFirstRender` (max ~50ms
++		// after model attach) and only computes via the comment
++		// service events; firing them while no editor was listening
++		// (controller registers eagerly at singleton init) means the
++		// new editors miss the data. 150ms is comfortably past the
++		// 50ms `AfterFirstRender` idle timeout.
++		setTimeout(() => {
++			if (this._store.isDisposed) {
++				return;
++			}
++			this.commentController.bumpDataProvider();
++		}, 150);
+ 	}
+ 
+ 	revealFile(modifiedUri: URI | undefined, originalUri: URI | undefined): void {
+diff --git a/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditor.contribution.ts b/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditor.contribution.ts
+index d2ee016bc1f..d41a257ff34 100644
+--- a/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditor.contribution.ts
++++ b/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditor.contribution.ts
+@@ -15,6 +15,7 @@ import { IRange } from '../../../../../editor/common/core/range.js';
+ import { EditorPaneDescriptor, IEditorPaneRegistry } from '../../../../browser/editor.js';
+ import { EditorExtensions, IEditorFactoryRegistry, IEditorSerializer } from '../../../../common/editor.js';
+ import { CommentContextKeys } from '../../../comments/common/commentContextKeys.js';
++import './krtCommentsView.contribution.js';
+ import { IKrtPrCommentController, KrtPrCommentController, KRT_PR_COMMENT_OWNER } from './krtPrCommentController.js';
+ import { KrtPullRequestEditorInput } from './krtPullRequestEditorInput.js';
+ import { KrtPullRequestEditorPane } from './krtPullRequestEditorPane.js';
+-- 
+2.52.0
+

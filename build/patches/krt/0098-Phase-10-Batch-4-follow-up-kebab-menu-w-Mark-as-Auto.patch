@@ -1,0 +1,206 @@
+From 7400908bd87835682f352942f40b826816efbc9b Mon Sep 17 00:00:00 2001
+From: Kol Crooks <kol.crooks@datadoghq.com>
+Date: Fri, 8 May 2026 15:09:49 -0400
+Subject: [PATCH] Phase 10 Batch 4 follow-up: kebab menu w/ "Mark as
+ Automation"
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Replace the inline text toggle with a 22px kebab button (vertical
+ellipsis codicon) at the right edge of every comment header. Click
+opens a context menu with a single action — "Mark as Automation" for
+non-bots, "Mark as Discussion" for already-bots — that flips the
+author's bot status for the active workspace.
+
+The kebab is the right shape for adding more per-comment actions
+later (resolve, copy permalink, …) without re-plumbing the chrome.
+The button stays hidden until the comment is hovered (or the kebab
+itself receives keyboard focus) so the timeline stays uncluttered.
+---
+ .../browser/pr/krtPullRequestEditorPane.css   | 36 ++++-----
+ .../browser/pr/krtPullRequestEditorPane.ts    | 74 ++++++++++---------
+ 2 files changed, 58 insertions(+), 52 deletions(-)
+
+diff --git a/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.css b/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.css
+index 0430efdf0b4..4a5ac163333 100644
+--- a/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.css
++++ b/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.css
+@@ -442,37 +442,37 @@ img.krt-pr-comment-avatar {
+ 	flex: 1;
+ }
+ 
+-.krt-pr-comment-bot-toggle {
++.krt-pr-comment-menu-btn {
+ 	flex: 0 0 auto;
+-	font: inherit;
+-	font-size: 10.5px;
+-	font-weight: 500;
++	width: 22px;
++	height: 22px;
++	display: inline-flex;
++	align-items: center;
++	justify-content: center;
+ 	color: var(--vscode-descriptionForeground);
+ 	background: transparent;
+ 	border: 1px solid transparent;
+ 	border-radius: 4px;
+-	padding: 2px 8px;
++	padding: 0;
+ 	cursor: pointer;
+-	white-space: nowrap;
+ 	opacity: 0;
+-	transition: opacity 80ms;
++	transition: opacity 80ms, background 80ms;
+ }
+ 
+-.krt-pr-comment:hover .krt-pr-comment-bot-toggle,
+-.krt-pr-comment-bot-toggle:focus-visible,
+-.krt-pr-comment-bot-toggle.active {
+-	opacity: 1;
++.krt-pr-comment-menu-btn .codicon {
++	font-size: 14px;
+ }
+ 
+-.krt-pr-comment-bot-toggle:hover {
+-	background: var(--vscode-toolbar-hoverBackground, rgba(127, 127, 127, 0.12));
+-	color: var(--vscode-foreground);
++.krt-pr-comment:hover .krt-pr-comment-menu-btn,
++.krt-pr-comment-menu-btn:focus-visible {
++	opacity: 0.7;
+ }
+ 
+-.krt-pr-comment-bot-toggle.active {
+-	color: var(--krt-accent);
+-	border-color: var(--krt-accent-line);
+-	background: var(--krt-accent-soft);
++.krt-pr-comment-menu-btn:hover,
++.krt-pr-comment:hover .krt-pr-comment-menu-btn:hover {
++	opacity: 1;
++	background: var(--vscode-toolbar-hoverBackground, rgba(127, 127, 127, 0.12));
++	color: var(--vscode-foreground);
+ }
+ 
+ .krt-pr-comment-body {
+diff --git a/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.ts b/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.ts
+index c2086bf7504..6e217ca046a 100644
+--- a/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.ts
++++ b/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.ts
+@@ -12,7 +12,9 @@ import { DisposableStore } from '../../../../../base/common/lifecycle.js';
+ import { MarkdownString } from '../../../../../base/common/htmlContent.js';
+ import { URI } from '../../../../../base/common/uri.js';
+ import { localize } from '../../../../../nls.js';
++import { toAction } from '../../../../../base/common/actions.js';
+ import { ICommandService } from '../../../../../platform/commands/common/commands.js';
++import { IContextMenuService } from '../../../../../platform/contextview/browser/contextView.js';
+ import { IEditorOptions } from '../../../../../platform/editor/common/editor.js';
+ import { IInstantiationService } from '../../../../../platform/instantiation/common/instantiation.js';
+ import { IStorageService, StorageScope, StorageTarget } from '../../../../../platform/storage/common/storage.js';
+@@ -179,6 +181,7 @@ export class KrtPullRequestEditorPane extends EditorPane {
+ 		@IKrtPrCommentController private readonly krtCommentController: IKrtPrCommentController,
+ 		@IKrtReviewDraftService private readonly reviewDraftService: IKrtReviewDraftService,
+ 		@IKrtBotListService private readonly botListService: IKrtBotListService,
++		@IContextMenuService private readonly contextMenuService: IContextMenuService,
+ 	) {
+ 		super(KrtPullRequestEditorPane.ID, group, telemetryService, themeService, krtStorageService);
+ 		// Re-check the workspace's HEAD whenever the resume token
+@@ -1088,9 +1091,9 @@ export class KrtPullRequestEditorPane extends EditorPane {
+ 		sep.textContent = '·';
+ 		const when = DOM.append(head, DOM.$('span.krt-pr-comment-when'));
+ 		when.textContent = relativeTime(comment.createdAt);
+-		// Spacer pushes the bot toggle to the right edge of the head.
++		// Spacer pushes the kebab menu to the right edge of the head.
+ 		DOM.append(head, DOM.$('span.krt-pr-comment-spacer'));
+-		this.renderBotToggle(head, comment.author.login);
++		this.renderCommentMenu(head, comment.author.login);
+ 		const body = DOM.append(row, DOM.$('.krt-pr-comment-body'));
+ 		if (comment.body.trim()) {
+ 			const md = new MarkdownString(expandEmojiShortcodes(comment.body), { isTrusted: false, supportHtml: true });
+@@ -1106,12 +1109,16 @@ export class KrtPullRequestEditorPane extends EditorPane {
+ 	}
+ 
+ 	/**
+-	 * Inline toggle on each comment header that flips the author's bot
+-	 * status for the active workspace. Renders nothing when no
+-	 * workspace is registered for the PR (the bot list has no scope to
+-	 * land in). Visible on hover so it doesn't clutter the timeline.
++	 * Kebab dropdown rendered at the right edge of every comment
++	 * header. The single action today flips the author's bot status
++	 * for the active workspace; the menu surface is the right shape
++	 * for adding more per-comment actions (resolve, copy permalink,
++	 * etc.) without re-plumbing the chrome each time.
++	 *
++	 * Renders nothing when no workspace is registered for the PR (the
++	 * bot list has no scope to land in).
+ 	 */
+-	private renderBotToggle(parent: HTMLElement, login: string): void {
++	private renderCommentMenu(parent: HTMLElement, login: string): void {
+ 		const pr = this.currentPr;
+ 		if (!pr) {
+ 			return;
+@@ -1120,36 +1127,35 @@ export class KrtPullRequestEditorPane extends EditorPane {
+ 		if (!workspace) {
+ 			return;
+ 		}
+-		const isBot = this.botListService.isBot(workspace.folderUri, login);
+-		const btn = DOM.append(parent, DOM.$('button.krt-pr-comment-bot-toggle')) as HTMLButtonElement;
++		const btn = DOM.append(parent, DOM.$('button.krt-pr-comment-menu-btn')) as HTMLButtonElement;
+ 		btn.type = 'button';
+-		if (isBot) {
+-			btn.classList.add('active');
+-			btn.textContent = localize('krt.pr.botToggle.unmark', "Move to Discussion");
+-			btn.title = localize(
+-				'krt.pr.botToggle.unmark.tooltip',
+-				"Stop treating `{0}` as a bot in {1}/{2}.",
+-				login,
+-				workspace.owner,
+-				workspace.repo,
+-			);
+-		} else {
+-			btn.textContent = localize('krt.pr.botToggle.mark', "Move to Automation");
+-			btn.title = localize(
+-				'krt.pr.botToggle.mark.tooltip',
+-				"Treat `{0}` as a bot in {1}/{2}. Their comments will route to the Automation tab.",
+-				login,
+-				workspace.owner,
+-				workspace.repo,
+-			);
+-		}
++		btn.title = localize('krt.pr.commentMenu.tooltip', "More actions");
++		btn.setAttribute('aria-label', btn.title);
++		DOM.append(btn, DOM.$('span.codicon.codicon-kebab-vertical'));
++
+ 		this.bodyDisposables.add(DOM.addDisposableListener(btn, 'click', e => {
++			e.preventDefault();
+ 			e.stopPropagation();
+-			if (isBot) {
+-				this.botListService.removeBot(workspace.folderUri, login);
+-			} else {
+-				this.botListService.addBot(workspace.folderUri, login);
+-			}
++			const isBot = this.botListService.isBot(workspace.folderUri, login);
++			this.contextMenuService.showContextMenu({
++				getAnchor: () => btn,
++				getActions: () => [
++					toAction({
++						id: isBot ? 'krt.pr.botList.unmark' : 'krt.pr.botList.mark',
++						label: isBot
++							? localize('krt.pr.botList.unmark', "Mark as Discussion")
++							: localize('krt.pr.botList.mark', "Mark as Automation"),
++						enabled: true,
++						run: () => {
++							if (isBot) {
++								this.botListService.removeBot(workspace.folderUri, login);
++							} else {
++								this.botListService.addBot(workspace.folderUri, login);
++							}
++						},
++					}),
++				],
++			});
+ 		}));
+ 	}
+ 
+-- 
+2.52.0
+

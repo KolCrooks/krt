@@ -1,0 +1,127 @@
+From b7956edb377cfc1cedf7194a38ac4af262d82e46 Mon Sep 17 00:00:00 2001
+From: Kol Crooks <kol.crooks@datadoghq.com>
+Date: Wed, 6 May 2026 13:28:40 -0400
+Subject: [PATCH] Monaco diff: fit-to-content with 720px cap, double-rAF after
+ waitForDiff
+
+The fixed 560px card was too tall for small diffs (e.g. a 1-line
+change in a 600-line file showed huge empty space below the changed
+hunk). Restored fit-to-content sizing with a max cap so big files
+still scroll internally:
+
+- Initial 240px so the editors render their first frame.
+- automaticLayout: false; we drive height via `layoutToContent`.
+- `onDidContentSizeChange` re-fits on every content height change,
+  including hideUnchangedRegions's setHiddenAreas calls.
+- After `waitForDiff` resolves, schedule two consecutive
+  requestAnimationFrames before a final `layoutToContent`. That gives
+  the hideUnchangedRegions autorun a tick to fire even if its size
+  change doesn't bubble through `onDidContentSizeChange` cleanly on
+  the first call.
+- Cap at MAX_CARD_HEIGHT_PX = 720; MIN = 80; CHROME = 8.
+- rAF uses DOM.getWindow(container) per workbench convention so the
+  callback fires in the right window for aux-window scenarios.
+---
+ .../contrib/krt/browser/pr/krtMonacoDiff.ts   | 62 ++++++++++++++-----
+ 1 file changed, 47 insertions(+), 15 deletions(-)
+
+diff --git a/src/vs/workbench/contrib/krt/browser/pr/krtMonacoDiff.ts b/src/vs/workbench/contrib/krt/browser/pr/krtMonacoDiff.ts
+index d42a90e4edf..6a966422624 100644
+--- a/src/vs/workbench/contrib/krt/browser/pr/krtMonacoDiff.ts
++++ b/src/vs/workbench/contrib/krt/browser/pr/krtMonacoDiff.ts
+@@ -45,14 +45,13 @@ interface ILineZoneOptions {
+ 	readonly domNode: HTMLElement;
+ }
+ 
+-// Each diff card is a fixed-height window with internal scroll. Auto-
+-// fit-to-content is fragile against Monaco's reactive layout pipeline
+-// (`hideUnchangedRegions` collapses on a later autorun tick than
+-// `waitForDiff`, etc.) — the user scrolls the outer pane to walk
+-// between files and the diff scrolls inside its card if a single file
+-// is taller than `CARD_HEIGHT_PX`. v1; revisit if the nested-scroll
+-// UX bites.
+-const CARD_HEIGHT_PX = 560;
++// Card sizing: hug content up to `MAX_CARD_HEIGHT_PX`, then internal
++// scroll. `INITIAL_CARD_HEIGHT_PX` gives the editors something non-zero
++// to lay out into on first paint before the real size is known.
++const INITIAL_CARD_HEIGHT_PX = 240;
++const MAX_CARD_HEIGHT_PX = 720;
++const MIN_CARD_HEIGHT_PX = 80;
++const CARD_CHROME_PX = 8;
+ 
+ /**
+  * Embeds Monaco's `DiffEditorWidget` in a container, populates it with
+@@ -79,7 +78,7 @@ export class KrtMonacoDiffView extends Disposable {
+ 		super();
+ 
+ 		this.container = DOM.append(parent, DOM.$('.krt-pr-diff-monaco'));
+-		this.container.style.height = `${CARD_HEIGHT_PX}px`;
++		this.container.style.height = `${INITIAL_CARD_HEIGHT_PX}px`;
+ 
+ 		this.widget = this._register(instantiationService.createInstance(
+ 			DiffEditorWidget,
+@@ -95,12 +94,15 @@ export class KrtMonacoDiffView extends Disposable {
+ 					minimumLineCount: 4,
+ 				},
+ 				renderOverviewRuler: false,
+-				automaticLayout: true,
++				// We control the height via `layoutToContent`; automatic
++				// layout would fight us by re-fitting to its container.
++				automaticLayout: false,
+ 				scrollBeyondLastLine: false,
+ 				minimap: { enabled: false },
+ 				scrollbar: {
+-					// Monaco owns the wheel inside the card; the outer
+-					// pane only takes over once you hit the card's edge.
++					// When the card hits MAX_CARD_HEIGHT_PX, Monaco owns
++					// the wheel inside; once the user reaches the edge,
++					// the outer pane takes over.
+ 					alwaysConsumeMouseWheel: false,
+ 				},
+ 				lineNumbersMinChars: 4,
+@@ -206,9 +208,39 @@ export class KrtMonacoDiffView extends Disposable {
+ 		// Leave them in `IModelService` for the workbench's lifetime; they
+ 		// share a URI per (owner, repo, sha, path) so memory stays bounded.
+ 
+-		// `automaticLayout: true` means the widget watches its container
+-		// size; we sized the container statically above, so no further
+-		// height management is needed here.
++		this.widget.layout();
++		// `onDidContentSizeChange` fires whenever the modified editor's
++		// content height changes — including when `hideUnchangedRegions`
++		// applies its hidden areas in a later autorun tick. That covers
++		// most of the lifecycle.
++		this._register(this.widget.onDidContentSizeChange(() => this.layoutToContent()));
++		// Belt-and-braces: also re-fit a couple of frames after the diff
++		// settles. Two `requestAnimationFrame`s give the
++		// `hideUnchangedRegions` autorun a tick to fire even if its size
++		// change doesn't bubble through `onDidContentSizeChange` cleanly.
++		const win = DOM.getWindow(this.container);
++		const rafIds: number[] = [];
++		this._register(toDisposable(() => {
++			for (const id of rafIds) {
++				win.cancelAnimationFrame(id);
++			}
++		}));
++		void this.widget.waitForDiff().then(() => {
++			rafIds.push(win.requestAnimationFrame(() => {
++				rafIds.push(win.requestAnimationFrame(() => this.layoutToContent()));
++			}));
++		});
++	}
++
++	private layoutToContent(): void {
++		const target = Math.min(
++			Math.max(this.widget.getContentHeight() + CARD_CHROME_PX, MIN_CARD_HEIGHT_PX),
++			MAX_CARD_HEIGHT_PX,
++		);
++		if (this.container.clientHeight !== target) {
++			this.container.style.height = `${target}px`;
++			this.widget.layout();
++		}
+ 	}
+ 
+ 	/**
+-- 
+2.52.0
+

@@ -1,0 +1,110 @@
+From 53049043cf09ad20bdf93e5699551391eef91553 Mon Sep 17 00:00:00 2001
+From: Kol Crooks <kol.crooks@datadoghq.com>
+Date: Thu, 7 May 2026 14:18:05 -0400
+Subject: [PATCH] Phase B fix: encode krt-git fields in URI query, not
+ authority
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Reported as "no changed files" on a real Cargo PR, with dev console
+warnings:
+
+  [krt] krt-git URI references unknown workspace:
+      file:///users/kol.crooks/go/src/github.com/datadog/mp-rs-wd
+
+The actual workspace path is `/Users/kol.crooks/go/...` (capital U),
+but the URI's authority decoded to lowercase. Cause: VS Code's
+`URI.from({ authority })` lowercases the authority component as part
+of URI canonicalisation. Encoding the workspace's `folderUri` into
+the authority therefore strips case from `/Users/...` paths, and the
+registry's case-sensitive `findByFolderUri` lookup misses.
+
+Switch the encoding to JSON in the URI's **query** component, which
+is case-preserved. Path component holds just the file path so
+language detection (basename + extension) keeps working without
+having to parse the query. Mirrors the encoding the original
+pre-rollback Phase 8.6 commit (`01509fc`) used.
+
+Symptom on the user side: every file in the PR's diff was being
+skipped during model resolution because the krt-git content provider
+couldn't find the workspace, leaving the multi-diff with zero files
+and the editor pane falling through to the `diffFiles.length === 0`
+"This PR has no file changes" branch (which is misleading — files
+existed, they just couldn't be resolved).
+
+Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+---
+ .../workspace/krtGitContentProvider.ts        | 45 ++++++++++++++-----
+ 1 file changed, 33 insertions(+), 12 deletions(-)
+
+diff --git a/src/vs/workbench/contrib/krt/browser/workspace/krtGitContentProvider.ts b/src/vs/workbench/contrib/krt/browser/workspace/krtGitContentProvider.ts
+index 77185ab38d2..65456f62085 100644
+--- a/src/vs/workbench/contrib/krt/browser/workspace/krtGitContentProvider.ts
++++ b/src/vs/workbench/contrib/krt/browser/workspace/krtGitContentProvider.ts
+@@ -77,29 +77,50 @@ class KrtGitContentProvider implements ITextModelContentProvider {
+ 
+ /**
+  * Encodes a workspace + ref + path tuple into a stable `krt-git://`
+- * URI. The folderUri goes into the authority (URL-encoded once) so we
+- * can recover the original workspace identity on lookup; the ref +
+- * path live in the URI's path component.
++ * URI. Both the workspace identity (`folderUri`) and the ref live in
++ * the URI's **query** as JSON because VS Code's `URI.from` lowercases
++ * the authority component — encoding the folder URI there strips the
++ * case from `/Users/...` paths and the registry lookup misses on
++ * case-sensitive comparison. Query and path are case-preserved. The
++ * file `path` lives in the URI's path component so language detection
++ * (which keys off the basename + extension) works without parsing the
++ * query.
+  */
++interface KrtGitFields {
++	readonly folderUri: string;
++	readonly ref: string;
++}
++
+ export function encodeKrtGit(folderUri: string, ref: string, path: string): URI {
++	const fields: KrtGitFields = { folderUri, ref };
+ 	return URI.from({
+ 		scheme: KRT_GIT_SCHEME,
+-		authority: encodeURIComponent(folderUri),
+-		path: `/${encodeURIComponent(ref)}/${path.split('/').map(encodeURIComponent).join('/')}`,
++		path: `/${path}`,
++		query: JSON.stringify(fields),
+ 	});
+ }
+ 
+ function decodeKrtGit(resource: URI): { folderUri: string; ref: string; path: string } | undefined {
+-	const folderUri = decodeURIComponent(resource.authority);
+-	const segments = resource.path.split('/').filter(Boolean);
+-	if (segments.length < 2) {
++	if (!resource.query) {
++		return undefined;
++	}
++	let fields: KrtGitFields;
++	try {
++		fields = JSON.parse(resource.query) as KrtGitFields;
++	} catch {
++		return undefined;
++	}
++	if (typeof fields?.folderUri !== 'string' || typeof fields?.ref !== 'string') {
++		return undefined;
++	}
++	const path = resource.path.replace(/^\//, '');
++	if (!path) {
+ 		return undefined;
+ 	}
+-	const [encodedRef, ...pathSegments] = segments;
+ 	return {
+-		folderUri,
+-		ref: decodeURIComponent(encodedRef),
+-		path: pathSegments.map(decodeURIComponent).join('/'),
++		folderUri: fields.folderUri,
++		ref: fields.ref,
++		path,
+ 	};
+ }
+ 
+-- 
+2.52.0
+

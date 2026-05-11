@@ -1,0 +1,91 @@
+From f71156e5264f535888dffc2fab242acf8b8e0a18 Mon Sep 17 00:00:00 2001
+From: Kol Crooks <kol.crooks@datadoghq.com>
+Date: Wed, 6 May 2026 14:20:41 -0400
+Subject: [PATCH] Diff sub-mode: sticky header polish + scroll-on-collapse
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Two follow-ups on the collapse / sticky-header pair:
+
+1. Sticky header looked weird because the head had its own rounded
+   top corners (`border-radius: 6px 6px 0 0`) — when sticky-pinned it
+   read like a free-floating tab rather than a clean sticky bar. Moved
+   rounding to `.krt-pr-diff-section` via `overflow: clip`. `clip`
+   gives us the rounded-card aesthetic (children inherit the clip)
+   without establishing a new scroll context, so sticky still anchors
+   against the outer `.krt-pr-editor`. Dropped per-element rounding
+   from the head and Monaco wrapper.
+
+2. Collapsing a file you were reading deep into used to "jump ahead"
+   — the body disappears, the page reflows, and the user lands on
+   whatever was below. Added `section.scrollIntoView({ block:
+   'start' })` after applying `.collapsed`, so the user is anchored
+   at the just-collapsed header instead.
+---
+ .../contrib/krt/browser/pr/krtPullRequestEditorPane.css   | 8 +++-----
+ .../contrib/krt/browser/pr/krtPullRequestEditorPane.ts    | 5 +++++
+ 2 files changed, 8 insertions(+), 5 deletions(-)
+
+diff --git a/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.css b/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.css
+index dfc34d948e4..08a949a6d0e 100644
+--- a/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.css
++++ b/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.css
+@@ -913,7 +913,8 @@
+ 	border: 1px solid var(--vscode-widget-border, rgba(127, 127, 127, 0.3));
+ 	border-radius: 6px;
+ 	scroll-margin-top: 8px;
+-	/* overflow: visible by default — sticky headers below need a non-overflow-clipped containing block. */
++	/* `overflow: clip` clips children to the rounded shape (so the head + monaco wrapper inherit the section's rounding) without establishing a new scroll context — `position: sticky` on the head still anchors against the outer .krt-pr-editor scroll. `overflow: hidden` would block sticky in tall sections; bare `visible` would leave square corners poking past the rounded border. */
++	overflow: clip;
+ }
+ 
+ .krt-pr-diff-section.reviewed {
+@@ -927,7 +928,6 @@
+ 
+ .krt-pr-diff-section.collapsed > .krt-pr-diff-section-head {
+ 	border-bottom: none;
+-	border-radius: 6px;
+ }
+ 
+ .krt-pr-diff-section.collapsed .krt-pr-diff-section-caret {
+@@ -944,11 +944,10 @@
+ 	font-size: 12px;
+ 	cursor: pointer;
+ 	user-select: none;
+-	/* Sticky within the outer .krt-pr-editor scroll — pins to viewport top while section is in view, slides off when the section ends. */
++	/* Sticky within the outer .krt-pr-editor scroll — pins to viewport top while section is in view, slides off when the section ends. The section's `overflow: clip` rounds the corners; the head itself is a flat rectangle. */
+ 	position: sticky;
+ 	top: 0;
+ 	z-index: 2;
+-	border-radius: 6px 6px 0 0;
+ }
+ 
+ .krt-pr-diff-section-caret {
+@@ -1018,7 +1017,6 @@
+ .krt-pr-diff-monaco {
+ 	width: 100%;
+ 	overflow: hidden;
+-	border-radius: 0 0 6px 6px;
+ }
+ 
+ .krt-pr-diff-zone-host {
+diff --git a/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.ts b/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.ts
+index 290f9481367..5b3958841b0 100644
+--- a/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.ts
++++ b/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.ts
+@@ -943,6 +943,11 @@ export class KrtPullRequestEditorPane extends EditorPane {
+ 			} else {
+ 				this.collapsedDiffFiles.add(file.path);
+ 				section.classList.add('collapsed');
++				// Anchor at the just-collapsed header. Without this, the
++				// outer pane's content shifts up when the body disappears
++				// and the user lands somewhere ahead of where they were
++				// reading.
++				section.scrollIntoView({ block: 'start' });
+ 			}
+ 		}));
+ 		DOM.append(head, DOM.$('span.krt-pr-diff-section-caret.codicon.codicon-chevron-down'));
+-- 
+2.52.0
+

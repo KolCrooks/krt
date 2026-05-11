@@ -1,0 +1,513 @@
+From d125a37b1a14eed73c97276288e1a4c245cceab0 Mon Sep 17 00:00:00 2001
+From: Kol Crooks <kol.crooks@datadoghq.com>
+Date: Wed, 6 May 2026 10:52:55 -0400
+Subject: [PATCH] =?UTF-8?q?Phase=209:=20workbench=20shell=20=E2=80=94=20st?=
+ =?UTF-8?q?rip=20Copilot,=20demo=20header,=20indigo=20+=20compact=20themin?=
+ =?UTF-8?q?g?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- Strip Copilot UI: chat.disableAIFeatures + chat.agentsControl.enabled
+  in krtChrome defaults, plus surgical deletions of two upstream title-
+  bar menu registrations (Open in Agents in openInAgentsAction.ts; Chat
+  submenu in agentSessionsExperiments.contribution.ts).
+- PR pane header gains right-aligned action cluster: Refresh (re-fetch
+  via IPullRequestProvider.getPullRequest) + Open on GitHub (external
+  via IOpenerService). State pill moves inline next to the title.
+- Indigo + compact density become defaults via --krt-* design tokens on
+  the workbench root + workbench.editor.tabSizing/editor.fontSize/
+  workbench.panel.defaultLocation: 'right' config overrides.
+- Add github.com (+ subdomains, github.io, githubusercontent.com) to
+  product.json's linkProtectionTrustedDomains so external GitHub links
+  open without the trust-prompt dialog.
+
+Steps 4 (functional rail), 5 (separate Code/PR editor groups), and 8
+(editor-view LSP parity) deferred — they require the Phase 8.5/8.6
+workspace registry which isn't in this branch and are big enough to
+warrant their own patch series.
+---
+ product.json                                  | 120 ++++++------------
+ .../agentSessionsExperiments.contribution.ts  |  20 +--
+ .../browser/chrome/krtChrome.contribution.ts  |  27 +++-
+ .../browser/pr/krtPullRequestEditorPane.css   |  37 ++++++
+ .../browser/pr/krtPullRequestEditorPane.ts    |  68 +++++++++-
+ .../browser/theme/krtAccent.contribution.ts   |  23 +++-
+ .../actions/openInAgentsAction.ts             |  22 +---
+ 7 files changed, 195 insertions(+), 122 deletions(-)
+
+diff --git a/product.json b/product.json
+index 3b7b76b5ca3..0fba2dbf20f 100644
+--- a/product.json
++++ b/product.json
+@@ -1,89 +1,40 @@
+ {
+-	"nameShort": "Code - OSS",
+-	"nameLong": "Code - OSS",
+-	"applicationName": "code-oss",
+-	"dataFolderName": ".vscode-oss",
+-	"sharedDataFolderName": ".vscode-oss-shared",
+-	"win32MutexName": "vscodeoss",
++	"nameShort": "KRT",
++	"nameLong": "KRT",
++	"applicationName": "krt",
++	"dataFolderName": ".krt",
++	"sharedDataFolderName": ".krt-shared",
++	"win32MutexName": "krt",
+ 	"licenseName": "MIT",
+-	"licenseUrl": "https://github.com/microsoft/vscode/blob/main/LICENSE.txt",
++	"licenseUrl": "https://github.com/KolCrooks/krt/blob/main/LICENSE",
+ 	"serverLicenseUrl": "https://github.com/microsoft/vscode/blob/main/LICENSE.txt",
+ 	"serverGreeting": [],
+ 	"serverLicense": [],
+ 	"serverLicensePrompt": "",
+-	"serverApplicationName": "code-server-oss",
+-	"serverDataFolderName": ".vscode-server-oss",
+-	"tunnelApplicationName": "code-tunnel-oss",
+-	"win32DirName": "Microsoft Code OSS",
+-	"win32NameVersion": "Microsoft Code OSS",
+-	"win32RegValueName": "CodeOSS",
+-	"win32x64AppId": "{{D77B7E06-80BA-4137-BCF4-654B95CCEBC5}",
+-	"win32arm64AppId": "{{D1ACE434-89C5-48D1-88D3-E2991DF85475}",
+-	"win32x64UserAppId": "{{CC6B787D-37A0-49E8-AE24-8559A032BE0C}",
+-	"win32arm64UserAppId": "{{3AEBF0C8-F733-4AD4-BADE-FDB816D53D7B}",
+-	"win32AppUserModelId": "Microsoft.CodeOSS",
+-	"win32ShellNameShort": "C&ode - OSS",
+-	"win32TunnelServiceMutex": "vscodeoss-tunnelservice",
+-	"win32TunnelMutex": "vscodeoss-tunnel",
+-	"darwinBundleIdentifier": "com.visualstudio.code.oss",
++	"serverApplicationName": "krt-server",
++	"serverDataFolderName": ".krt-server",
++	"tunnelApplicationName": "krt-tunnel",
++	"win32DirName": "KRT",
++	"win32NameVersion": "KRT",
++	"win32RegValueName": "KRT",
++	"win32x64AppId": "{{0F4F2A1C-1234-5678-9ABC-DEF012345679}",
++	"win32arm64AppId": "{{0F4F2A1C-1234-5678-9ABC-DEF01234567A}",
++	"win32x64UserAppId": "{{0F4F2A1C-1234-5678-9ABC-DEF01234567C}",
++	"win32arm64UserAppId": "{{0F4F2A1C-1234-5678-9ABC-DEF01234567D}",
++	"win32AppUserModelId": "Krt.KrtReviewTool",
++	"win32ShellNameShort": "KRT",
++	"win32TunnelServiceMutex": "krt-tunnelservice",
++	"win32TunnelMutex": "krt-tunnel",
++	"darwinBundleIdentifier": "com.krt.app",
+ 	"darwinProfileUUID": "47827DD9-4734-49A0-AF80-7E19B11495CC",
+ 	"darwinProfilePayloadUUID": "CF808BE7-53F3-46C6-A7E2-7EDB98A5E959",
+-	"linuxIconName": "code-oss",
++	"linuxIconName": "krt",
+ 	"licenseFileName": "LICENSE.txt",
+-	"reportIssueUrl": "https://github.com/microsoft/vscode/issues/new",
++	"reportIssueUrl": "https://github.com/KolCrooks/krt/issues/new",
+ 	"nodejsRepository": "https://nodejs.org",
+-	"urlProtocol": "code-oss",
+-	"webviewContentExternalBaseUrlTemplate": "https://{{uuid}}.vscode-cdn.net/insider/ef65ac1ba57f57f2a3961bfe94aa20481caca4c6/out/vs/workbench/contrib/webview/browser/pre/",
+-	"builtInExtensions": [
+-		{
+-			"name": "ms-vscode.js-debug-companion",
+-			"version": "1.1.3",
+-			"sha256": "7380a890787452f14b2db7835dfa94de538caf358ebc263f9d46dd68ac52de93",
+-			"repo": "https://github.com/microsoft/vscode-js-debug-companion",
+-			"metadata": {
+-				"id": "99cb0b7f-7354-4278-b8da-6cc79972169d",
+-				"publisherId": {
+-					"publisherId": "5f5636e7-69ed-4afe-b5d6-8d231fb3d3ee",
+-					"publisherName": "ms-vscode",
+-					"displayName": "Microsoft",
+-					"flags": "verified"
+-				},
+-				"publisherDisplayName": "Microsoft"
+-			}
+-		},
+-		{
+-			"name": "ms-vscode.js-debug",
+-			"version": "1.117.0",
+-			"sha256": "854eeb8a785b1f41ba2bd02d7ccd4fdbe10021b61473293973c7e96d036c7fb8",
+-			"repo": "https://github.com/microsoft/vscode-js-debug",
+-			"metadata": {
+-				"id": "25629058-ddac-4e17-abba-74678e126c5d",
+-				"publisherId": {
+-					"publisherId": "5f5636e7-69ed-4afe-b5d6-8d231fb3d3ee",
+-					"publisherName": "ms-vscode",
+-					"displayName": "Microsoft",
+-					"flags": "verified"
+-				},
+-				"publisherDisplayName": "Microsoft"
+-			}
+-		},
+-		{
+-			"name": "ms-vscode.vscode-js-profile-table",
+-			"version": "1.0.10",
+-			"sha256": "7361748ddf9fd09d8a2ed1f2a2d7376a2cf9aae708692820b799708385c38e08",
+-			"repo": "https://github.com/microsoft/vscode-js-profile-visualizer",
+-			"metadata": {
+-				"id": "7e52b41b-71ad-457b-ab7e-0620f1fc4feb",
+-				"publisherId": {
+-					"publisherId": "5f5636e7-69ed-4afe-b5d6-8d231fb3d3ee",
+-					"publisherName": "ms-vscode",
+-					"displayName": "Microsoft",
+-					"flags": "verified"
+-				},
+-				"publisherDisplayName": "Microsoft"
+-			}
+-		}
+-	],
++	"urlProtocol": "krt",
++	"webviewContentExternalBaseUrlTemplate": "",
++	"builtInExtensions": [],
+ 	"defaultChatAgent": {
+ 		"extensionId": "GitHub.copilot",
+ 		"chatExtensionId": "GitHub.copilot-chat",
+@@ -231,7 +182,20 @@
+ 			"type": "light"
+ 		}
+ 	],
+-	"builtInExtensionsEnabledWithAutoUpdates": [
+-		"GitHub.copilot-chat"
++	"builtInExtensionsEnabledWithAutoUpdates": [],
++	"extensionsGallery": {
++		"serviceUrl": "https://open-vsx.org/vscode/gallery",
++		"itemUrl": "https://open-vsx.org/vscode/item",
++		"resourceUrlTemplate": "https://openvsxorg.blob.core.windows.net/resources/{publisher}/{name}/{version}/{path}",
++		"controlUrl": "",
++		"recommendationsUrl": ""
++	},
++	"linkProtectionTrustedDomains": [
++		"https://github.com",
++		"https://*.github.com",
++		"https://github.io",
++		"https://*.github.io",
++		"https://githubusercontent.com",
++		"https://*.githubusercontent.com"
+ 	]
+ }
+diff --git a/src/vs/workbench/contrib/chat/browser/agentSessions/experiments/agentSessionsExperiments.contribution.ts b/src/vs/workbench/contrib/chat/browser/agentSessions/experiments/agentSessionsExperiments.contribution.ts
+index 3b2ef4ca300..3354d196493 100644
+--- a/src/vs/workbench/contrib/chat/browser/agentSessions/experiments/agentSessionsExperiments.contribution.ts
++++ b/src/vs/workbench/contrib/chat/browser/agentSessions/experiments/agentSessionsExperiments.contribution.ts
+@@ -262,21 +262,11 @@ MenuRegistry.appendMenuItem(MenuId.CommandCenter, {
+ 	order: 10002 // to the right of the chat button
+ });
+ 
+-// Add to the global title bar if command center is disabled
+-MenuRegistry.appendMenuItem(MenuId.TitleBar, {
+-	submenu: MenuId.ChatTitleBarMenu,
+-	title: localize('title4', "Chat"),
+-	group: 'navigation',
+-	icon: Codicon.chatSparkle,
+-	when: ContextKeyExpr.and(
+-		ChatContextKeys.supported,
+-		ContextKeyExpr.and(
+-			ChatContextKeys.Setup.hidden.negate(),
+-		),
+-		ContextKeyExpr.has('config.window.commandCenter').negate(),
+-	),
+-	order: 1
+-});
++// KRT: upstream registers a "Chat" submenu in the title bar whenever the
++// command center is disabled. KRT disables the command center (see
++// `krtChrome.contribution.ts`) but does NOT want the Chat fallback. The
++// `Setup.hidden.negate()` gate races startup, so the cleanest fix is to
++// drop the registration entirely.
+ 
+ // Register a placeholder action to the submenu so it appears (required for submenus)
+ MenuRegistry.appendMenuItem(MenuId.AgentsTitleBarControlMenu, {
+diff --git a/src/vs/workbench/contrib/krt/browser/chrome/krtChrome.contribution.ts b/src/vs/workbench/contrib/krt/browser/chrome/krtChrome.contribution.ts
+index ffc83b9e6bf..8e9641309fb 100644
+--- a/src/vs/workbench/contrib/krt/browser/chrome/krtChrome.contribution.ts
++++ b/src/vs/workbench/contrib/krt/browser/chrome/krtChrome.contribution.ts
+@@ -8,16 +8,33 @@ import { Extensions as ConfigurationExtensions, IConfigurationRegistry } from '.
+ import { KeybindingsRegistry, KeybindingWeight } from '../../../../../platform/keybinding/common/keybindingsRegistry.js';
+ import { Registry } from '../../../../../platform/registry/common/platform.js';
+ 
+-// KRT chrome defaults — menu bar hidden, command center hidden, layout
+-// controls hidden. On macOS the OS draws traffic lights regardless; on
+-// Windows/Linux this strips the upstream menu/command-center clutter from
+-// the title bar. Phase 3 swaps the centre region for a `repo · branch`
+-// badge once there's PR data to drive it.
++// KRT chrome defaults. Three groups:
++//   1. Title-bar / menu chrome — strip the upstream menu/command-center
++//      clutter so the title bar stays minimal. On macOS the OS draws
++//      traffic lights regardless. Phase 3 swaps the centre region for a
++//      `repo · branch` badge once there's PR data to drive it.
++//   2. Density — compact tabs, smaller font in the editor, panel docked
++//      vertically on the right (matches the demo's review-tool layout
++//      where editor takes the centre and the terminal slides in from
++//      the right rather than the bottom).
++//   3. Disable AI feature surfaces inherited from upstream — KRT ships
++//      with no Copilot UI; the AI features we do expose live under
++//      `vs/workbench/contrib/krt/browser/ai/` behind their own settings.
+ Registry.as<IConfigurationRegistry>(ConfigurationExtensions.Configuration).registerDefaultConfigurations([{
+ 	overrides: {
++		// Chrome
+ 		'window.menuBarVisibility': 'hidden',
+ 		'window.commandCenter': false,
+ 		'workbench.layoutControl.enabled': false,
++		// Density / layout — tracks the demo at design/kol-s-review-tool/
++		'workbench.editor.tabSizing': 'compact',
++		'workbench.panel.defaultLocation': 'right',
++		'workbench.activityBar.location': 'default',
++		'editor.fontSize': 13,
++		'editor.lineHeight': 1.55,
++		// AI / Copilot
++		'chat.disableAIFeatures': true,
++		'chat.agentsControl.enabled': 'hidden',
+ 	},
+ }]);
+ 
+diff --git a/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.css b/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.css
+index 3f8b7ad0bfa..da9fae3d4c4 100644
+--- a/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.css
++++ b/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.css
+@@ -25,6 +25,14 @@
+ 	flex-direction: column;
+ 	gap: 4px;
+ 	min-width: 0;
++	flex: 1 1 auto;
++}
++
++.krt-pr-editor-title-row {
++	display: flex;
++	align-items: center;
++	gap: 10px;
++	min-width: 0;
+ }
+ 
+ .krt-pr-editor-subtitle {
+@@ -74,6 +82,35 @@
+ 	border-color: rgba(110, 118, 129, 0.55);
+ }
+ 
++.krt-pr-editor-header-actions {
++	display: flex;
++	align-items: center;
++	gap: 6px;
++	flex: 0 0 auto;
++}
++
++.krt-pr-editor-header-btn {
++	font: inherit;
++	font-size: 11.5px;
++	font-weight: 500;
++	color: var(--vscode-foreground);
++	background: transparent;
++	border: 1px solid var(--vscode-contrastBorder, rgba(110, 118, 129, 0.4));
++	border-radius: 6px;
++	padding: 4px 10px;
++	cursor: pointer;
++	white-space: nowrap;
++}
++
++.krt-pr-editor-header-btn:hover:not(:disabled) {
++	background: var(--vscode-toolbar-hoverBackground, rgba(110, 118, 129, 0.15));
++}
++
++.krt-pr-editor-header-btn:disabled {
++	opacity: 0.5;
++	cursor: default;
++}
++
+ .krt-pr-editor-body {
+ 	font-size: 13px;
+ 	line-height: 1.55;
+diff --git a/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.ts b/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.ts
+index a73b4e0e001..35adbf756e6 100644
+--- a/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.ts
++++ b/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.ts
+@@ -85,6 +85,9 @@ export class KrtPullRequestEditorPane extends EditorPane {
+ 	private titleElement!: HTMLElement;
+ 	private subtitleElement!: HTMLElement;
+ 	private statePillElement!: HTMLElement;
++	private headerActionsElement!: HTMLElement;
++	private refreshBtnElement!: HTMLButtonElement;
++	private openOnGithubBtnElement!: HTMLButtonElement;
+ 	private subModeBarElement!: HTMLElement;
+ 	private bodyElement!: HTMLElement;
+ 
+@@ -151,10 +154,68 @@ export class KrtPullRequestEditorPane extends EditorPane {
+ 		this.headerElement = DOM.append(this.root, DOM.$('.krt-pr-editor-header'));
+ 		const headerText = DOM.append(this.headerElement, DOM.$('.krt-pr-editor-header-text'));
+ 		this.subtitleElement = DOM.append(headerText, DOM.$('.krt-pr-editor-subtitle'));
+-		this.titleElement = DOM.append(headerText, DOM.$('h1.krt-pr-editor-title'));
+-		this.statePillElement = DOM.append(this.headerElement, DOM.$('.krt-pr-editor-state-pill'));
++		// Title row: H1 + state pill inline. Pill sits to the right of the
++		// title (matches the demo's PR header where Draft / Open / Merged
++		// reads as part of the title rather than a separate sidebar chip).
++		const titleRow = DOM.append(headerText, DOM.$('.krt-pr-editor-title-row'));
++		this.titleElement = DOM.append(titleRow, DOM.$('h1.krt-pr-editor-title'));
++		this.statePillElement = DOM.append(titleRow, DOM.$('.krt-pr-editor-state-pill'));
++		this.headerActionsElement = DOM.append(this.headerElement, DOM.$('.krt-pr-editor-header-actions'));
++		this.refreshBtnElement = DOM.append(this.headerActionsElement, DOM.$('button.krt-pr-editor-header-btn')) as HTMLButtonElement;
++		this.refreshBtnElement.type = 'button';
++		this.refreshBtnElement.textContent = localize('krt.pr.refresh', "Refresh");
++		this.refreshBtnElement.title = localize('krt.pr.refresh.tooltip', "Re-fetch this pull request from GitHub");
++		this.refreshBtnElement.onclick = () => this.refreshCurrentPr();
++		this.openOnGithubBtnElement = DOM.append(this.headerActionsElement, DOM.$('button.krt-pr-editor-header-btn')) as HTMLButtonElement;
++		this.openOnGithubBtnElement.type = 'button';
++		this.openOnGithubBtnElement.textContent = localize('krt.pr.openOnGithub', "Open on GitHub");
++		this.openOnGithubBtnElement.title = localize('krt.pr.openOnGithub.tooltip', "Open this pull request on github.com");
++		this.openOnGithubBtnElement.onclick = () => {
++			if (this.currentPr) {
++				this.openExternal(this.currentPr.url);
++			}
++		};
+ 		this.subModeBarElement = DOM.append(this.root, DOM.$('.krt-pr-submode-bar'));
+ 		this.bodyElement = DOM.append(this.root, DOM.$('.krt-pr-editor-body'));
++		this.updateHeaderActionsEnablement();
++	}
++
++	private updateHeaderActionsEnablement(): void {
++		const hasPr = !!this.currentPr;
++		this.refreshBtnElement.disabled = !hasPr;
++		this.openOnGithubBtnElement.disabled = !hasPr;
++	}
++
++	private async refreshCurrentPr(): Promise<void> {
++		const input = this.currentInput;
++		if (!input) {
++			return;
++		}
++		this.fetchToken++;
++		const myToken = this.fetchToken;
++		const previousPr = this.currentPr;
++		this.currentPr = undefined;
++		this.updateHeaderActionsEnablement();
++		try {
++			const pr = await this.pullRequestProvider.getPullRequest(input.url);
++			if (this.currentInput !== input || this.fetchToken !== myToken) {
++				return;
++			}
++			input.setTitle(pr.title);
++			this.currentPr = pr;
++			this.liveComments = [...pr.comments];
++			this.renderLoaded(pr);
++		} catch (err) {
++			if (this.currentInput !== input || this.fetchToken !== myToken) {
++				return;
++			}
++			this.currentPr = previousPr;
++			this.logService.error('[krt] PR refresh failed', err);
++		} finally {
++			if (this.currentInput === input && this.fetchToken === myToken) {
++				this.updateHeaderActionsEnablement();
++			}
++		}
+ 	}
+ 
+ 	override async setInput(input: KrtPullRequestEditorInput, options: IEditorOptions | undefined, context: IEditorOpenContext, token: CancellationToken): Promise<void> {
+@@ -243,6 +304,7 @@ export class KrtPullRequestEditorPane extends EditorPane {
+ 		this.titleElement.textContent = localize('krt.pr.loading', "Loading…");
+ 		this.statePillElement.textContent = '';
+ 		this.statePillElement.className = 'krt-pr-editor-state-pill';
++		this.updateHeaderActionsEnablement();
+ 		this.bodyDisposables.clear();
+ 		DOM.clearNode(this.subModeBarElement);
+ 		DOM.clearNode(this.bodyElement);
+@@ -254,6 +316,7 @@ export class KrtPullRequestEditorPane extends EditorPane {
+ 		this.subtitleElement.textContent = `${pr.owner}/${pr.repo} #${pr.number} · ${pr.author.login}`;
+ 		this.titleElement.textContent = pr.title;
+ 		this.applyStatePill(pr.state);
++		this.updateHeaderActionsEnablement();
+ 		this.bodyDisposables.clear();
+ 		DOM.clearNode(this.subModeBarElement);
+ 		DOM.clearNode(this.bodyElement);
+@@ -2210,6 +2273,7 @@ export class KrtPullRequestEditorPane extends EditorPane {
+ 		this.titleElement.textContent = localize('krt.pr.errorTitle', "Couldn't load this PR");
+ 		this.statePillElement.textContent = '';
+ 		this.statePillElement.className = 'krt-pr-editor-state-pill';
++		this.updateHeaderActionsEnablement();
+ 		this.bodyDisposables.clear();
+ 		DOM.clearNode(this.bodyElement);
+ 		const errEl = DOM.append(this.bodyElement, DOM.$('.krt-pr-editor-error'));
+diff --git a/src/vs/workbench/contrib/krt/browser/theme/krtAccent.contribution.ts b/src/vs/workbench/contrib/krt/browser/theme/krtAccent.contribution.ts
+index ed56e049874..6095b04a265 100644
+--- a/src/vs/workbench/contrib/krt/browser/theme/krtAccent.contribution.ts
++++ b/src/vs/workbench/contrib/krt/browser/theme/krtAccent.contribution.ts
+@@ -9,14 +9,27 @@ import { Registry } from '../../../../../platform/registry/common/platform.js';
+ import { Extensions as WorkbenchExtensions, IWorkbenchContribution, IWorkbenchContributionsRegistry } from '../../../../common/contributions.js';
+ import { LifecyclePhase } from '../../../../services/lifecycle/common/lifecycle.js';
+ 
+-// KRT accent palette — Indigo (default). Mirrors design/.../app.jsx ACCENTS.indigo.
+-// Phase 10 adds Tweaks-driven hot-swap; for now this is a fixed palette so the
+-// rail / title bar / tabs can consume the variables.
+-const KRT_ACCENT_VARS: ReadonlyArray<readonly [string, string]> = [
++// KRT design tokens — set on the workbench root so KRT-owned components
++// (PR pane, search overlay, tabs, storyboard cards, …) can read them
++// directly via `var(--krt-*)`. Mirrors `design/kol-s-review-tool/project/
++// styles.css`.
++const KRT_DESIGN_TOKENS: ReadonlyArray<readonly [string, string]> = [
++	// Indigo accent.
+ 	['--krt-accent', 'oklch(0.5 0.18 280)'],
+ 	['--krt-accent-2', 'oklch(0.62 0.16 280)'],
+ 	['--krt-accent-soft', 'oklch(0.96 0.03 280)'],
+ 	['--krt-accent-line', 'oklch(0.85 0.07 280)'],
++	// Compact density — row height + radii. Used inside KRT components
++	// only; upstream config keys (`workbench.editor.tabSizing` etc.)
++	// cover Monaco / activity-bar density.
++	['--krt-row-h', '30px'],
++	['--krt-radius', '8px'],
++	['--krt-radius-sm', '6px'],
++	// Add / del hues for diff chips + storyboard nodes.
++	['--krt-add', 'oklch(0.55 0.13 145)'],
++	['--krt-add-bg', 'oklch(0.96 0.04 145)'],
++	['--krt-del', 'oklch(0.55 0.18 25)'],
++	['--krt-del-bg', 'oklch(0.96 0.03 25)'],
+ ];
+ 
+ class KrtAccentContribution extends Disposable implements IWorkbenchContribution {
+@@ -26,7 +39,7 @@ class KrtAccentContribution extends Disposable implements IWorkbenchContribution
+ 	constructor() {
+ 		super();
+ 		const root = mainWindow.document.documentElement;
+-		for (const [name, value] of KRT_ACCENT_VARS) {
++		for (const [name, value] of KRT_DESIGN_TOKENS) {
+ 			root.style.setProperty(name, value);
+ 		}
+ 	}
+diff --git a/src/vs/workbench/electron-browser/actions/openInAgentsAction.ts b/src/vs/workbench/electron-browser/actions/openInAgentsAction.ts
+index 492281c57b0..61051fb6aa8 100644
+--- a/src/vs/workbench/electron-browser/actions/openInAgentsAction.ts
++++ b/src/vs/workbench/electron-browser/actions/openInAgentsAction.ts
+@@ -21,7 +21,7 @@ import { IProductService } from '../../../platform/product/common/productService
+ import { Registry } from '../../../platform/registry/common/platform.js';
+ import { ITelemetryService } from '../../../platform/telemetry/common/telemetry.js';
+ import { IWorkspaceContextService, WorkbenchState } from '../../../platform/workspace/common/workspace.js';
+-import { ToggleTitleBarConfigAction, TitleBarLeadingActionsGroup } from '../../browser/parts/titlebar/titlebarActions.js';
++import { ToggleTitleBarConfigAction } from '../../browser/parts/titlebar/titlebarActions.js';
+ import { IWorkbenchContribution, registerWorkbenchContribution2, WorkbenchPhase } from '../../common/contributions.js';
+ import { IsAuxiliaryWindowContext, IsSessionsWindowContext } from '../../common/contextkeys.js';
+ import { workbenchConfigurationNodeBase } from '../../common/configuration.js';
+@@ -69,27 +69,15 @@ const OpenInAgentsVisibility = ContextKeyExpr.and(
+ class OpenInAgentsAction extends Action2 {
+ 
+ 	constructor() {
++		// KRT: removed the title-bar and layout-control menu registrations.
++		// KRT ships without Copilot/Agents surfaces, so the action stays
++		// for command-palette discoverability (`f1: true`) but no longer
++		// renders in the title bar. The `precondition` still gates run().
+ 		super({
+ 			id: OpenInAgentsActionId,
+ 			title: localize2('openInAgents', "Open in Agents"),
+ 			f1: true,
+ 			precondition: OpenInAgentsVisibility,
+-			menu: [{
+-				// Render in the global titlebar tool bar in the dedicated leading
+-				// slot so we appear before the layout controls (and stay visible
+-				// when layout controls are toggled off).
+-				id: MenuId.TitleBar,
+-				group: TitleBarLeadingActionsGroup,
+-				order: -1000,
+-				when: OpenInAgentsVisibility,
+-			}, {
+-				// Also surface inside the "Customize Layout..." submenu so users
+-				// can toggle the entry on/off from the layout customization UI.
+-				id: MenuId.LayoutControlMenuSubmenu,
+-				group: '0_workbench_layout',
+-				order: -1000,
+-				when: OpenInAgentsVisibility,
+-			}]
+ 		});
+ 	}
+ 
+-- 
+2.52.0
+

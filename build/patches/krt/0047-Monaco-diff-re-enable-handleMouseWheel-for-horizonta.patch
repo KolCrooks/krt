@@ -1,0 +1,43 @@
+From be86e97f31b92b472b963e12a6b63c27ee601fd9 Mon Sep 17 00:00:00 2001
+From: Kol Crooks <kol.crooks@datadoghq.com>
+Date: Wed, 6 May 2026 14:04:43 -0400
+Subject: [PATCH] Monaco diff: re-enable handleMouseWheel for horizontal scroll
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+`handleMouseWheel: false` killed horizontal scroll too — long lines
+were unreachable. Set `handleMouseWheel: true` so shift+wheel /
+trackpad-horizontal still scrolls the editor sideways, with
+`alwaysConsumeMouseWheel: false` so vertical wheel events that
+Monaco can't apply (content fits, no internal vertical scroll)
+bubble out to the outer PR pane.
+---
+ .../workbench/contrib/krt/browser/pr/krtMonacoDiff.ts  | 10 ++++++----
+ 1 file changed, 6 insertions(+), 4 deletions(-)
+
+diff --git a/src/vs/workbench/contrib/krt/browser/pr/krtMonacoDiff.ts b/src/vs/workbench/contrib/krt/browser/pr/krtMonacoDiff.ts
+index fe780ddf76e..d723d40cf25 100644
+--- a/src/vs/workbench/contrib/krt/browser/pr/krtMonacoDiff.ts
++++ b/src/vs/workbench/contrib/krt/browser/pr/krtMonacoDiff.ts
+@@ -147,11 +147,13 @@ export class KrtMonacoDiffView extends Disposable {
+ 				automaticLayout: true,
+ 				scrollBeyondLastLine: false,
+ 				minimap: { enabled: false },
+-				// The card hugs its content (no internal scroll), so
+-				// any wheel event hitting it should pass straight through
+-				// to the outer PR pane for whole-page scroll.
++				// Monaco still handles the wheel — long lines need
++				// horizontal scroll (shift+wheel, trackpad). But it must
++				// not *consume* events when there's nothing to scroll;
++				// vertical wheel on a card whose content height matches
++				// its container should bubble out to the outer PR pane.
+ 				scrollbar: {
+-					handleMouseWheel: false,
++					handleMouseWheel: true,
+ 					alwaysConsumeMouseWheel: false,
+ 				},
+ 				lineNumbersMinChars: 4,
+-- 
+2.52.0
+

@@ -1,0 +1,1033 @@
+From 4608ca98db24b10d94c36135d801dc70b5e7d6b1 Mon Sep 17 00:00:00 2001
+From: Kol Crooks <kol.crooks@datadoghq.com>
+Date: Wed, 6 May 2026 11:46:40 -0400
+Subject: [PATCH] Phase 8.6: workspace registry + LSP via real file:// URIs
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Phase 8.5 gave us syntax-highlighted Monaco diffs but no LSP — the head/
+base models were patch-reconstructed and lived under the synthetic
+krt-pr-base:// / krt-pr-head:// schemes, which language extensions don't
+activate against. Phase 8.6 lets the user register a local clone as a
+"workspace" so KRT can serve diffs from real file:// URIs (LSP-eligible
+on the head side) plus a krt-git:// scheme on the base side that shells
+out to `git show baseSha:path`.
+
+- platform/krt/common/krtGit.ts — IKrtGitService interface (detect,
+  detectVcs, getRemoteUrl, getHeadSha, showFile). Lives on the main
+  process so the renderer doesn't shell out.
+- platform/krt/electron-main/krtGitMainService.ts — implementation,
+  spawn() + git CLI. Registered on the krt:git IPC channel in app.ts.
+- platform/krt/common/errors.ts — adds gitMissing, gitInvocation,
+  gitNotARepo, gitNoRemote helpers + new GhErrorKind variants.
+- workbench/services/krt/electron-browser/krtGitClient.ts — renderer
+  IPC client via ProxyChannel.toService.
+- workbench/contrib/krt/browser/workspace/krtWorkspaceRegistry.ts —
+  IKrtWorkspaceRegistry service. Stores { folderUri, folderPath,
+  owner, repo, remoteUrl, addedAt } in IStorageService under the
+  krt.workspaces.v1 envelope. Includes parseGithubRemoteUrl helper
+  for git@github.com: / https://github.com/ URLs.
+- workbench/contrib/krt/browser/workspace/krtGitContentProvider.ts —
+  ITextModelContentProvider for the krt-git:// scheme. Decodes
+  authority-encoded folderUri + ref + path, looks up the workspace,
+  and shells `git show ref:path` via IKrtGitService.
+- workbench/contrib/krt/browser/workspace/krtWorkspace.contribution.ts
+  — krt.workspace.add (folder picker + git remote get-url + parse +
+  persist) and krt.workspace.remove (quick pick) commands.
+- workbench/contrib/krt/browser/pr/krtMonacoDiff.ts — accept optional
+  KrtWorkspace. Per-side fallback chain: registered + status≠added →
+  krt-git:// base; registered + status≠removed + file:// model exists
+  in modelService → reuse it (LSP); otherwise virtual URI fallback.
+  Models we don't own (file:// from the open workbench tree) survive
+  dispose() — only models we created get torn down.
+- workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.ts — looks
+  up the workspace via IKrtWorkspaceRegistry.findByOwnerRepo and
+  passes it through to KrtMonacoDiffView for both renderDiffFileSection
+  and the tour mini-diffs.
+
+Search filter (workspace-scoped queries) and the workbench-folder-must-
+match-registered-workspace gap from the original Phase 8.6 doc are
+deferred — Phase 9's chrome work needs to settle first.
+---
+ src/vs/code/electron-main/app.ts              |   6 +
+ src/vs/platform/krt/common/errors.ts          |  34 +++-
+ src/vs/platform/krt/common/krtGit.ts          |  33 ++++
+ .../krt/electron-main/krtGitMainService.ts    | 138 +++++++++++++++
+ .../contrib/krt/browser/krt.contribution.ts   |   1 +
+ .../contrib/krt/browser/pr/krtMonacoDiff.ts   | 105 ++++++++++--
+ .../browser/pr/krtPullRequestEditorPane.ts    |  19 ++-
+ .../workspace/krtGitContentProvider.ts        | 125 ++++++++++++++
+ .../workspace/krtWorkspace.contribution.ts    | 147 ++++++++++++++++
+ .../browser/workspace/krtWorkspaceRegistry.ts | 159 ++++++++++++++++++
+ .../krt/electron-browser/krtGitClient.ts      |  23 +++
+ src/vs/workbench/workbench.desktop.main.ts    |   1 +
+ 12 files changed, 767 insertions(+), 24 deletions(-)
+ create mode 100644 src/vs/platform/krt/common/krtGit.ts
+ create mode 100644 src/vs/platform/krt/electron-main/krtGitMainService.ts
+ create mode 100644 src/vs/workbench/contrib/krt/browser/workspace/krtGitContentProvider.ts
+ create mode 100644 src/vs/workbench/contrib/krt/browser/workspace/krtWorkspace.contribution.ts
+ create mode 100644 src/vs/workbench/contrib/krt/browser/workspace/krtWorkspaceRegistry.ts
+ create mode 100644 src/vs/workbench/services/krt/electron-browser/krtGitClient.ts
+
+diff --git a/src/vs/code/electron-main/app.ts b/src/vs/code/electron-main/app.ts
+index 29e7c1b5d97..828e4fa7fa6 100644
+--- a/src/vs/code/electron-main/app.ts
++++ b/src/vs/code/electron-main/app.ts
+@@ -61,6 +61,7 @@ import { ServiceCollection } from '../../platform/instantiation/common/serviceCo
+ import { ProcessMainService } from '../../platform/process/electron-main/processMainService.js';
+ import { GhClientMainService } from '../../platform/krt/electron-main/ghClientMainService.js';
+ import { KrtAiClientMainService } from '../../platform/krt/electron-main/aiClientMainService.js';
++import { KrtGitMainService } from '../../platform/krt/electron-main/krtGitMainService.js';
+ import { PullRequestProviderMainService } from '../../platform/krt/electron-main/pullRequestProviderMainService.js';
+ import { IKeyboardLayoutMainService, KeyboardLayoutMainService } from '../../platform/keyboardLayout/electron-main/keyboardLayoutMainService.js';
+ import { ILaunchMainService, LaunchMainService } from '../../platform/launch/electron-main/launchMainService.js';
+@@ -1299,6 +1300,11 @@ export class CodeApplication extends Disposable {
+ 		mainProcessElectronServer.registerChannel('krt:pullRequest', ProxyChannel.fromService(krtPullRequestProvider, disposables));
+ 		const krtAiClient = new KrtAiClientMainService(this.logService);
+ 		mainProcessElectronServer.registerChannel('krt:ai', ProxyChannel.fromService(krtAiClient, disposables));
++		// Phase 8.6 — git/jj-aware workspace service. Backs the krt-git://
++		// content provider (git show baseSha:path) and the workspace
++		// registry's "git remote get-url origin" lookup.
++		const krtGitClient = new KrtGitMainService(this.logService);
++		mainProcessElectronServer.registerChannel('krt:git', ProxyChannel.fromService(krtGitClient, disposables));
+ 
+ 		// Encryption
+ 		const encryptionChannel = ProxyChannel.fromService(accessor.get(IEncryptionMainService), disposables);
+diff --git a/src/vs/platform/krt/common/errors.ts b/src/vs/platform/krt/common/errors.ts
+index 045fed4e3da..b73abdf9004 100644
+--- a/src/vs/platform/krt/common/errors.ts
++++ b/src/vs/platform/krt/common/errors.ts
+@@ -10,7 +10,7 @@
+  * branch on `kind`; never `instanceof` across the IPC boundary.
+  */
+ 
+-export type GhErrorKind = 'gh-missing' | 'gh-auth-expired' | 'gh-rate-limit' | 'gh-invocation' | 'krt-bad-url';
++export type GhErrorKind = 'gh-missing' | 'gh-auth-expired' | 'gh-rate-limit' | 'gh-invocation' | 'krt-bad-url' | 'git-missing' | 'git-invocation' | 'git-not-a-repo' | 'git-no-remote';
+ 
+ export class KrtError extends Error {
+ 	readonly kind: GhErrorKind;
+@@ -67,3 +67,35 @@ export function badPullRequestUrl(url: string): KrtError {
+ 		'Expected https://github.com/<owner>/<repo>/pull/<number>',
+ 	);
+ }
++
++export function gitMissing(): KrtError {
++	return new KrtError(
++		'git-missing',
++		'git is not installed or not on PATH',
++		'Install git and try again.',
++	);
++}
++
++export function gitInvocation(stderr: string): KrtError {
++	return new KrtError(
++		'git-invocation',
++		`git exited non-zero: ${stderr.trim().slice(0, 240)}`,
++		'See the git stderr message above.',
++	);
++}
++
++export function gitNotARepo(folderPath: string): KrtError {
++	return new KrtError(
++		'git-not-a-repo',
++		`${folderPath} is not a git repository`,
++		'Pick a folder that contains a .git/ directory.',
++	);
++}
++
++export function gitNoRemote(folderPath: string, remoteName: string): KrtError {
++	return new KrtError(
++		'git-no-remote',
++		`${folderPath} has no remote named "${remoteName}"`,
++		`Run \`git remote -v\` in the folder and pick one whose URL is on github.com.`,
++	);
++}
+diff --git a/src/vs/platform/krt/common/krtGit.ts b/src/vs/platform/krt/common/krtGit.ts
+new file mode 100644
+index 00000000000..7093a51324e
+--- /dev/null
++++ b/src/vs/platform/krt/common/krtGit.ts
+@@ -0,0 +1,33 @@
++/*---------------------------------------------------------------------------------------------
++ *  Copyright (c) Microsoft Corporation. All rights reserved.
++ *  Licensed under the MIT License. See License.txt in the project root for license information.
++ *--------------------------------------------------------------------------------------------*/
++
++import { createDecorator } from '../../instantiation/common/instantiation.js';
++
++export interface GitInfo {
++	readonly version: string;
++}
++
++export type KrtVcs = 'git' | 'jj';
++
++/**
++ * Phase 8.6 — Git/JJ-aware service. Lives in the main process so the
++ * renderer doesn't need shell access. The renderer talks to it via the
++ * `krt:git` IPC channel.
++ *
++ * v1 scope: VCS detection, remote-url lookup, `git show <ref>:<path>`,
++ * and HEAD SHA lookup. Phase 8.7 (auto-switch on review) adds the jj /
++ * git stash / fetch / checkout surface; deferred to a later patch.
++ */
++export interface IKrtGitService {
++	readonly _serviceBrand: undefined;
++
++	detect(): Promise<GitInfo>;
++	detectVcs(folderPath: string): Promise<KrtVcs | null>;
++	getRemoteUrl(folderPath: string, remoteName?: string): Promise<string>;
++	getHeadSha(folderPath: string): Promise<string>;
++	showFile(folderPath: string, ref: string, path: string): Promise<string>;
++}
++
++export const IKrtGitService = createDecorator<IKrtGitService>('krtGitService');
+diff --git a/src/vs/platform/krt/electron-main/krtGitMainService.ts b/src/vs/platform/krt/electron-main/krtGitMainService.ts
+new file mode 100644
+index 00000000000..a6c0c565af6
+--- /dev/null
++++ b/src/vs/platform/krt/electron-main/krtGitMainService.ts
+@@ -0,0 +1,138 @@
++/*---------------------------------------------------------------------------------------------
++ *  Copyright (c) Microsoft Corporation. All rights reserved.
++ *  Licensed under the MIT License. See License.txt in the project root for license information.
++ *--------------------------------------------------------------------------------------------*/
++
++import { spawn } from 'child_process';
++import { promises as fsp } from 'fs';
++import { join as pathJoin } from '../../../base/common/path.js';
++import { ILogService } from '../../log/common/log.js';
++import {
++	gitInvocation,
++	gitMissing,
++	gitNoRemote,
++	gitNotARepo,
++} from '../common/errors.js';
++import { GitInfo, IKrtGitService, KrtVcs } from '../common/krtGit.js';
++
++interface SpawnResult {
++	readonly code: number | null;
++	readonly stdout: string;
++	readonly stderr: string;
++}
++
++export class KrtGitMainService implements IKrtGitService {
++
++	declare readonly _serviceBrand: undefined;
++
++	private detectPromise: Promise<GitInfo> | undefined;
++
++	constructor(
++		@ILogService private readonly logService: ILogService,
++	) { }
++
++	detect(): Promise<GitInfo> {
++		if (!this.detectPromise) {
++			this.detectPromise = this.runDetect().catch(err => {
++				this.detectPromise = undefined;
++				throw err;
++			});
++		}
++		return this.detectPromise;
++	}
++
++	async detectVcs(folderPath: string): Promise<KrtVcs | null> {
++		// `.jj/` wins over `.git/` — jj-colocated repos have both, but
++		// jj is the layer the user drives. `fs.access` is the cheapest
++		// shape check; we don't need to spawn anything here.
++		if (await pathExists(pathJoin(folderPath, '.jj'))) {
++			return 'jj';
++		}
++		if (await pathExists(pathJoin(folderPath, '.git'))) {
++			return 'git';
++		}
++		return null;
++	}
++
++	async getRemoteUrl(folderPath: string, remoteName: string = 'origin'): Promise<string> {
++		await this.detect();
++		const result = await this.spawnGit(folderPath, ['remote', 'get-url', remoteName]);
++		if (result.code === 0) {
++			return result.stdout.trim();
++		}
++		const stderr = result.stderr.toLowerCase();
++		if (stderr.includes('not a git repository')) {
++			throw gitNotARepo(folderPath);
++		}
++		if (stderr.includes('no such remote') || stderr.includes(`'${remoteName}'`)) {
++			throw gitNoRemote(folderPath, remoteName);
++		}
++		throw gitInvocation(result.stderr || result.stdout);
++	}
++
++	async getHeadSha(folderPath: string): Promise<string> {
++		await this.detect();
++		const result = await this.spawnGit(folderPath, ['rev-parse', 'HEAD']);
++		if (result.code === 0) {
++			return result.stdout.trim();
++		}
++		throw gitInvocation(result.stderr || result.stdout);
++	}
++
++	async showFile(folderPath: string, ref: string, path: string): Promise<string> {
++		await this.detect();
++		const result = await this.spawnGit(folderPath, ['show', `${ref}:${path}`]);
++		if (result.code === 0) {
++			return result.stdout;
++		}
++		throw gitInvocation(result.stderr || result.stdout);
++	}
++
++	private async runDetect(): Promise<GitInfo> {
++		let result: SpawnResult;
++		try {
++			result = await this.spawnGit(undefined, ['--version']);
++		} catch (e) {
++			if ((e as NodeJS.ErrnoException).code === 'ENOENT') {
++				throw gitMissing();
++			}
++			throw e;
++		}
++		if (result.code !== 0) {
++			throw gitInvocation(result.stderr || result.stdout);
++		}
++		// `git --version` line: "git version 2.42.0".
++		const match = /git version (?<v>\S+)/.exec(result.stdout);
++		const version = match?.groups?.v ?? 'unknown';
++		this.logService.info(`[krt] git detected: ${version}`);
++		return { version };
++	}
++
++	private spawnGit(cwd: string | undefined, args: readonly string[]): Promise<SpawnResult> {
++		return new Promise<SpawnResult>((resolve, reject) => {
++			const child = spawn('git', args, {
++				stdio: ['ignore', 'pipe', 'pipe'],
++				cwd,
++			});
++			const stdout: Buffer[] = [];
++			const stderr: Buffer[] = [];
++			child.stdout.on('data', chunk => stdout.push(chunk));
++			child.stderr.on('data', chunk => stderr.push(chunk));
++			child.on('error', err => reject(err));
++			child.on('close', code => resolve({
++				code,
++				stdout: Buffer.concat(stdout).toString('utf8'),
++				stderr: Buffer.concat(stderr).toString('utf8'),
++			}));
++		});
++	}
++}
++
++async function pathExists(p: string): Promise<boolean> {
++	try {
++		await fsp.access(p);
++		return true;
++	} catch {
++		return false;
++	}
++}
+diff --git a/src/vs/workbench/contrib/krt/browser/krt.contribution.ts b/src/vs/workbench/contrib/krt/browser/krt.contribution.ts
+index 1d3eb07338e..76b435a0a04 100644
+--- a/src/vs/workbench/contrib/krt/browser/krt.contribution.ts
++++ b/src/vs/workbench/contrib/krt/browser/krt.contribution.ts
+@@ -18,6 +18,7 @@ import './tabs/krtTabs.contribution.js';
+ import './pr/krtPullRequestEditor.contribution.js';
+ import './search/krtSearch.contribution.js';
+ import './ai/krtAi.contribution.js';
++import './workspace/krtWorkspace.contribution.js';
+ 
+ class KrtStatusBarContribution extends Disposable implements IWorkbenchContribution {
+ 
+diff --git a/src/vs/workbench/contrib/krt/browser/pr/krtMonacoDiff.ts b/src/vs/workbench/contrib/krt/browser/pr/krtMonacoDiff.ts
+index 8af56c2e5a3..e6829d803f4 100644
+--- a/src/vs/workbench/contrib/krt/browser/pr/krtMonacoDiff.ts
++++ b/src/vs/workbench/contrib/krt/browser/pr/krtMonacoDiff.ts
+@@ -9,9 +9,12 @@ import { URI } from '../../../../../base/common/uri.js';
+ import { ICodeEditor, MouseTargetType } from '../../../../../editor/browser/editorBrowser.js';
+ import { DiffEditorWidget } from '../../../../../editor/browser/widget/diffEditor/diffEditorWidget.js';
+ import { ILanguageService } from '../../../../../editor/common/languages/language.js';
++import { ITextModel } from '../../../../../editor/common/model.js';
+ import { IModelService } from '../../../../../editor/common/services/model.js';
+ import { IInstantiationService } from '../../../../../platform/instantiation/common/instantiation.js';
+ import { PullRequestFile } from '../../../../../platform/krt/common/krt.js';
++import { encodeKrtGit } from '../workspace/krtGitContentProvider.js';
++import { KrtWorkspace } from '../workspace/krtWorkspaceRegistry.js';
+ import { reconstructFromPatch } from './krtPatchReconstruct.js';
+ 
+ export type DiffSide = 'LEFT' | 'RIGHT';
+@@ -22,6 +25,17 @@ export interface IKrtMonacoDiffViewOptions {
+ 	readonly baseSha: string;
+ 	readonly headSha: string;
+ 	readonly file: PullRequestFile;
++	/**
++	 * Phase 8.6 — when a workspace is registered for the PR's repo,
++	 * the head side mounts the real `file://` URI (so LSP / extension
++	 * activation runs against it), and the base side resolves via the
++	 * `krt-git://` content provider (`git show baseSha:path`).
++	 *
++	 * When omitted, falls back to the Phase 8.5 patch-reconstructed
++	 * virtual URIs (`krt-pr-base://…` / `krt-pr-head://…`). These give
++	 * syntax highlighting + intra-line diff colours but no LSP.
++	 */
++	readonly workspace?: KrtWorkspace;
+ }
+ 
+ interface ILineZoneOptions {
+@@ -88,26 +102,81 @@ export class KrtMonacoDiffView extends Disposable {
+ 			},
+ 		));
+ 
+-		const { base, head } = reconstructFromPatch(opts.file.patch ?? '');
+ 		const path = opts.file.path;
+ 		const previousPath = opts.file.previousPath ?? path;
+-		const baseUri = URI.parse(`krt-pr-base://${encodeURIComponent(opts.owner)}/${encodeURIComponent(opts.repo)}/${encodeURIComponent(opts.baseSha)}/${encodeURI(previousPath)}`);
+-		const headUri = URI.parse(`krt-pr-head://${encodeURIComponent(opts.owner)}/${encodeURIComponent(opts.repo)}/${encodeURIComponent(opts.headSha)}/${encodeURI(path)}`);
+-
+-		const baseModel = modelService.createModel(
+-			base,
+-			languageService.createByFilepathOrFirstLine(baseUri),
+-			baseUri,
+-			false,
+-		);
+-		const headModel = modelService.createModel(
+-			head,
+-			languageService.createByFilepathOrFirstLine(headUri),
+-			headUri,
+-			false,
+-		);
+-		this._register(toDisposable(() => baseModel.dispose()));
+-		this._register(toDisposable(() => headModel.dispose()));
++		const file = opts.file;
++
++		// Per-side URI strategy:
++		//   1. If a workspace is registered for this PR's repo:
++		//      - head: file://<workspace>/<path>   (LSP-eligible)
++		//      - base: krt-git://<workspace>/<baseSha>/<previousPath>  (`git show`)
++		//      But: added files have no base; removed files have no head.
++		//      In those cases fall through to the patch-reconstructed
++		//      virtual fallback for the missing side.
++		//   2. Otherwise (no workspace), both sides use the Phase 8.5
++		//      virtual URIs — same as before, no LSP, but syntax + diff.
++		const reconstructed = reconstructFromPatch(opts.file.patch ?? '');
++
++		const baseModel = (() => {
++			if (opts.workspace && file.status !== 'added') {
++				const krtGitUri = encodeKrtGit(opts.workspace.folderUri, opts.baseSha, previousPath);
++				const existing = modelService.getModel(krtGitUri);
++				if (existing) {
++					return existing;
++				}
++				// Create an empty model now; the krt-git:// content provider
++				// fills it in on first model resolution. We populate the
++				// reconstructed text as a synchronous fallback so the diff
++				// has *something* to render until the async git-show lands.
++				return modelService.createModel(
++					reconstructed.base,
++					languageService.createByFilepathOrFirstLine(URI.file(previousPath)),
++					krtGitUri,
++					false,
++				);
++			}
++			const baseUri = URI.parse(`krt-pr-base://${encodeURIComponent(opts.owner)}/${encodeURIComponent(opts.repo)}/${encodeURIComponent(opts.baseSha)}/${encodeURI(previousPath)}`);
++			return modelService.createModel(
++				reconstructed.base,
++				languageService.createByFilepathOrFirstLine(baseUri),
++				baseUri,
++				false,
++			);
++		})();
++
++		const headModel: ITextModel = (() => {
++			if (opts.workspace && file.status !== 'removed') {
++				const headFileUri = URI.joinPath(URI.file(opts.workspace.folderPath), path);
++				const existing = modelService.getModel(headFileUri);
++				if (existing) {
++					// Existing file:// model from the workspace — perfect.
++					// Don't let our Disposable destroy it on `dispose()`;
++					// the workbench owns its lifetime.
++					return existing;
++				}
++				// No file:// model exists yet — create a virtual head model
++				// instead. The demo gate verifies the LSP path; this branch
++				// is the graceful fallback when the user hasn't opened the
++				// file in the workbench tree.
++			}
++			const headUri = URI.parse(`krt-pr-head://${encodeURIComponent(opts.owner)}/${encodeURIComponent(opts.repo)}/${encodeURIComponent(opts.headSha)}/${encodeURI(path)}`);
++			return modelService.createModel(
++				reconstructed.head,
++				languageService.createByFilepathOrFirstLine(headUri),
++				headUri,
++				false,
++			);
++		})();
++
++		// Only dispose models we own (i.e. created above). Models that
++		// pre-existed (file:// from the open workbench tree) are not ours
++		// to dispose.
++		const ownsBase = baseModel.uri.scheme !== 'file';
++		const ownsHead = headModel.uri.scheme !== 'file';
++		this._register(toDisposable(() => {
++			if (ownsBase) { baseModel.dispose(); }
++			if (ownsHead) { headModel.dispose(); }
++		}));
+ 
+ 		this.widget.setModel({ original: baseModel, modified: headModel });
+ 
+diff --git a/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.ts b/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.ts
+index 2fd8c80f390..f0ff284e4e1 100644
+--- a/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.ts
++++ b/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.ts
+@@ -20,6 +20,7 @@ import { ITelemetryService } from '../../../../../platform/telemetry/common/tele
+ import { IThemeService } from '../../../../../platform/theme/common/themeService.js';
+ import { ILogService } from '../../../../../platform/log/common/log.js';
+ import { IOpenerService } from '../../../../../platform/opener/common/opener.js';
++import { IKrtWorkspaceRegistry } from '../workspace/krtWorkspaceRegistry.js';
+ import { KrtMonacoDiffView } from './krtMonacoDiff.js';
+ import { isKrtError } from '../../../../../platform/krt/common/errors.js';
+ import { Chapter, EdgeKind, EDGE_KINDS, TourVariant } from '../ai/krtTourTypes.js';
+@@ -139,6 +140,7 @@ export class KrtPullRequestEditorPane extends EditorPane {
+ 		@ITourGenerator private readonly tourGenerator: ITourGenerator,
+ 		@ICommandService private readonly commandService: ICommandService,
+ 		@IInstantiationService private readonly instantiationService: IInstantiationService,
++		@IKrtWorkspaceRegistry private readonly workspaceRegistry: IKrtWorkspaceRegistry,
+ 	) {
+ 		super(KrtPullRequestEditorPane.ID, group, telemetryService, themeService, krtStorageService);
+ 	}
+@@ -875,10 +877,12 @@ export class KrtPullRequestEditorPane extends EditorPane {
+ 			return section;
+ 		}
+ 
+-		// Phase 8.5 — embedded Monaco diff editor instead of plain-text
+-		// patch rows. Patch reconstruction populates two virtual models;
+-		// `hideUnchangedRegions` collapses the padded gaps so the user
+-		// only sees changed regions plus 3 lines of real context.
++		// Phase 8.5/8.6 — embedded Monaco diff editor. When a workspace is
++		// registered for this PR's repo, the head side mounts the real
++		// `file://` URI (LSP-eligible) and the base resolves via
++		// `krt-git://` (`git show`). Otherwise it falls back to the
++		// patch-reconstructed virtual URIs.
++		const workspace = this.workspaceRegistry.findByOwnerRepo(pr.owner, pr.repo);
+ 		const view = this.instantiationService.createInstance(
+ 			KrtMonacoDiffView,
+ 			body,
+@@ -888,6 +892,7 @@ export class KrtPullRequestEditorPane extends EditorPane {
+ 				baseSha: pr.base.sha,
+ 				headSha: pr.head.sha,
+ 				file,
++				workspace,
+ 			},
+ 		);
+ 		this.bodyDisposables.add(view);
+@@ -1407,7 +1412,10 @@ export class KrtPullRequestEditorPane extends EditorPane {
+ 					: localize('krt.pr.diffNoPatchAvailable', "No patch available (binary or too large).");
+ 				continue;
+ 			}
+-			// Phase 8.5 — Monaco mini-diff. Read-only, no comments / composer.
++			// Phase 8.5/8.6 — Monaco mini-diff. Read-only, no comments /
++			// composer; same workspace plumbing as the main diff view so
++			// LSP works in tour chapters too.
++			const tourWorkspace = this.workspaceRegistry.findByOwnerRepo(pr.owner, pr.repo);
+ 			const view = this.instantiationService.createInstance(
+ 				KrtMonacoDiffView,
+ 				body,
+@@ -1417,6 +1425,7 @@ export class KrtPullRequestEditorPane extends EditorPane {
+ 					baseSha: pr.base.sha,
+ 					headSha: pr.head.sha,
+ 					file,
++					workspace: tourWorkspace,
+ 				},
+ 			);
+ 			this.bodyDisposables.add(view);
+diff --git a/src/vs/workbench/contrib/krt/browser/workspace/krtGitContentProvider.ts b/src/vs/workbench/contrib/krt/browser/workspace/krtGitContentProvider.ts
+new file mode 100644
+index 00000000000..77185ab38d2
+--- /dev/null
++++ b/src/vs/workbench/contrib/krt/browser/workspace/krtGitContentProvider.ts
+@@ -0,0 +1,125 @@
++/*---------------------------------------------------------------------------------------------
++ *  Copyright (c) Microsoft Corporation. All rights reserved.
++ *  Licensed under the MIT License. See License.txt in the project root for license information.
++ *--------------------------------------------------------------------------------------------*/
++
++import { Disposable } from '../../../../../base/common/lifecycle.js';
++import { URI } from '../../../../../base/common/uri.js';
++import { ILanguageService } from '../../../../../editor/common/languages/language.js';
++import { ITextModel } from '../../../../../editor/common/model.js';
++import { IModelService } from '../../../../../editor/common/services/model.js';
++import { ITextModelContentProvider, ITextModelService } from '../../../../../editor/common/services/resolverService.js';
++import { IInstantiationService } from '../../../../../platform/instantiation/common/instantiation.js';
++import { ILogService } from '../../../../../platform/log/common/log.js';
++import { Registry } from '../../../../../platform/registry/common/platform.js';
++import { Extensions as WorkbenchExtensions, IWorkbenchContribution, IWorkbenchContributionsRegistry } from '../../../../common/contributions.js';
++import { LifecyclePhase } from '../../../../services/lifecycle/common/lifecycle.js';
++import { IKrtGitService } from '../../../../../platform/krt/common/krtGit.js';
++import { IKrtWorkspaceRegistry } from './krtWorkspaceRegistry.js';
++
++export const KRT_GIT_SCHEME = 'krt-git';
++
++/**
++ * Resolves `krt-git://<folderUri-encoded>/<ref>/<path>` URIs by
++ * shelling `git show <ref>:<path>` in the registered workspace folder.
++ *
++ * Used as the *base* side of Monaco diffs when the workspace is
++ * registered but the working tree isn't on the PR's base SHA. The head
++ * side prefers `file://` (so language extensions activate); only when
++ * the working tree's HEAD doesn't match does it also fall back here.
++ *
++ * Cached as plain Monaco text models — `IModelService.createModel` is
++ * idempotent on URI, so re-requests within the same session reuse the
++ * cached model and avoid re-shelling.
++ */
++class KrtGitContentProvider implements ITextModelContentProvider {
++
++	constructor(
++		@IKrtGitService private readonly gitService: IKrtGitService,
++		@IKrtWorkspaceRegistry private readonly workspaceRegistry: IKrtWorkspaceRegistry,
++		@IModelService private readonly modelService: IModelService,
++		@ILanguageService private readonly languageService: ILanguageService,
++		@ILogService private readonly logService: ILogService,
++	) { }
++
++	async provideTextContent(resource: URI): Promise<ITextModel | null> {
++		if (resource.scheme !== KRT_GIT_SCHEME) {
++			return null;
++		}
++		const existing = this.modelService.getModel(resource);
++		if (existing) {
++			return existing;
++		}
++		const decoded = decodeKrtGit(resource);
++		if (!decoded) {
++			this.logService.warn(`[krt] krt-git URI did not parse: ${resource.toString()}`);
++			return null;
++		}
++		const workspace = this.workspaceRegistry.findByFolderUri(decoded.folderUri);
++		if (!workspace) {
++			this.logService.warn(`[krt] krt-git URI references unknown workspace: ${decoded.folderUri}`);
++			return null;
++		}
++		try {
++			const content = await this.gitService.showFile(workspace.folderPath, decoded.ref, decoded.path);
++			return this.modelService.createModel(
++				content,
++				this.languageService.createByFilepathOrFirstLine(URI.file(decoded.path)),
++				resource,
++				false,
++			);
++		} catch (err) {
++			this.logService.warn(`[krt] git show ${decoded.ref}:${decoded.path} failed`, err);
++			return null;
++		}
++	}
++}
++
++/**
++ * Encodes a workspace + ref + path tuple into a stable `krt-git://`
++ * URI. The folderUri goes into the authority (URL-encoded once) so we
++ * can recover the original workspace identity on lookup; the ref +
++ * path live in the URI's path component.
++ */
++export function encodeKrtGit(folderUri: string, ref: string, path: string): URI {
++	return URI.from({
++		scheme: KRT_GIT_SCHEME,
++		authority: encodeURIComponent(folderUri),
++		path: `/${encodeURIComponent(ref)}/${path.split('/').map(encodeURIComponent).join('/')}`,
++	});
++}
++
++function decodeKrtGit(resource: URI): { folderUri: string; ref: string; path: string } | undefined {
++	const folderUri = decodeURIComponent(resource.authority);
++	const segments = resource.path.split('/').filter(Boolean);
++	if (segments.length < 2) {
++		return undefined;
++	}
++	const [encodedRef, ...pathSegments] = segments;
++	return {
++		folderUri,
++		ref: decodeURIComponent(encodedRef),
++		path: pathSegments.map(decodeURIComponent).join('/'),
++	};
++}
++
++/**
++ * Wires the provider into the workbench's `ITextModelService` so
++ * `createModelReference(krt-git://...)` resolves cleanly.
++ */
++export class KrtGitContentProviderContribution extends Disposable implements IWorkbenchContribution {
++
++	static readonly ID = 'workbench.contrib.krt.gitContentProvider';
++
++	constructor(
++		@ITextModelService textModelService: ITextModelService,
++		@IInstantiationService instantiationService: IInstantiationService,
++	) {
++		super();
++		const provider = instantiationService.createInstance(KrtGitContentProvider);
++		this._register(textModelService.registerTextModelContentProvider(KRT_GIT_SCHEME, provider));
++	}
++}
++
++Registry.as<IWorkbenchContributionsRegistry>(WorkbenchExtensions.Workbench)
++	.registerWorkbenchContribution(KrtGitContentProviderContribution, LifecyclePhase.Restored);
+diff --git a/src/vs/workbench/contrib/krt/browser/workspace/krtWorkspace.contribution.ts b/src/vs/workbench/contrib/krt/browser/workspace/krtWorkspace.contribution.ts
+new file mode 100644
+index 00000000000..2d324d68ef8
+--- /dev/null
++++ b/src/vs/workbench/contrib/krt/browser/workspace/krtWorkspace.contribution.ts
+@@ -0,0 +1,147 @@
++/*---------------------------------------------------------------------------------------------
++ *  Copyright (c) Microsoft Corporation. All rights reserved.
++ *  Licensed under the MIT License. See License.txt in the project root for license information.
++ *--------------------------------------------------------------------------------------------*/
++
++import { localize, localize2 } from '../../../../../nls.js';
++import { Action2, registerAction2 } from '../../../../../platform/actions/common/actions.js';
++import { IFileDialogService } from '../../../../../platform/dialogs/common/dialogs.js';
++import { InstantiationType, registerSingleton } from '../../../../../platform/instantiation/common/extensions.js';
++import { ServicesAccessor } from '../../../../../platform/instantiation/common/instantiation.js';
++import { isKrtError } from '../../../../../platform/krt/common/errors.js';
++import { IKrtGitService } from '../../../../../platform/krt/common/krtGit.js';
++import { ILogService } from '../../../../../platform/log/common/log.js';
++import { INotificationService, Severity } from '../../../../../platform/notification/common/notification.js';
++import { IQuickInputService } from '../../../../../platform/quickinput/common/quickInput.js';
++import { IKrtWorkspaceRegistry, KrtWorkspaceRegistry, folderPathToUri, parseGithubRemoteUrl } from './krtWorkspaceRegistry.js';
++
++import './krtGitContentProvider.js';
++
++const KRT_CATEGORY = localize2('krt.category', "KRT");
++
++registerSingleton(IKrtWorkspaceRegistry, KrtWorkspaceRegistry, InstantiationType.Eager);
++
++class KrtAddWorkspaceAction extends Action2 {
++	static readonly ID = 'krt.workspace.add';
++
++	constructor() {
++		super({
++			id: KrtAddWorkspaceAction.ID,
++			title: localize2('krt.workspace.add.title', "Add Workspace…"),
++			category: KRT_CATEGORY,
++			f1: true,
++		});
++	}
++
++	override async run(accessor: ServicesAccessor): Promise<void> {
++		const fileDialog = accessor.get(IFileDialogService);
++		const gitService = accessor.get(IKrtGitService);
++		const registry = accessor.get(IKrtWorkspaceRegistry);
++		const notification = accessor.get(INotificationService);
++		const logService = accessor.get(ILogService);
++
++		const picked = await fileDialog.showOpenDialog({
++			canSelectFiles: false,
++			canSelectFolders: true,
++			canSelectMany: false,
++			openLabel: localize('krt.workspace.add.openLabel', "Add Workspace"),
++			title: localize('krt.workspace.add.title.dialog', "Add a local clone as a KRT workspace"),
++		});
++		if (!picked || picked.length === 0) {
++			return;
++		}
++		const folderUri = picked[0];
++		const folderPath = folderUri.fsPath;
++		try {
++			const remoteUrl = await gitService.getRemoteUrl(folderPath, 'origin');
++			const parsed = parseGithubRemoteUrl(remoteUrl);
++			if (!parsed) {
++				notification.notify({
++					severity: Severity.Warning,
++					message: localize(
++						'krt.workspace.add.notGithub',
++						"`{0}` doesn't look like a GitHub remote — KRT only supports GitHub for now.",
++						remoteUrl,
++					),
++				});
++				return;
++			}
++			registry.add({
++				folderUri: folderPathToUri(folderPath),
++				folderPath,
++				owner: parsed.owner,
++				repo: parsed.repo,
++				remoteUrl,
++				addedAt: new Date().toISOString(),
++			});
++			notification.notify({
++				severity: Severity.Info,
++				message: localize(
++					'krt.workspace.add.added',
++					"Added {0}/{1} ({2}) to KRT workspaces.",
++					parsed.owner,
++					parsed.repo,
++					folderPath,
++				),
++			});
++		} catch (err) {
++			logService.warn('[krt] add workspace failed', err);
++			const message = isKrtError(err) ? `${err.message} — ${err.hint}` : String(err);
++			notification.notify({ severity: Severity.Error, message });
++		}
++	}
++}
++
++class KrtRemoveWorkspaceAction extends Action2 {
++	static readonly ID = 'krt.workspace.remove';
++
++	constructor() {
++		super({
++			id: KrtRemoveWorkspaceAction.ID,
++			title: localize2('krt.workspace.remove.title', "Remove Workspace…"),
++			category: KRT_CATEGORY,
++			f1: true,
++		});
++	}
++
++	override async run(accessor: ServicesAccessor): Promise<void> {
++		const registry = accessor.get(IKrtWorkspaceRegistry);
++		const quickInput = accessor.get(IQuickInputService);
++		const notification = accessor.get(INotificationService);
++
++		const all = registry.getAll();
++		if (all.length === 0) {
++			notification.notify({
++				severity: Severity.Info,
++				message: localize('krt.workspace.remove.empty', "No KRT workspaces are registered."),
++			});
++			return;
++		}
++		const picked = await quickInput.pick(
++			all.map(w => ({
++				label: `${w.owner}/${w.repo}`,
++				description: w.folderPath,
++				workspace: w,
++			})),
++			{
++				placeHolder: localize('krt.workspace.remove.placeholder', "Pick a workspace to remove"),
++			},
++		);
++		if (!picked) {
++			return;
++		}
++		registry.remove(picked.workspace.folderUri);
++		notification.notify({
++			severity: Severity.Info,
++			message: localize(
++				'krt.workspace.remove.removed',
++				"Removed {0}/{1} from KRT workspaces.",
++				picked.workspace.owner,
++				picked.workspace.repo,
++			),
++		});
++	}
++}
++
++registerAction2(KrtAddWorkspaceAction);
++registerAction2(KrtRemoveWorkspaceAction);
+diff --git a/src/vs/workbench/contrib/krt/browser/workspace/krtWorkspaceRegistry.ts b/src/vs/workbench/contrib/krt/browser/workspace/krtWorkspaceRegistry.ts
+new file mode 100644
+index 00000000000..24796b8b09e
+--- /dev/null
++++ b/src/vs/workbench/contrib/krt/browser/workspace/krtWorkspaceRegistry.ts
+@@ -0,0 +1,159 @@
++/*---------------------------------------------------------------------------------------------
++ *  Copyright (c) Microsoft Corporation. All rights reserved.
++ *  Licensed under the MIT License. See License.txt in the project root for license information.
++ *--------------------------------------------------------------------------------------------*/
++
++import { Emitter, Event } from '../../../../../base/common/event.js';
++import { Disposable } from '../../../../../base/common/lifecycle.js';
++import { URI } from '../../../../../base/common/uri.js';
++import { createDecorator } from '../../../../../platform/instantiation/common/instantiation.js';
++import { IStorageService, StorageScope, StorageTarget } from '../../../../../platform/storage/common/storage.js';
++
++/**
++ * A registered local clone of a GitHub repository. Phase 8.6 uses these
++ * to (1) scope PR Search to repos the user actually cares about and
++ * (2) feed real `file://` URIs into Monaco diff editors so language
++ * extensions activate against them.
++ *
++ * `folderUri` is the local clone path. `owner`/`repo` come from the
++ * `origin` remote URL parsed at Add time. `addedAt` is for a future
++ * recents-style sort.
++ */
++export interface KrtWorkspace {
++	readonly folderUri: string;
++	readonly folderPath: string;
++	readonly owner: string;
++	readonly repo: string;
++	readonly remoteUrl: string;
++	readonly addedAt: string;
++}
++
++export interface IKrtWorkspaceRegistry {
++	readonly _serviceBrand: undefined;
++
++	readonly onDidChange: Event<void>;
++
++	getAll(): readonly KrtWorkspace[];
++	add(workspace: KrtWorkspace): void;
++	remove(folderUri: string): void;
++	findByOwnerRepo(owner: string, repo: string): KrtWorkspace | undefined;
++	findByFolderUri(folderUri: string): KrtWorkspace | undefined;
++}
++
++export const IKrtWorkspaceRegistry = createDecorator<IKrtWorkspaceRegistry>('krtWorkspaceRegistry');
++
++const STORAGE_KEY = 'krt.workspaces.v1';
++
++interface StoredEnvelope {
++	readonly version: 1;
++	readonly workspaces: readonly KrtWorkspace[];
++}
++
++export class KrtWorkspaceRegistry extends Disposable implements IKrtWorkspaceRegistry {
++
++	declare readonly _serviceBrand: undefined;
++
++	private readonly _onDidChange = this._register(new Emitter<void>());
++	readonly onDidChange = this._onDidChange.event;
++
++	private workspaces: KrtWorkspace[];
++
++	constructor(
++		@IStorageService private readonly storageService: IStorageService,
++	) {
++		super();
++		this.workspaces = this.read();
++	}
++
++	getAll(): readonly KrtWorkspace[] {
++		return this.workspaces;
++	}
++
++	add(workspace: KrtWorkspace): void {
++		// De-dupe on `folderUri` — re-adding the same clone updates the
++		// metadata (owner/repo/remoteUrl) without producing a stale
++		// duplicate entry.
++		const filtered = this.workspaces.filter(w => w.folderUri !== workspace.folderUri);
++		this.workspaces = [...filtered, workspace];
++		this.write();
++		this._onDidChange.fire();
++	}
++
++	remove(folderUri: string): void {
++		const before = this.workspaces.length;
++		this.workspaces = this.workspaces.filter(w => w.folderUri !== folderUri);
++		if (this.workspaces.length !== before) {
++			this.write();
++			this._onDidChange.fire();
++		}
++	}
++
++	findByOwnerRepo(owner: string, repo: string): KrtWorkspace | undefined {
++		return this.workspaces.find(w =>
++			w.owner.toLowerCase() === owner.toLowerCase() &&
++			w.repo.toLowerCase() === repo.toLowerCase()
++		);
++	}
++
++	findByFolderUri(folderUri: string): KrtWorkspace | undefined {
++		return this.workspaces.find(w => w.folderUri === folderUri);
++	}
++
++	private read(): KrtWorkspace[] {
++		const raw = this.storageService.get(STORAGE_KEY, StorageScope.APPLICATION);
++		if (!raw) {
++			return [];
++		}
++		try {
++			const envelope = JSON.parse(raw) as StoredEnvelope;
++			if (envelope.version !== 1 || !Array.isArray(envelope.workspaces)) {
++				return [];
++			}
++			return envelope.workspaces.filter(w =>
++				typeof w.folderUri === 'string' &&
++				typeof w.folderPath === 'string' &&
++				typeof w.owner === 'string' &&
++				typeof w.repo === 'string'
++			);
++		} catch {
++			return [];
++		}
++	}
++
++	private write(): void {
++		const envelope: StoredEnvelope = { version: 1, workspaces: this.workspaces };
++		this.storageService.store(STORAGE_KEY, JSON.stringify(envelope), StorageScope.APPLICATION, StorageTarget.MACHINE);
++	}
++}
++
++/**
++ * Parse a GitHub remote URL into `{ owner, repo }`. Handles:
++ *   - `git@github.com:owner/repo.git`
++ *   - `https://github.com/owner/repo.git`
++ *   - `https://github.com/owner/repo`
++ *   - `ssh://git@github.com/owner/repo.git`
++ *
++ * Returns `undefined` if the URL doesn't look like GitHub.
++ */
++export function parseGithubRemoteUrl(url: string): { owner: string; repo: string } | undefined {
++	const trimmed = url.trim();
++	// SSH form: git@github.com:owner/repo[.git]
++	const ssh = /^(?:ssh:\/\/)?git@github\.com[:/](?<owner>[^/]+)\/(?<repo>[^/.]+)(?:\.git)?\/?$/.exec(trimmed);
++	if (ssh?.groups) {
++		return { owner: ssh.groups.owner, repo: ssh.groups.repo };
++	}
++	// HTTPS form: https://github.com/owner/repo[.git]
++	const https = /^https?:\/\/github\.com\/(?<owner>[^/]+)\/(?<repo>[^/.]+)(?:\.git)?\/?$/.exec(trimmed);
++	if (https?.groups) {
++		return { owner: https.groups.owner, repo: https.groups.repo };
++	}
++	return undefined;
++}
++
++/**
++ * Build a synthetic `folderUri` from a real folder path. Uses a real
++ * `URI.file(...)` so storage round-trips cleanly.
++ */
++export function folderPathToUri(folderPath: string): string {
++	return URI.file(folderPath).toString();
++}
+diff --git a/src/vs/workbench/services/krt/electron-browser/krtGitClient.ts b/src/vs/workbench/services/krt/electron-browser/krtGitClient.ts
+new file mode 100644
+index 00000000000..2c1bad318cf
+--- /dev/null
++++ b/src/vs/workbench/services/krt/electron-browser/krtGitClient.ts
+@@ -0,0 +1,23 @@
++/*---------------------------------------------------------------------------------------------
++ *  Copyright (c) Microsoft Corporation. All rights reserved.
++ *  Licensed under the MIT License. See License.txt in the project root for license information.
++ *--------------------------------------------------------------------------------------------*/
++
++import { ProxyChannel } from '../../../../base/parts/ipc/common/ipc.js';
++import { InstantiationType, registerSingleton } from '../../../../platform/instantiation/common/extensions.js';
++import { IMainProcessService } from '../../../../platform/ipc/common/mainProcessService.js';
++import { IKrtGitService } from '../../../../platform/krt/common/krtGit.js';
++
++// @ts-expect-error: interface is implemented via proxy
++class KrtGitClient implements IKrtGitService {
++
++	declare readonly _serviceBrand: undefined;
++
++	constructor(
++		@IMainProcessService mainProcessService: IMainProcessService,
++	) {
++		return ProxyChannel.toService<IKrtGitService>(mainProcessService.getChannel('krt:git'));
++	}
++}
++
++registerSingleton(IKrtGitService, KrtGitClient, InstantiationType.Delayed);
+diff --git a/src/vs/workbench/workbench.desktop.main.ts b/src/vs/workbench/workbench.desktop.main.ts
+index d9f9cb37604..ed665ef9d1a 100644
+--- a/src/vs/workbench/workbench.desktop.main.ts
++++ b/src/vs/workbench/workbench.desktop.main.ts
+@@ -200,6 +200,7 @@ import './contrib/keybindingsExport/electron-browser/keybindingsExport.contribut
+ import './services/krt/electron-browser/krtGhClient.js';
+ import './services/krt/electron-browser/krtPullRequestProvider.js';
+ import './services/krt/electron-browser/krtAiClient.js';
++import './services/krt/electron-browser/krtGitClient.js';
+ import './contrib/krt/electron-browser/krtOpenPullRequest.contribution.js';
+ 
+ //#endregion
+-- 
+2.52.0
+

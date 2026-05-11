@@ -1,0 +1,256 @@
+From e60656127a974fd0f507f6a0987adabcd9f421c8 Mon Sep 17 00:00:00 2001
+From: Kol Crooks <kol.crooks@datadoghq.com>
+Date: Thu, 7 May 2026 11:55:46 -0400
+Subject: [PATCH] Diff view: all-or-nothing LSP upgrade to avoid mixed-content
+ visual bug
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Patch 0064 upgraded each diff side independently — head to file:// when
+the working tree was on the PR head, base to krt-git:// always. That
+produced a mixed-content state when only one side resolved: full file
+content on the upgraded side, patch-reconstructed compact text on the
+other. The diff editor compared them and every line outside the patch's
+hunks showed as a difference, since those lines didn't exist on the
+virtual side at all. Symptom: large unrelated chunks of code visually
+flagged as changed.
+
+Fix: all-or-nothing upgrade.
+
+- Working tree on PR head is checked first. If not, neither side
+  upgrades — keeping a virtual base while head stays virtual is a no-op,
+  but also avoids a half-upgrade where base goes to krt-git:// while
+  head stays krt-pr-head:// (also mixed mode).
+- Both sides resolve in parallel via `Promise.allSettled` so a one-
+  sided rejection doesn't leak the other side's IReference. If either
+  fails, both refs dispose and the constructor-mounted virtual diff
+  stays in place.
+- Added/removed files skip the upgrade entirely. Their virtual diff
+  already shows the full content on the relevant side (the other side
+  is naturally empty); LSP for those files is deferred — most code
+  review traffic is modified files anyway.
+
+When the upgrade succeeds, both sides are full content, realLines is
+identity (built-in 'on' numbering), comments re-register at the new
+URIs, and hideUnchangedRegions flips on. When it fails, the virtual
+patch-direct rendering keeps working as before — same visual as
+without this whole feature.
+
+Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+---
+ .../contrib/krt/browser/pr/krtMonacoDiff.ts   | 158 +++++++++---------
+ 1 file changed, 79 insertions(+), 79 deletions(-)
+
+diff --git a/src/vs/workbench/contrib/krt/browser/pr/krtMonacoDiff.ts b/src/vs/workbench/contrib/krt/browser/pr/krtMonacoDiff.ts
+index e443ab8b8fa..4f50092aec8 100644
+--- a/src/vs/workbench/contrib/krt/browser/pr/krtMonacoDiff.ts
++++ b/src/vs/workbench/contrib/krt/browser/pr/krtMonacoDiff.ts
+@@ -4,7 +4,7 @@
+  *--------------------------------------------------------------------------------------------*/
+ 
+ import * as DOM from '../../../../../base/browser/dom.js';
+-import { Disposable, DisposableStore, IDisposable, IReference, toDisposable } from '../../../../../base/common/lifecycle.js';
++import { Disposable, DisposableStore, IDisposable, toDisposable } from '../../../../../base/common/lifecycle.js';
+ import { URI } from '../../../../../base/common/uri.js';
+ import { ICodeEditor, MouseTargetType } from '../../../../../editor/browser/editorBrowser.js';
+ import { DiffEditorWidget } from '../../../../../editor/browser/widget/diffEditor/diffEditorWidget.js';
+@@ -12,7 +12,7 @@ import { RefCounted } from '../../../../../editor/browser/widget/diffEditor/util
+ import { ILanguageService } from '../../../../../editor/common/languages/language.js';
+ import { ITextModel } from '../../../../../editor/common/model.js';
+ import { IModelService } from '../../../../../editor/common/services/model.js';
+-import { IResolvedTextEditorModel, ITextModelService } from '../../../../../editor/common/services/resolverService.js';
++import { ITextModelService } from '../../../../../editor/common/services/resolverService.js';
+ import { IInstantiationService } from '../../../../../platform/instantiation/common/instantiation.js';
+ import { IKrtGitService } from '../../../../../platform/krt/common/krtGit.js';
+ import { PullRequestFile } from '../../../../../platform/krt/common/krt.js';
+@@ -345,109 +345,109 @@ export class KrtMonacoDiffView extends Disposable {
+ 	 * `krt-git://` URI whose content provider shells `git show
+ 	 * ${baseSha}:${path}`.
+ 	 *
+-	 * All resolution is best-effort. Any failure (working tree drifted,
+-	 * SHA not fetched locally, file is added/removed and has no
+-	 * counterpart side) leaves the corresponding side on the
+-	 * synchronous virtual model the constructor already mounted.
++	 * **All-or-nothing.** Mixing full content on one side with the
++	 * patch-reconstructed virtual model on the other looks visually
++	 * broken: the diff editor compares them and every line outside the
++	 * patch's hunks shows as a difference. So we only swap to workspace
++	 * URIs when *both* sides resolve cleanly. Any failure (working tree
++	 * drifted, base SHA not fetched, …) leaves the constructor-mounted
++	 * virtual diff in place.
++	 *
++	 * Added/removed files keep the synchronous virtual diff: the patch
++	 * already shows their full content (one side is empty, the other
++	 * is everything). LSP for those would also be desirable but isn't
++	 * worth the per-side complexity in this pass.
+ 	 */
+ 	private async tryUpgradeForLsp(workspace: KrtWorkspace): Promise<void> {
+ 		const file = this.opts.file;
++		// Added/removed files: skip the upgrade. The virtual diff already
++		// renders correctly (one side is naturally empty).
++		if (file.status === 'added' || file.status === 'removed') {
++			return;
++		}
+ 		const path = file.path;
+ 		const previousPath = file.previousPath ?? path;
+ 
+-		// Head side — file:// when working tree on PR head, otherwise
+-		// skip (we keep the virtual model the constructor mounted).
+-		// Going to krt-git:// for head as a fallback would give us
+-		// correct content but no LSP, and the virtual model already
+-		// renders correctly — there's no upgrade path from "virtual" to
+-		// "krt-git head" that improves UX.
+-		let headRef: IReference<IResolvedTextEditorModel> | undefined;
+-		if (file.status !== 'removed') {
+-			try {
+-				const workingTreeSha = await this.gitService.getHeadSha(workspace.folderPath);
+-				if (this._store.isDisposed) {
+-					return;
+-				}
+-				if (workingTreeSha === this.opts.headSha) {
+-					const headFileUri = URI.joinPath(URI.file(workspace.folderPath), path);
+-					headRef = await this.textModelService.createModelReference(headFileUri);
+-					if (this._store.isDisposed) {
+-						headRef.dispose();
+-						return;
+-					}
+-					this._register(headRef);
+-				} else {
+-					this.logService.info(
+-						`[krt] diff: workspace ${workspace.folderPath} is on ${workingTreeSha.slice(0, 7)} but PR head is ${this.opts.headSha.slice(0, 7)} — keeping virtual head model (no LSP). Check out the PR head SHA to enable LSP.`,
+-					);
+-				}
+-			} catch (err) {
+-				this.logService.warn(`[krt] diff: head LSP upgrade failed for ${path}`, err);
+-			}
++		// Working tree must be on PR head — otherwise file:// would
++		// reflect a different commit's content and the diff would show
++		// the wrong "head" on the right side. The base side
++		// (`krt-git://${baseSha}`) is fetched-content-bound and doesn't
++		// depend on the working tree, but if we can't honour the head
++		// side we have to abandon both to avoid mixed-content visuals.
++		let workingTreeSha: string;
++		try {
++			workingTreeSha = await this.gitService.getHeadSha(workspace.folderPath);
++		} catch (err) {
++			this.logService.warn(`[krt] diff: getHeadSha failed for ${workspace.folderPath} — staying on virtual diff`, err);
++			return;
++		}
++		if (this._store.isDisposed) {
++			return;
++		}
++		if (workingTreeSha !== this.opts.headSha) {
++			this.logService.info(
++				`[krt] diff: workspace ${workspace.folderPath} is on ${workingTreeSha.slice(0, 7)} but PR head is ${this.opts.headSha.slice(0, 7)} — staying on virtual diff (no LSP). Check out the PR head SHA to enable LSP.`,
++			);
++			return;
+ 		}
+ 
+-		// Base side — krt-git:// always when applicable. This is full
+-		// content from `git show baseSha:previousPath`, which gives a
+-		// real diff (changed regions visible, unchanged context
+-		// available) instead of the patch-reconstructed compact text.
+-		let baseRef: IReference<IResolvedTextEditorModel> | undefined;
+-		if (file.status !== 'added') {
+-			try {
+-				const baseGitUri = encodeKrtGit(workspace.folderUri, this.opts.baseSha, previousPath);
+-				baseRef = await this.textModelService.createModelReference(baseGitUri);
+-				if (this._store.isDisposed) {
+-					baseRef.dispose();
+-					return;
+-				}
+-				this._register(baseRef);
+-			} catch (err) {
++		// Resolve both sides in parallel via `allSettled` so a one-sided
++		// failure doesn't leak the other side's reference.
++		const headFileUri = URI.joinPath(URI.file(workspace.folderPath), path);
++		const baseGitUri = encodeKrtGit(workspace.folderUri, this.opts.baseSha, previousPath);
++		const [headSettled, baseSettled] = await Promise.allSettled([
++			this.textModelService.createModelReference(headFileUri),
++			this.textModelService.createModelReference(baseGitUri),
++		]);
++		const headRef = headSettled.status === 'fulfilled' ? headSettled.value : undefined;
++		const baseRef = baseSettled.status === 'fulfilled' ? baseSettled.value : undefined;
++		if (this._store.isDisposed) {
++			headRef?.dispose();
++			baseRef?.dispose();
++			return;
++		}
++		if (!headRef || !baseRef) {
++			if (headSettled.status === 'rejected') {
++				this.logService.warn(`[krt] diff: head LSP upgrade failed for ${path}`, headSettled.reason);
++			}
++			if (baseSettled.status === 'rejected') {
+ 				this.logService.warn(
+ 					`[krt] diff: base LSP upgrade failed for ${path}@${this.opts.baseSha.slice(0, 7)} — base SHA may not be fetched in ${workspace.folderPath}`,
+-					err,
++					baseSettled.reason,
+ 				);
+ 			}
+-		}
+-
+-		if (!headRef && !baseRef) {
++			// Partial resolution — abandon to avoid the mixed-content
++			// visual breakage described in this method's docstring.
++			headRef?.dispose();
++			baseRef?.dispose();
+ 			return;
+ 		}
+ 
+-		// At least one side resolved. Build a coherent pair: prefer the
+-		// resolved side; for the unresolved side, reuse the virtual
+-		// model the constructor already created (cached in
+-		// `IModelService` since we share URIs across renders).
+-		const baseModel = baseRef?.object.textEditorModel ?? this.modelService.getModel(this.virtualBaseUri());
+-		const headModel = headRef?.object.textEditorModel ?? this.modelService.getModel(this.virtualHeadUri());
+-		if (!baseModel || !headModel) {
+-			return;
+-		}
++		this._register(headRef);
++		this._register(baseRef);
++
++		const baseModel = baseRef.object.textEditorModel;
++		const headModel = headRef.object.textEditorModel;
+ 
+ 		this.applyDiffModel(baseModel, headModel);
+ 
+ 		// realLines is identity for full-content workspace-backed
+ 		// models — the gutter shows real file line numbers naturally
+-		// because each model line IS a real file line. The
+-		// `applyLineNumbers(true)` path uses Monaco's built-in
+-		// numbering for sides that upgraded; the patch-derived sparse
+-		// map is only needed when a side stays virtual.
+-		if (headRef) {
+-			this.headRealLines = identityArray(headModel.getLineCount());
+-		}
+-		if (baseRef) {
+-			this.baseRealLines = identityArray(baseModel.getLineCount());
+-		}
+-		this.applyLineNumbers(/*identity*/ !!(headRef && baseRef));
++		// because each model line IS a real file line. Both sides
++		// upgraded together, so we can use Monaco's built-in numbering
++		// (`'on'`) instead of the patch-derived sparse callback.
++		this.headRealLines = identityArray(headModel.getLineCount());
++		this.baseRealLines = identityArray(baseModel.getLineCount());
++		this.applyLineNumbers(/*identity*/ true);
+ 		this.registerCommentResources(baseModel.uri, headModel.uri);
+ 
+ 		// Both sides now have full content — collapse unchanged regions
+ 		// so the visual stays focused on the changes plus a few lines of
+ 		// real surrounding context (`+ N hidden lines` is meaningful
+ 		// here, unlike the virtual case where it would reveal nothing).
+-		if (headRef && baseRef) {
+-			this.widget.updateOptions({
+-				hideUnchangedRegions: { enabled: true, contextLineCount: 3, minimumLineCount: 4 },
+-			});
+-		}
++		this.widget.updateOptions({
++			hideUnchangedRegions: { enabled: true, contextLineCount: 3, minimumLineCount: 4 },
++		});
+ 	}
+ 
+ 	/**
+-- 
+2.52.0
+

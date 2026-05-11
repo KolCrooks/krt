@@ -1,0 +1,1956 @@
+From 62b0ffc4a55420a91954ec7541d88d5ddc02f7e5 Mon Sep 17 00:00:00 2001
+From: Kol Crooks <kol.crooks@datadoghq.com>
+Date: Thu, 7 May 2026 13:47:30 -0400
+Subject: [PATCH] Phase A (rebuild): strip the custom diff stack
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The custom DiffEditorWidget-per-file + patch-reconstruction + custom
+comment view-zone stack accumulated 30+ patches of complexity and finally
+dead-ended in "TextModel got disposed before DiffEditorWidget model got
+reset" on every line click after the LSP-upgrade attempt. The plan is to
+rebuild on stock VS Code primitives — MultiDiffEditorWidget +
+ITextModelService + the native Comments API. This is the strip pass
+that clears the way.
+
+Removed:
+- KrtMonacoDiffView (custom DiffEditorWidget per file)
+- krtPatchReconstruct (compact patch-derived virtual text + realLines map)
+- KrtPrCommentController / KrtPrCommentThread / KrtPrCommentRegistry
+  (Phase 9.5 native-comments attempt, paused mid-Session-A)
+- krtCommentsView.contribution (Comments view registration)
+- krt-pr-base:// / krt-pr-head:// passthrough providers (only existed
+  to support createModelReference against the deleted virtual schemes)
+- composingAt / renderInlineComposer / attachReviewCommentZones /
+  pushReviewCommentsToController in the editor pane
+
+Kept:
+- KrtWorkspaceRegistry (Phase 8.6) — workspace folder owner/repo
+  mapping
+- KrtGitContentProvider (Phase 8.6) — krt-git:// scheme for
+  `git show baseSha:path`
+- KrtSwitchOps / KrtSwitchResumeService (Phase 8.7) — auto-checkout flow
+- PR sub-mode, Tour generation, Storyboard layout (sub-mode framework
+  still owns its non-diff DOM)
+
+Diff sub-mode body, Tour mini-diff bodies, and Storyboard chapter diff
+panel render placeholder text ("Diff view is being rebuilt on top of VS
+Code's MultiDiffEditor. Coming back shortly.") so the surrounding chrome
+still shows the file list / chapter list / graph / refs etc. Review-
+comment loading still happens (so Phase C has data to push through the
+new controller), but with no UI to surface it the comments stay invisible
+until then.
+
+Next: Phase B embeds MultiDiffEditorWidget in the diff sub-mode body
+with file:// (modified) + krt-git:// (original) URIs.
+
+Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+---
+ .../pr/krtCommentsView.contribution.ts        |  65 --
+ .../contrib/krt/browser/pr/krtMonacoDiff.ts   | 616 ------------------
+ .../krt/browser/pr/krtPatchReconstruct.ts     | 101 ---
+ .../krt/browser/pr/krtPrCommentController.ts  | 413 ------------
+ .../krt/browser/pr/krtPrCommentRegistry.ts    |  73 ---
+ .../krt/browser/pr/krtPrCommentThread.ts      | 160 -----
+ .../pr/krtPullRequestEditor.contribution.ts   |   8 -
+ .../browser/pr/krtPullRequestEditorPane.ts    | 240 +------
+ .../workspace/krtGitContentProvider.ts        |  32 -
+ 9 files changed, 16 insertions(+), 1692 deletions(-)
+ delete mode 100644 src/vs/workbench/contrib/krt/browser/pr/krtCommentsView.contribution.ts
+ delete mode 100644 src/vs/workbench/contrib/krt/browser/pr/krtMonacoDiff.ts
+ delete mode 100644 src/vs/workbench/contrib/krt/browser/pr/krtPatchReconstruct.ts
+ delete mode 100644 src/vs/workbench/contrib/krt/browser/pr/krtPrCommentController.ts
+ delete mode 100644 src/vs/workbench/contrib/krt/browser/pr/krtPrCommentRegistry.ts
+ delete mode 100644 src/vs/workbench/contrib/krt/browser/pr/krtPrCommentThread.ts
+
+diff --git a/src/vs/workbench/contrib/krt/browser/pr/krtCommentsView.contribution.ts b/src/vs/workbench/contrib/krt/browser/pr/krtCommentsView.contribution.ts
+deleted file mode 100644
+index 53b3ab91098..00000000000
+--- a/src/vs/workbench/contrib/krt/browser/pr/krtCommentsView.contribution.ts
++++ /dev/null
+@@ -1,65 +0,0 @@
+-/*---------------------------------------------------------------------------------------------
+- *  Copyright (c) Microsoft Corporation. All rights reserved.
+- *  Licensed under the MIT License. See License.txt in the project root for license information.
+- *--------------------------------------------------------------------------------------------*/
+-
+-import { Codicon } from '../../../../../base/common/codicons.js';
+-import { localize } from '../../../../../nls.js';
+-import { SyncDescriptor } from '../../../../../platform/instantiation/common/descriptors.js';
+-import { Registry } from '../../../../../platform/registry/common/platform.js';
+-import { registerIcon } from '../../../../../platform/theme/common/iconRegistry.js';
+-import { ViewPaneContainer } from '../../../../browser/parts/views/viewPaneContainer.js';
+-import {
+-	Extensions as ViewExtensions,
+-	IViewContainersRegistry,
+-	IViewsRegistry,
+-	ViewContainerLocation,
+-} from '../../../../common/views.js';
+-import { CommentsPanel } from '../../../comments/browser/commentsView.js';
+-import {
+-	COMMENTS_VIEW_ID,
+-	COMMENTS_VIEW_STORAGE_ID,
+-	COMMENTS_VIEW_TITLE,
+-} from '../../../comments/browser/commentsTreeViewer.js';
+-
+-/**
+- * Phase 9.5 — register the workbench's standard Comments view at
+- * boot. Upstream's `MainThreadComments` is the only thing that
+- * normally registers this view, and it only runs when an extension
+- * declares the `comments` contribution. KRT has no such extension —
+- * its review-comment data flows through `KrtPrCommentController`
+- * directly — so without this contribution the Comments view never
+- * shows up in the panel and the user has no aggregated thread list.
+- *
+- * `hideIfEmpty: true` keeps the view out of the panel when there are
+- * no threads anywhere; it appears as soon as `KrtPrCommentController`
+- * pushes its first batch of review comments through `updateComments`.
+- */
+-
+-const commentsViewIcon = registerIcon(
+-	'krt-comments-view-icon',
+-	Codicon.commentDiscussion,
+-	localize('krt.commentsViewIcon', "View icon of the comments view."),
+-);
+-
+-const VIEW_CONTAINER = Registry.as<IViewContainersRegistry>(ViewExtensions.ViewContainersRegistry).registerViewContainer({
+-	id: COMMENTS_VIEW_ID,
+-	title: COMMENTS_VIEW_TITLE,
+-	ctorDescriptor: new SyncDescriptor(ViewPaneContainer, [COMMENTS_VIEW_ID, { mergeViewWithContainerWhenSingleView: true }]),
+-	storageId: COMMENTS_VIEW_STORAGE_ID,
+-	hideIfEmpty: true,
+-	icon: commentsViewIcon,
+-	order: 10,
+-}, ViewContainerLocation.Panel);
+-
+-Registry.as<IViewsRegistry>(ViewExtensions.ViewsRegistry).registerViews([{
+-	id: COMMENTS_VIEW_ID,
+-	name: COMMENTS_VIEW_TITLE,
+-	canToggleVisibility: false,
+-	ctorDescriptor: new SyncDescriptor(CommentsPanel),
+-	canMoveView: true,
+-	containerIcon: commentsViewIcon,
+-	focusCommand: {
+-		id: 'workbench.action.focusCommentsPanel',
+-	},
+-}], VIEW_CONTAINER);
+diff --git a/src/vs/workbench/contrib/krt/browser/pr/krtMonacoDiff.ts b/src/vs/workbench/contrib/krt/browser/pr/krtMonacoDiff.ts
+deleted file mode 100644
+index 70723d76c24..00000000000
+--- a/src/vs/workbench/contrib/krt/browser/pr/krtMonacoDiff.ts
++++ /dev/null
+@@ -1,616 +0,0 @@
+-/*---------------------------------------------------------------------------------------------
+- *  Copyright (c) Microsoft Corporation. All rights reserved.
+- *  Licensed under the MIT License. See License.txt in the project root for license information.
+- *--------------------------------------------------------------------------------------------*/
+-
+-import * as DOM from '../../../../../base/browser/dom.js';
+-import { Disposable, DisposableStore, IDisposable, toDisposable } from '../../../../../base/common/lifecycle.js';
+-import { URI } from '../../../../../base/common/uri.js';
+-import { ICodeEditor, MouseTargetType } from '../../../../../editor/browser/editorBrowser.js';
+-import { DiffEditorWidget } from '../../../../../editor/browser/widget/diffEditor/diffEditorWidget.js';
+-import { RefCounted } from '../../../../../editor/browser/widget/diffEditor/utils.js';
+-import { ILanguageService } from '../../../../../editor/common/languages/language.js';
+-import { ITextModel } from '../../../../../editor/common/model.js';
+-import { IModelService } from '../../../../../editor/common/services/model.js';
+-import { ITextModelService } from '../../../../../editor/common/services/resolverService.js';
+-import { IInstantiationService } from '../../../../../platform/instantiation/common/instantiation.js';
+-import { IKrtGitService } from '../../../../../platform/krt/common/krtGit.js';
+-import { PullRequestFile } from '../../../../../platform/krt/common/krt.js';
+-import { ILogService } from '../../../../../platform/log/common/log.js';
+-import { encodeKrtGit } from '../workspace/krtGitContentProvider.js';
+-import { KrtWorkspace } from '../workspace/krtWorkspaceRegistry.js';
+-import { IKrtPrResource, registerKrtPrResource } from './krtPrCommentRegistry.js';
+-import { Reconstructed, reconstructFromPatch } from './krtPatchReconstruct.js';
+-
+-export type DiffSide = 'LEFT' | 'RIGHT';
+-
+-export interface IKrtMonacoDiffViewOptions {
+-	readonly owner: string;
+-	readonly repo: string;
+-	readonly baseSha: string;
+-	readonly headSha: string;
+-	/**
+-	 * `true` (default) = standard side-by-side view; `false` = inline
+-	 * (single editor with `+`/`-` decorations). Set per-card from the
+-	 * pane's persisted toggle preference.
+-	 */
+-	readonly renderSideBySide?: boolean;
+-	readonly file: PullRequestFile;
+-	/**
+-	 * Phase 8.6 — when a workspace is registered for the PR's repo,
+-	 * the head side mounts the real `file://` URI (so LSP / extension
+-	 * activation runs against it), and the base side resolves via the
+-	 * `krt-git://` content provider (`git show baseSha:path`).
+-	 *
+-	 * When omitted, falls back to the Phase 8.5 patch-reconstructed
+-	 * virtual URIs (`krt-pr-base://…` / `krt-pr-head://…`). These give
+-	 * syntax highlighting + intra-line diff colours but no LSP.
+-	 */
+-	readonly workspace?: KrtWorkspace;
+-	/**
+-	 * Phase 9.5 — identity passed through to
+-	 * `KrtPrCommentController` via the per-URI registry so review
+-	 * comments loaded by the pane can be matched back to the right
+-	 * diff editor (and the right side of it). Optional: when omitted,
+-	 * the diff renders without registering, so the native commenting
+-	 * gutter stays inactive (used by historical callers / tests that
+-	 * don't surface comments).
+-	 */
+-	readonly pr?: {
+-		readonly url: string;
+-		readonly number: number;
+-	};
+-}
+-
+-interface ILineZoneOptions {
+-	readonly side: DiffSide;
+-	readonly afterLine: number;
+-	readonly domNode: HTMLElement;
+-}
+-
+-// Card sizing — STATIC. We compute the editor's height from the patch
+-// up-front: every visible line in the patch becomes one row in the
+-// rendered diff, and each hunk implies a "+ N hidden lines" widget
+-// from Monaco's `hideUnchangedRegions` feature. Both are
+-// deterministic — the height is knowable before Monaco has rendered
+-// anything, so we never read `getContentHeight()` or poll. The wrapper
+-// element itself is *not* JS-sized; instead we pass the height to
+-// `widget.layout({width, height})` and Monaco writes it onto its own
+-// outer DOM, which the wrapper natural-fits via `height: auto`.
+-//
+-// `onDidContentSizeChange` still drives re-layout for content growth
+-// that ISN'T knowable from the patch (review-comment view zones,
+-// user expanding a hidden region) — those rare events refit Monaco
+-// directly without touching the wrapper's CSS.
+-const LINE_HEIGHT_PX = 19;
+-const MIN_CARD_HEIGHT_PX = 80;
+-const CARD_CHROME_PX = 12;
+-
+-/**
+- * Compute the editor height we expect Monaco to render the patch at.
+- * Patch-direct rendering: each non-meta patch line becomes one row in
+- * the modified-side editor (or original-side, whichever has more —
+- * the diff editor's height is `max(modified, original)`). Take the
+- * larger of the two side counts so the container is sized for the
+- * tallest side.
+- */
+-function estimateEditorHeight(patch: string | undefined): number {
+-	if (!patch) {
+-		return MIN_CARD_HEIGHT_PX;
+-	}
+-	let baseLines = 0;
+-	let headLines = 0;
+-	for (const raw of patch.split('\n')) {
+-		if (raw.startsWith('@@') || raw.length === 0 || raw.startsWith('\\')) {
+-			continue;
+-		}
+-		if (raw.startsWith('+')) {
+-			headLines++;
+-		} else if (raw.startsWith('-')) {
+-			baseLines++;
+-		} else {
+-			// context line — counts on both sides
+-			baseLines++;
+-			headLines++;
+-		}
+-	}
+-	const tallestSide = Math.max(baseLines, headLines);
+-	return Math.max(tallestSide * LINE_HEIGHT_PX + CARD_CHROME_PX, MIN_CARD_HEIGHT_PX);
+-}
+-
+-/**
+- * Embeds Monaco's `DiffEditorWidget` in a container, populates it with
+- * patch-reconstructed base/head models, and exposes a tiny API for
+- * attaching review-comment view zones.
+- *
+- * Owns the two text models it creates and disposes them on `dispose()`.
+- * Auto-sizes the container height to the diff's content height (capped
+- * at `MAX_HEIGHT_PX` to keep giant patches scrollable).
+- */
+-export class KrtMonacoDiffView extends Disposable {
+-
+-	private readonly widget: DiffEditorWidget;
+-	private readonly container: HTMLElement;
+-	private readonly zoneDisposables = this._register(new DisposableStore());
+-	private readonly resourceRegistrations = this._register(new DisposableStore());
+-	private baseRealLines: ReadonlyArray<number | undefined> = [];
+-	private headRealLines: ReadonlyArray<number | undefined> = [];
+-	private activeComposerZone: IDisposable | undefined;
+-
+-	constructor(
+-		parent: HTMLElement,
+-		private readonly opts: IKrtMonacoDiffViewOptions,
+-		@IInstantiationService instantiationService: IInstantiationService,
+-		@IModelService private readonly modelService: IModelService,
+-		@ILanguageService private readonly languageService: ILanguageService,
+-		@ITextModelService private readonly textModelService: ITextModelService,
+-		@IKrtGitService private readonly gitService: IKrtGitService,
+-		@ILogService private readonly logService: ILogService,
+-	) {
+-		super();
+-
+-		this.container = DOM.append(parent, DOM.$('.krt-pr-diff-monaco'));
+-		// One-shot static height from the patch — see `estimateEditorHeight`.
+-		// No polling, no `getContentHeight`-races. The width comes from
+-		// `automaticLayout: true` watching the wrapper's CSS-driven width.
+-		this.container.style.height = `${estimateEditorHeight(opts.file.patch)}px`;
+-
+-		// Pass `{}` (no `contributions` field) for the per-editor widget
+-		// options so the diff editor's inner CodeEditorWidgets fall back
+-		// to the full registered-contribution set — same as a regular
+-		// file editor. Filtering to a subset here suppresses the hover /
+-		// goto-definition feature stack — those contributions register
+-		// themselves into the global list and the widget only instantiates
+-		// them when the field is left undefined. The native review-
+-		// comment controller (`editor.contrib.review`) is part of the
+-		// default set, so comments still attach.
+-		this.widget = this._register(instantiationService.createInstance(
+-			DiffEditorWidget,
+-			this.container,
+-			{
+-				readOnly: true,
+-				originalEditable: false,
+-				renderSideBySide: opts.renderSideBySide ?? true,
+-				useInlineViewWhenSpaceIsLimited: true,
+-				// Default OFF — the async resolution below flips this on
+-				// when both sides upgrade to full content. With virtual
+-				// patch-direct models there's nothing to fold.
+-				hideUnchangedRegions: { enabled: false },
+-				renderOverviewRuler: false,
+-				automaticLayout: true,
+-				scrollBeyondLastLine: false,
+-				minimap: { enabled: false },
+-				scrollbar: {
+-					handleMouseWheel: true,
+-					alwaysConsumeMouseWheel: false,
+-				},
+-				lineNumbersMinChars: 4,
+-			},
+-			{
+-				originalEditor: {},
+-				modifiedEditor: {},
+-			},
+-		));
+-
+-		// Pre-compute the patch-derived realLines map so synchronously-
+-		// wired callers (line-number click handler, comment registry
+-		// during initial mount) see the right map. The async
+-		// `attachModels` overwrites these with identity maps when the
+-		// workspace upgrade succeeds.
+-		const reconstructed = reconstructFromPatch(opts.file.patch ?? '');
+-		this.baseRealLines = reconstructed.base.realLines;
+-		this.headRealLines = reconstructed.head.realLines;
+-
+-		// Single-shot model attachment. Mixing the previous
+-		// "synchronously mount virtual, asynchronously upgrade" pattern
+-		// caused Monaco's `_diffModel` autorun to fire `onWillDispose`
+-		// errors on later model interactions ("TextModel got disposed
+-		// before DiffEditorWidget model got reset"). Calling
+-		// `setDiffModel` exactly once eliminates the swap entirely.
+-		// Trade-off: the diff is briefly empty (~50ms) while resolution
+-		// runs; on a fast path the user usually doesn't notice.
+-		void this.attachModels(reconstructed);
+-
+-		// `onDidContentSizeChange` only matters for changes the static
+-		// estimate can't predict — review-comment view zones rendering
+-		// markdown, the user expanding a "+ N hidden lines" region. On
+-		// any such fire, refresh the wrapper's height from Monaco's
+-		// current content height. (This is the one place runtime
+-		// re-sizing can happen; on first construction the height is
+-		// set up-front from the patch, no Monaco APIs consulted.)
+-		this._register(this.widget.onDidContentSizeChange(() => {
+-			const target = Math.max(
+-				this.widget.getContentHeight() + CARD_CHROME_PX,
+-				MIN_CARD_HEIGHT_PX,
+-			);
+-			if (this.container.clientHeight !== target) {
+-				this.container.style.height = `${target}px`;
+-			}
+-		}));
+-	}
+-
+-	private virtualBaseUri(): URI {
+-		const previousPath = this.opts.file.previousPath ?? this.opts.file.path;
+-		return URI.parse(`krt-pr-base://${encodeURIComponent(this.opts.owner)}/${encodeURIComponent(this.opts.repo)}/${encodeURIComponent(this.opts.baseSha)}/${encodeURI(previousPath)}`);
+-	}
+-
+-	private virtualHeadUri(): URI {
+-		return URI.parse(`krt-pr-head://${encodeURIComponent(this.opts.owner)}/${encodeURIComponent(this.opts.repo)}/${encodeURIComponent(this.opts.headSha)}/${encodeURI(this.opts.file.path)}`);
+-	}
+-
+-	private getOrCreate(uri: URI, value: string): ITextModel {
+-		const existing = this.modelService.getModel(uri);
+-		if (existing) {
+-			return existing;
+-		}
+-		return this.modelService.createModel(
+-			value,
+-			this.languageService.createByFilepathOrFirstLine(uri),
+-			uri,
+-			false,
+-		);
+-	}
+-
+-	private buildVirtualModels(reconstructed: Reconstructed): { base: ITextModel; head: ITextModel } {
+-		const baseModel = this.getOrCreate(this.virtualBaseUri(), reconstructed.base.text);
+-		const headModel = this.getOrCreate(this.virtualHeadUri(), reconstructed.head.text);
+-		return { base: baseModel, head: headModel };
+-	}
+-
+-	/**
+-	 * Single-shot model resolution + attach. Picks workspace-backed
+-	 * URIs (file:// + krt-git://) when the working tree is on the PR
+-	 * head and both sides resolve cleanly, otherwise falls back to the
+-	 * patch-reconstructed virtual URIs. Calls `setDiffModel` exactly
+-	 * once — the previous "synchronous virtual then async upgrade"
+-	 * pattern triggered Monaco's `onWillDispose`-on-old-model error
+-	 * path on subsequent interactions.
+-	 */
+-	private async attachModels(reconstructed: Reconstructed): Promise<void> {
+-		const upgrade = this.opts.workspace
+-			? await this.tryWorkspaceModels(this.opts.workspace)
+-			: undefined;
+-		if (this._store.isDisposed) {
+-			return;
+-		}
+-
+-		let base: ITextModel;
+-		let head: ITextModel;
+-		let identity: boolean;
+-		if (upgrade) {
+-			base = upgrade.base;
+-			head = upgrade.head;
+-			this.baseRealLines = identityArray(base.getLineCount());
+-			this.headRealLines = identityArray(head.getLineCount());
+-			identity = true;
+-		} else {
+-			const virtual = this.buildVirtualModels(reconstructed);
+-			base = virtual.base;
+-			head = virtual.head;
+-			this.baseRealLines = reconstructed.base.realLines;
+-			this.headRealLines = reconstructed.head.realLines;
+-			identity = false;
+-		}
+-
+-		this.applyDiffModel(base, head);
+-		this.applyLineNumbers(identity);
+-		this.registerCommentResources(base.uri, head.uri);
+-
+-		if (identity) {
+-			// Both sides full content — collapse unchanged regions so
+-			// the visual stays focused on the changes plus a few lines
+-			// of real surrounding context. On virtual models this would
+-			// reveal padding blanks (or, with patch-direct rendering,
+-			// nothing) so we leave it off there.
+-			this.widget.updateOptions({
+-				hideUnchangedRegions: { enabled: true, contextLineCount: 3, minimumLineCount: 4 },
+-			});
+-		}
+-	}
+-
+-	private applyDiffModel(base: ITextModel, head: ITextModel): void {
+-		// Phase 8.5/8.6 — view-model refcount workaround. The public
+-		// `setModel({original, modified})` path goes through
+-		// `RefCounted.create(...)` once and `createNewRef` once, leaving
+-		// refcount = 2 with no caller-owned reference for the base ref.
+-		// The widget's `setDiffModel(null)` only releases the cloned ref
+-		// (count → 1), so the inner `DiffEditorViewModel` and its
+-		// `autorunWithStore` never reach 0 → leaked-disposable warnings
+-		// in dev mode and (on some Electron versions) the diff fails to
+-		// render at all because the view-model's autoruns block layout.
+-		//
+-		// Workaround: build the view model ourselves and feed it through
+-		// `setDiffModel(RefCounted.create(viewModel))`. Internally
+-		// `setDiffModel` calls `createNewRef(this)` (refcount = 2). When
+-		// we dispose, the registered base ref decrements to 1; when the
+-		// widget disposes (also from our store), `_diffModelSrc` clears
+-		// → cloned ref disposes → refcount = 0 → view-model torn down
+-		// cleanly.
+-		const viewModel = this.widget.createViewModel({ original: base, modified: head });
+-		const ref = RefCounted.create(viewModel);
+-		this._register(toDisposable(() => ref.dispose()));
+-		this.widget.setDiffModel(ref);
+-	}
+-
+-	private applyLineNumbers(identity: boolean): void {
+-		// Per-side line-number callback — model line N → real file line.
+-		// Identity (model line == real file line) is used when both sides
+-		// are full-content models from the workspace. Otherwise the
+-		// patch-derived sparse map maps model line N back to the original
+-		// file's line number.
+-		if (identity) {
+-			this.widget.getOriginalEditor().updateOptions({ lineNumbers: 'on' });
+-			this.widget.getModifiedEditor().updateOptions({ lineNumbers: 'on' });
+-			return;
+-		}
+-		this.widget.getOriginalEditor().updateOptions({
+-			lineNumbers: (n: number) => formatRealLine(this.baseRealLines[n - 1]),
+-		});
+-		this.widget.getModifiedEditor().updateOptions({
+-			lineNumbers: (n: number) => formatRealLine(this.headRealLines[n - 1]),
+-		});
+-	}
+-
+-	private registerCommentResources(baseUri: URI, headUri: URI): void {
+-		this.resourceRegistrations.clear();
+-		if (!this.opts.pr) {
+-			return;
+-		}
+-		const path = this.opts.file.path;
+-		const previousPath = this.opts.file.previousPath ?? path;
+-		this.logService.info(`[krt] diff view registering URIs for PR ${this.opts.pr.url}: base=${baseUri.toString()} head=${headUri.toString()}`);
+-		const prMeta = {
+-			url: this.opts.pr.url,
+-			owner: this.opts.owner,
+-			repo: this.opts.repo,
+-			number: this.opts.pr.number,
+-			headSha: this.opts.headSha,
+-		};
+-		this.resourceRegistrations.add(registerKrtPrResource(baseUri, {
+-			side: 'LEFT',
+-			path,
+-			previousPath,
+-			realLines: this.baseRealLines,
+-			pr: prMeta,
+-		} satisfies IKrtPrResource));
+-		this.resourceRegistrations.add(registerKrtPrResource(headUri, {
+-			side: 'RIGHT',
+-			path,
+-			previousPath,
+-			realLines: this.headRealLines,
+-			pr: prMeta,
+-		} satisfies IKrtPrResource));
+-	}
+-
+-	/**
+-	 * Resolve workspace-backed text models so language extensions
+-	 * (rust-analyzer, gopls, pyright, …) activate against the head
+-	 * side. Head: real `file://` URI when the working tree is on the
+-	 * PR's head SHA — that's the URI scheme language servers anchor
+-	 * on. Base: `krt-git://` whose content provider shells `git show
+-	 * ${baseSha}:${path}`.
+-	 *
+-	 * **All-or-nothing.** Mixing full content on one side with the
+-	 * patch-reconstructed virtual model on the other looks visually
+-	 * broken: the diff editor compares them and every line outside the
+-	 * patch's hunks shows as a difference. So we only return models
+-	 * when *both* sides resolve cleanly; any failure (working tree
+-	 * drifted, base SHA not fetched, …) returns `undefined` and the
+-	 * caller falls back to the virtual diff.
+-	 *
+-	 * Added/removed files keep the virtual diff: the patch already
+-	 * shows their full content (one side is empty, the other is
+-	 * everything). LSP for those isn't worth the per-side complexity.
+-	 */
+-	private async tryWorkspaceModels(workspace: KrtWorkspace): Promise<{ base: ITextModel; head: ITextModel } | undefined> {
+-		const file = this.opts.file;
+-		if (file.status === 'added' || file.status === 'removed') {
+-			return undefined;
+-		}
+-		const path = file.path;
+-		const previousPath = file.previousPath ?? path;
+-
+-		// Working tree must be on PR head — otherwise file:// would
+-		// reflect a different commit's content and the diff would show
+-		// the wrong "head" on the right side.
+-		let workingTreeSha: string;
+-		try {
+-			workingTreeSha = await this.gitService.getHeadSha(workspace.folderPath);
+-		} catch (err) {
+-			this.logService.warn(`[krt] diff: getHeadSha failed for ${workspace.folderPath} — staying on virtual diff`, err);
+-			return undefined;
+-		}
+-		if (this._store.isDisposed) {
+-			return undefined;
+-		}
+-		if (workingTreeSha !== this.opts.headSha) {
+-			this.logService.info(
+-				`[krt] diff: workspace ${workspace.folderPath} is on ${workingTreeSha.slice(0, 7)} but PR head is ${this.opts.headSha.slice(0, 7)} — staying on virtual diff (no LSP). Check out the PR head SHA to enable LSP.`,
+-			);
+-			return undefined;
+-		}
+-
+-		// Resolve both sides in parallel via `allSettled` so a one-sided
+-		// failure doesn't leak the other side's reference.
+-		const headFileUri = URI.joinPath(URI.file(workspace.folderPath), path);
+-		const baseGitUri = encodeKrtGit(workspace.folderUri, this.opts.baseSha, previousPath);
+-		const [headSettled, baseSettled] = await Promise.allSettled([
+-			this.textModelService.createModelReference(headFileUri),
+-			this.textModelService.createModelReference(baseGitUri),
+-		]);
+-		const headRef = headSettled.status === 'fulfilled' ? headSettled.value : undefined;
+-		const baseRef = baseSettled.status === 'fulfilled' ? baseSettled.value : undefined;
+-		if (this._store.isDisposed) {
+-			headRef?.dispose();
+-			baseRef?.dispose();
+-			return undefined;
+-		}
+-		if (!headRef || !baseRef) {
+-			if (headSettled.status === 'rejected') {
+-				this.logService.warn(`[krt] diff: head LSP upgrade failed for ${path}`, headSettled.reason);
+-			}
+-			if (baseSettled.status === 'rejected') {
+-				this.logService.warn(
+-					`[krt] diff: base LSP upgrade failed for ${path}@${this.opts.baseSha.slice(0, 7)} — base SHA may not be fetched in ${workspace.folderPath}`,
+-					baseSettled.reason,
+-				);
+-			}
+-			headRef?.dispose();
+-			baseRef?.dispose();
+-			return undefined;
+-		}
+-
+-		this._register(headRef);
+-		this._register(baseRef);
+-
+-		return {
+-			base: baseRef.object.textEditorModel,
+-			head: headRef.object.textEditorModel,
+-		};
+-	}
+-
+-	/**
+-	 * Attach a DOM node as a Monaco view zone after the given line on the
+-	 * specified side. Returns a disposable that removes the zone.
+-	 *
+-	 * The caller's `domNode` is wrapped in a host div before being handed
+-	 * to Monaco — Monaco writes `style.height` directly onto whatever
+-	 * node we hand it, and a non-`box-sizing: content-box` host avoids
+-	 * the height-feedback loop where padding/borders bump `offsetHeight`
+-	 * past the assigned height on every observer pass.
+-	 */
+-	addLineZone(opts: ILineZoneOptions): IDisposable {
+-		const editor = opts.side === 'RIGHT' ? this.widget.getModifiedEditor() : this.widget.getOriginalEditor();
+-		// Callers pass `afterLine` as a *real file* line number (what
+-		// review comments and the inline composer think in). With patch-
+-		// direct rendering the model line differs from the file line, so
+-		// translate via the per-side map. Fallback: if the real line
+-		// isn't in the patch (e.g. a comment anchored to an unchanged
+-		// line that wasn't included in the diff context), drop the zone.
+-		const modelLine = this.realLineToModelLine(opts.side, opts.afterLine);
+-		if (modelLine === undefined) {
+-			return Disposable.None as IDisposable;
+-		}
+-		const host = document.createElement('div');
+-		host.className = 'krt-pr-diff-zone-host';
+-		host.style.boxSizing = 'border-box';
+-		host.appendChild(opts.domNode);
+-
+-		let zoneId: string | null = null;
+-		editor.changeViewZones(accessor => {
+-			zoneId = accessor.addZone({
+-				afterLineNumber: modelLine,
+-				domNode: host,
+-				heightInPx: Math.max(host.offsetHeight, 80),
+-			});
+-		});
+-
+-		// Resize whenever the inner DOM grows (e.g. markdown finishes
+-		// rendering or the user expands a long comment).
+-		const observer = new ResizeObserver(() => {
+-			if (zoneId === null) {
+-				return;
+-			}
+-			const measured = opts.domNode.offsetHeight + 16; // host padding budget
+-			editor.changeViewZones(accessor => {
+-				accessor.layoutZone(zoneId!);
+-			});
+-			if (host.offsetHeight !== measured && measured > 0) {
+-				editor.changeViewZones(accessor => {
+-					accessor.removeZone(zoneId!);
+-					zoneId = accessor.addZone({
+-						afterLineNumber: modelLine,
+-						domNode: host,
+-						heightInPx: measured,
+-					});
+-				});
+-			}
+-		});
+-		observer.observe(opts.domNode);
+-
+-		const dispose = toDisposable(() => {
+-			observer.disconnect();
+-			if (zoneId !== null) {
+-				editor.changeViewZones(accessor => accessor.removeZone(zoneId!));
+-				zoneId = null;
+-			}
+-		});
+-		this.zoneDisposables.add(dispose);
+-		return dispose;
+-	}
+-
+-	/**
+-	 * Wire a click handler on both editors' line-number gutters. The
+-	 * callback receives the side ('LEFT' | 'RIGHT') and the file's real
+-	 * line number on that side. Used by the diff sub-mode to open the
+-	 * inline composer when a reviewer clicks a line number.
+-	 */
+-	onLineNumberClick(callback: (side: DiffSide, line: number) => void): IDisposable {
+-		const wire = (editor: ICodeEditor, side: DiffSide) =>
+-			editor.onMouseDown(e => {
+-				if (e.target.type !== MouseTargetType.GUTTER_LINE_NUMBERS) {
+-					return;
+-				}
+-				const modelLine = e.target.position?.lineNumber;
+-				if (modelLine === undefined) {
+-					return;
+-				}
+-				// Read realLines through `this` so the async-resolution
+-				// path that swaps the patch-derived sparse map for an
+-				// identity map is visible here. Capturing the array at
+-				// `wire` time strands the click handler with the old map.
+-				const realLines = side === 'RIGHT' ? this.headRealLines : this.baseRealLines;
+-				const real = realLines[modelLine - 1];
+-				if (real !== undefined) {
+-					callback(side, real);
+-				}
+-			});
+-		const store = new DisposableStore();
+-		store.add(wire(this.widget.getModifiedEditor(), 'RIGHT'));
+-		store.add(wire(this.widget.getOriginalEditor(), 'LEFT'));
+-		this._register(store);
+-		return store;
+-	}
+-
+-	/**
+-	 * Mount a single inline composer at the given (side, real-line)
+-	 * location. Replaces any previously-mounted composer in this view
+-	 * — KRT's contract is one composer at a time per file. Returns
+-	 * the disposable that removes the zone.
+-	 */
+-	mountComposer(side: DiffSide, line: number, domNode: HTMLElement): IDisposable {
+-		this.dismountComposer();
+-		const zone = this.addLineZone({ side, afterLine: this.realLineToModelLine(side, line) ?? line, domNode });
+-		this.activeComposerZone = zone;
+-		return zone;
+-	}
+-
+-	dismountComposer(): void {
+-		this.activeComposerZone?.dispose();
+-		this.activeComposerZone = undefined;
+-	}
+-
+-	/**
+-	 * `addLineZone` takes a model line (the editor's internal numbering),
+-	 * but external callers (review comments, the click-to-comment
+-	 * composer) think in real file lines. This helper inverts the
+-	 * `realLines` map.
+-	 */
+-	realLineToModelLine(side: DiffSide, real: number): number | undefined {
+-		const arr = side === 'RIGHT' ? this.headRealLines : this.baseRealLines;
+-		const idx = arr.indexOf(real);
+-		return idx === -1 ? undefined : idx + 1;
+-	}
+-}
+-
+-function formatRealLine(real: number | undefined): string {
+-	return real !== undefined ? String(real) : '';
+-}
+-
+-function identityArray(n: number): ReadonlyArray<number> {
+-	const arr: number[] = new Array(n);
+-	for (let i = 0; i < n; i++) {
+-		arr[i] = i + 1;
+-	}
+-	return arr;
+-}
+diff --git a/src/vs/workbench/contrib/krt/browser/pr/krtPatchReconstruct.ts b/src/vs/workbench/contrib/krt/browser/pr/krtPatchReconstruct.ts
+deleted file mode 100644
+index ea86ba27a51..00000000000
+--- a/src/vs/workbench/contrib/krt/browser/pr/krtPatchReconstruct.ts
++++ /dev/null
+@@ -1,101 +0,0 @@
+-/*---------------------------------------------------------------------------------------------
+- *  Copyright (c) Microsoft Corporation. All rights reserved.
+- *  Licensed under the MIT License. See License.txt in the project root for license information.
+- *--------------------------------------------------------------------------------------------*/
+-
+-/**
+- * Reconstructs the base and head sides of a unified-diff patch into
+- * compact text bodies for `KrtMonacoDiffView`. v2 (patch-direct):
+- * each model line corresponds to one real patch line. No padding
+- * between hunks — instead the diff editor renders only what's in the
+- * patch, and a `realLineNumbers` map lets the line-number gutter
+- * display the file's actual line numbers (549, 550, …) instead of
+- * the model's sequential 1, 2, ….
+- *
+- * Why this shape (vs. earlier blank-padded reconstruction):
+- *   - No empty rows. Earlier versions padded gaps between hunks with
+- *     `''` strings so model lines = file lines; that fed Monaco's
+- *     `hideUnchangedRegions` feature, but expanding a "+ N hidden
+- *     lines" widget revealed those padding blanks.
+- *   - hideUnchangedRegions becomes irrelevant — the patch already
+- *     trims to context+changes per hunk; no large unchanged regions
+- *     to fold.
+- *
+- * Format reminder (unified diff):
+- *
+- *   @@ -<oldStart>,<oldLines> +<newStart>,<newLines> @@ optional
+- *    context line                                          (' ' prefix)
+- *   -removed line                                           ('-' prefix)
+- *   +added line                                             ('+' prefix)
+- *   \ No newline at end of file                             ('\' prefix — skip)
+- */
+-
+-const HUNK_HEADER_RE = /^@@\s+-(?<oldStart>\d+)(?:,(?<oldLines>\d+))?\s+\+(?<newStart>\d+)(?:,(?<newLines>\d+))?\s+@@/;
+-
+-export interface ReconstructedSide {
+-	readonly text: string;
+-	/**
+-	 * For each model line (1-indexed), the corresponding real file
+-	 * line number on this side. `undefined` for lines that don't exist
+-	 * on this side (e.g., a `+` line is undefined in the base map).
+-	 */
+-	readonly realLines: ReadonlyArray<number | undefined>;
+-}
+-
+-export interface Reconstructed {
+-	readonly base: ReconstructedSide;
+-	readonly head: ReconstructedSide;
+-}
+-
+-export function reconstructFromPatch(patch: string): Reconstructed {
+-	const baseLines: string[] = [];
+-	const headLines: string[] = [];
+-	const baseRealLines: (number | undefined)[] = [];
+-	const headRealLines: (number | undefined)[] = [];
+-
+-	let oldLine = 0;
+-	let newLine = 0;
+-
+-	for (const raw of patch.split('\n')) {
+-		const header = HUNK_HEADER_RE.exec(raw);
+-		if (header) {
+-			oldLine = Number(header.groups!.oldStart);
+-			newLine = Number(header.groups!.newStart);
+-			continue;
+-		}
+-		if (raw.startsWith('\\') || raw.length === 0) {
+-			// `\ No newline at end of file` — informational, doesn't
+-			// belong on either side. Trailing empty line at split end
+-			// is the same: skip.
+-			continue;
+-		}
+-		if (raw.startsWith('+')) {
+-			headLines.push(raw.slice(1));
+-			headRealLines.push(newLine);
+-			newLine++;
+-			continue;
+-		}
+-		if (raw.startsWith('-')) {
+-			baseLines.push(raw.slice(1));
+-			baseRealLines.push(oldLine);
+-			oldLine++;
+-			continue;
+-		}
+-		if (raw.startsWith(' ')) {
+-			const content = raw.slice(1);
+-			baseLines.push(content);
+-			baseRealLines.push(oldLine);
+-			headLines.push(content);
+-			headRealLines.push(newLine);
+-			oldLine++;
+-			newLine++;
+-			continue;
+-		}
+-		// Pre-image / metadata lines (rare in modern unified diffs).
+-	}
+-
+-	return {
+-		base: { text: baseLines.join('\n'), realLines: baseRealLines },
+-		head: { text: headLines.join('\n'), realLines: headRealLines },
+-	};
+-}
+diff --git a/src/vs/workbench/contrib/krt/browser/pr/krtPrCommentController.ts b/src/vs/workbench/contrib/krt/browser/pr/krtPrCommentController.ts
+deleted file mode 100644
+index 65b955b4055..00000000000
+--- a/src/vs/workbench/contrib/krt/browser/pr/krtPrCommentController.ts
++++ /dev/null
+@@ -1,413 +0,0 @@
+-/*---------------------------------------------------------------------------------------------
+- *  Copyright (c) Microsoft Corporation. All rights reserved.
+- *  Licensed under the MIT License. See License.txt in the project root for license information.
+- *--------------------------------------------------------------------------------------------*/
+-
+-import { CancellationToken } from '../../../../../base/common/cancellation.js';
+-import { Disposable, toDisposable } from '../../../../../base/common/lifecycle.js';
+-import { URI, UriComponents } from '../../../../../base/common/uri.js';
+-import { IRange } from '../../../../../editor/common/core/range.js';
+-import {
+-	Comment as LanguageComment,
+-	CommentReaction,
+-	CommentThread,
+-	CommentThreadCollapsibleState,
+-} from '../../../../../editor/common/languages.js';
+-import { createDecorator } from '../../../../../platform/instantiation/common/instantiation.js';
+-import { ILogService } from '../../../../../platform/log/common/log.js';
+-import {
+-	ICommentController,
+-	ICommentInfo,
+-	ICommentService,
+-	INotebookCommentInfo,
+-} from '../../../comments/browser/commentService.js';
+-import { Comment as KrtComment } from '../../../../../platform/krt/common/krt.js';
+-import {
+-	findKrtPrResourcesByPrUrl,
+-	IKrtPrResource,
+-	lookupKrtPrResource,
+-	onDidChangeKrtPrResources,
+-} from './krtPrCommentRegistry.js';
+-import { KrtPrCommentThread } from './krtPrCommentThread.js';
+-
+-export const KRT_PR_COMMENT_OWNER = 'krt-pr';
+-
+-/**
+- * Internal-to-KRT facet of the controller — the pane uses this to push
+- * GitHub review comments through after `loadReviewComments` resolves,
+- * keyed by PR url so the controller can fan out to whichever diff
+- * URIs are currently mounted for that PR.
+- *
+- * The `ICommentController` facet (consumed by the workbench's
+- * `ICommentService`) is implemented on the same singleton so that
+- * registration is automatic on workbench startup.
+- */
+-export interface IKrtPrCommentController {
+-	readonly _serviceBrand: undefined;
+-	setCommentsForPr(prUrl: string, comments: readonly KrtComment[]): void;
+-	clearCommentsForPr(prUrl: string): void;
+-}
+-
+-export const IKrtPrCommentController = createDecorator<IKrtPrCommentController>('krtPrCommentController');
+-
+-export class KrtPrCommentController extends Disposable implements ICommentController, IKrtPrCommentController {
+-
+-	declare readonly _serviceBrand: undefined;
+-
+-	readonly id = KRT_PR_COMMENT_OWNER;
+-	readonly label = 'KRT';
+-	readonly owner = KRT_PR_COMMENT_OWNER;
+-	readonly features = {};
+-	activeComment: { thread: CommentThread; comment?: LanguageComment } | undefined;
+-
+-	/** uri.toString() → owned threads at that URI. */
+-	private readonly threadsByUri = new Map<string, KrtPrCommentThread[]>();
+-	/** PR URL → set of URIs currently owned (for fast clearCommentsForPr). */
+-	private readonly urisByPr = new Map<string, Set<string>>();
+-	/** Last-known KRT comments for a PR — replayed when a diff URI mounts late. */
+-	private readonly cachedCommentsByPr = new Map<string, readonly KrtComment[]>();
+-
+-	private nextHandle = 1;
+-
+-	constructor(
+-		@ICommentService private readonly commentService: ICommentService,
+-		@ILogService private readonly logService: ILogService,
+-	) {
+-		super();
+-		commentService.registerCommentController(KRT_PR_COMMENT_OWNER, this);
+-		this._register(toDisposable(() => commentService.unregisterCommentController(KRT_PR_COMMENT_OWNER)));
+-		this.logService.info('[krt] comment controller registered');
+-
+-		// When a diff view mounts (registry adds a URI), replay any
+-		// cached comments so the editor's freshly-attached
+-		// CommentController contribution sees populated threads on its
+-		// first `getDocumentComments` call. Without this, comments
+-		// loaded before the diff was rendered would stay invisible
+-		// until the next pane re-render.
+-		//
+-		// Microtask-coalesced: a single PR re-render churns O(2N) URI
+-		// register/unregister events. Each `applyForPr` is itself O(N)
+-		// (one `setDocumentComments` per URI), so naively replaying
+-		// per-event is quadratic. Coalescing collapses the burst into
+-		// a single replay after the registry stabilises.
+-		let scheduled = false;
+-		this._register(onDidChangeKrtPrResources(() => {
+-			if (scheduled) {
+-				return;
+-			}
+-			scheduled = true;
+-			queueMicrotask(() => {
+-				scheduled = false;
+-				if (this._store.isDisposed) {
+-					return;
+-				}
+-				this.logService.info('[krt] comment registry change burst, replaying cached comments');
+-				this.replayCached();
+-			});
+-		}));
+-	}
+-
+-	setCommentsForPr(prUrl: string, comments: readonly KrtComment[]): void {
+-		this.logService.info(`[krt] setCommentsForPr ${prUrl}: ${comments.length} comments`);
+-		this.cachedCommentsByPr.set(prUrl, comments);
+-		this.applyForPr(prUrl);
+-	}
+-
+-	clearCommentsForPr(prUrl: string): void {
+-		this.cachedCommentsByPr.delete(prUrl);
+-		const owned = this.urisByPr.get(prUrl);
+-		if (!owned) {
+-			return;
+-		}
+-		for (const key of owned) {
+-			const previousThreads = this.threadsByUri.get(key);
+-			if (previousThreads && previousThreads.length > 0) {
+-				this.threadsByUri.delete(key);
+-				this.commentService.updateComments(KRT_PR_COMMENT_OWNER, {
+-					added: [],
+-					removed: previousThreads,
+-					changed: [],
+-					pending: [],
+-				});
+-				this.commentService.setDocumentComments(URI.parse(key), this.commentInfosForUri(URI.parse(key)));
+-				for (const t of previousThreads) {
+-					t.dispose();
+-				}
+-			}
+-		}
+-		this.urisByPr.delete(prUrl);
+-		// Mirror the post-applyForPr snapshot push so the model stays
+-		// in sync — clearing only one PR shouldn't drop other PRs'
+-		// threads from the panel.
+-		const allThreads: KrtPrCommentThread[] = [];
+-		for (const threads of this.threadsByUri.values()) {
+-			allThreads.push(...threads);
+-		}
+-		this.commentService.setWorkspaceComments(KRT_PR_COMMENT_OWNER, allThreads);
+-	}
+-
+-	async getDocumentComments(resource: URI, _token: CancellationToken): Promise<ICommentInfo<IRange>> {
+-		const meta = lookupKrtPrResource(resource);
+-		const threads = this.threadsByUri.get(resource.toString()) ?? [];
+-		const ranges: IRange[] = [];
+-		if (meta) {
+-			for (let i = 0; i < meta.realLines.length; i++) {
+-				if (meta.realLines[i] !== undefined) {
+-					const ln = i + 1;
+-					ranges.push({ startLineNumber: ln, startColumn: 1, endLineNumber: ln, endColumn: 1 });
+-				}
+-			}
+-		}
+-		this.logService.info(`[krt] getDocumentComments ${resource.toString()}: meta=${meta ? `${meta.side} ${meta.path}` : 'none'} threads=${threads.length} ranges=${ranges.length}`);
+-		return {
+-			uniqueOwner: KRT_PR_COMMENT_OWNER,
+-			label: this.label,
+-			threads,
+-			commentingRanges: { resource, ranges, fileComments: false },
+-		};
+-	}
+-
+-	async getNotebookComments(_resource: URI, _token: CancellationToken): Promise<INotebookCommentInfo> {
+-		return { uniqueOwner: KRT_PR_COMMENT_OWNER, label: this.label, threads: [] };
+-	}
+-
+-	// Session B will implement these. Until then they're no-ops so the
+-	// `ICommentController` interface is satisfied without falsely
+-	// claiming the user can post via the native `+`.
+-	async createCommentThreadTemplate(_resource: UriComponents, _range: IRange | undefined, _editorId?: string): Promise<void> {
+-		return;
+-	}
+-
+-	async updateCommentThreadTemplate(_threadHandle: number, _range: IRange): Promise<void> {
+-		return;
+-	}
+-
+-	deleteCommentThreadMain(_commentThreadId: string): void {
+-		return;
+-	}
+-
+-	async toggleReaction(_uri: URI, _thread: CommentThread, _comment: LanguageComment, _reaction: CommentReaction, _token: CancellationToken): Promise<void> {
+-		return;
+-	}
+-
+-	async setActiveCommentAndThread(commentInfo: { thread: CommentThread; comment?: LanguageComment } | undefined): Promise<void> {
+-		this.activeComment = commentInfo;
+-	}
+-
+-	private replayCached(): void {
+-		for (const prUrl of this.cachedCommentsByPr.keys()) {
+-			this.applyForPr(prUrl);
+-		}
+-	}
+-
+-	private applyForPr(prUrl: string): void {
+-		const comments = this.cachedCommentsByPr.get(prUrl) ?? [];
+-		const resources = findKrtPrResourcesByPrUrl(prUrl);
+-		this.logService.info(`[krt] applyForPr ${prUrl}: ${resources.length} URIs registered, ${comments.length} cached comments`);
+-		const previouslyOwned = this.urisByPr.get(prUrl) ?? new Set<string>();
+-		const nextOwned = new Set<string>();
+-
+-		// Group comments by (side, path) once — we look up per-URI by
+-		// matching against `resource.side` and either `previousPath`
+-		// (LEFT) or `path` (RIGHT). Skipping non-review (issue) comments.
+-		type Bucket = { readonly comments: KrtComment[] };
+-		const buckets = new Map<string, Bucket>();
+-		for (const c of comments) {
+-			if (c.location.kind !== 'review') {
+-				continue;
+-			}
+-			const key = `${c.location.side}|${c.location.path}`;
+-			const existing = buckets.get(key);
+-			if (existing) {
+-				existing.comments.push(c);
+-			} else {
+-				buckets.set(key, { comments: [c] });
+-			}
+-		}
+-
+-		for (const { uri, resource } of resources) {
+-			const key = uri.toString();
+-			const bucketKey = `${resource.side}|${resource.side === 'LEFT' ? resource.previousPath : resource.path}`;
+-			const bucket = buckets.get(bucketKey);
+-			const previousThreads = this.threadsByUri.get(key) ?? [];
+-
+-			if (!bucket || bucket.comments.length === 0) {
+-				if (previousThreads.length > 0) {
+-					this.threadsByUri.delete(key);
+-					this.commentService.updateComments(KRT_PR_COMMENT_OWNER, {
+-						added: [],
+-						removed: previousThreads,
+-						changed: [],
+-						pending: [],
+-					});
+-					this.commentService.setDocumentComments(uri, this.commentInfosForUri(uri));
+-					for (const t of previousThreads) {
+-						t.dispose();
+-					}
+-				}
+-				continue;
+-			}
+-
+-			// One thread per real-file line. GitHub returns one comment
+-			// per anchor row, but multiple comments can stack on the
+-			// same line — we collapse them into a single thread.
+-			const byLine = new Map<number, KrtComment[]>();
+-			for (const c of bucket.comments) {
+-				if (c.location.kind !== 'review') {
+-					continue;
+-				}
+-				const arr = byLine.get(c.location.line);
+-				if (arr) {
+-					arr.push(c);
+-				} else {
+-					byLine.set(c.location.line, [c]);
+-				}
+-			}
+-
+-			const previousById = new Map(previousThreads.map(t => [t.threadId, t] as const));
+-			const nextThreads: KrtPrCommentThread[] = [];
+-			const added: KrtPrCommentThread[] = [];
+-			const changed: KrtPrCommentThread[] = [];
+-
+-			for (const [realLine, lineComments] of byLine) {
+-				const modelLine = realLineToModelLine(resource, realLine);
+-				if (modelLine === undefined) {
+-					continue;
+-				}
+-				const sorted = [...lineComments].sort(
+-					(a, b) => a.createdAt < b.createdAt ? -1 : a.createdAt > b.createdAt ? 1 : 0,
+-				);
+-				const range: IRange = {
+-					startLineNumber: modelLine,
+-					startColumn: 1,
+-					endLineNumber: modelLine,
+-					endColumn: 1,
+-				};
+-				const threadId = `krt-pr|${prUrl}|${resource.side}|${resource.path}|${realLine}`;
+-				const languageComments = sorted.map((c, i) => krtCommentToLanguageComment(c, i + 1));
+-
+-				const existing = previousById.get(threadId);
+-				if (existing) {
+-					existing.range = range;
+-					existing.comments = languageComments;
+-					changed.push(existing);
+-					nextThreads.push(existing);
+-					previousById.delete(threadId);
+-				} else {
+-					const fresh = new KrtPrCommentThread({
+-						commentThreadHandle: this.nextHandle++,
+-						controllerHandle: 0,
+-						threadId,
+-						resource: key,
+-						range,
+-						comments: languageComments,
+-						canReply: false,
+-						collapsibleState: CommentThreadCollapsibleState.Expanded,
+-					});
+-					nextThreads.push(fresh);
+-					added.push(fresh);
+-				}
+-			}
+-
+-			const removed = [...previousById.values()];
+-			this.threadsByUri.set(key, nextThreads);
+-			nextOwned.add(key);
+-
+-			if (added.length > 0 || removed.length > 0 || changed.length > 0) {
+-				this.logService.info(`[krt] updateComments ${resource.side} ${resource.path}: added=${added.length} removed=${removed.length} changed=${changed.length} (model now has ${this.commentService.commentsModel.resourceCommentThreads.length} resources)`);
+-				this.commentService.updateComments(KRT_PR_COMMENT_OWNER, {
+-					added,
+-					removed,
+-					changed,
+-					pending: [],
+-				});
+-			}
+-			// Always re-fire `setDocumentComments` so the editor's
+-			// CommentController picks up our new state even on its very
+-			// first attach (where `_commentInfos` doesn't yet contain
+-			// anything for our owner, so the granular `updateComments`
+-			// path would no-op).
+-			this.commentService.setDocumentComments(uri, this.commentInfosForUri(uri));
+-			for (const t of removed) {
+-				t.dispose();
+-			}
+-		}
+-
+-		// URIs that were previously owned by this PR but no longer have
+-		// any matching bucket → clear them.
+-		for (const stale of previouslyOwned) {
+-			if (nextOwned.has(stale)) {
+-				continue;
+-			}
+-			const previousThreads = this.threadsByUri.get(stale);
+-			if (previousThreads && previousThreads.length > 0) {
+-				this.threadsByUri.delete(stale);
+-				this.commentService.updateComments(KRT_PR_COMMENT_OWNER, {
+-					added: [],
+-					removed: previousThreads,
+-					changed: [],
+-					pending: [],
+-				});
+-				this.commentService.setDocumentComments(URI.parse(stale), this.commentInfosForUri(URI.parse(stale)));
+-				for (const t of previousThreads) {
+-					t.dispose();
+-				}
+-			}
+-		}
+-
+-		this.urisByPr.set(prUrl, nextOwned);
+-
+-		// After per-URI work, push the full owner snapshot to
+-		// `setWorkspaceComments`. The granular `updateComments` path
+-		// the inline editors consume only mutates `commentsModel`
+-		// when a resource entry already exists; if the model lost an
+-		// entry (most often because the FIRST `applyForPr` ran before
+-		// any URI was registered, so no `added` fired and no entry
+-		// got created), every subsequent `changed` event silently
+-		// drops on the floor and the workbench's Comments view stays
+-		// empty. `setWorkspaceComments` replaces the model wholesale
+-		// from the source of truth — KRT's own `threadsByUri` —
+-		// which sidesteps the diff-bookkeeping fragility entirely.
+-		const allThreads: KrtPrCommentThread[] = [];
+-		for (const threads of this.threadsByUri.values()) {
+-			allThreads.push(...threads);
+-		}
+-		this.commentService.setWorkspaceComments(KRT_PR_COMMENT_OWNER, allThreads);
+-		this.logService.info(`[krt] setWorkspaceComments: ${allThreads.length} threads across ${this.threadsByUri.size} URIs`);
+-	}
+-
+-	private commentInfosForUri(uri: URI): ICommentInfo[] {
+-		const meta = lookupKrtPrResource(uri);
+-		const threads = this.threadsByUri.get(uri.toString()) ?? [];
+-		const ranges: IRange[] = [];
+-		if (meta) {
+-			for (let i = 0; i < meta.realLines.length; i++) {
+-				if (meta.realLines[i] !== undefined) {
+-					const ln = i + 1;
+-					ranges.push({ startLineNumber: ln, startColumn: 1, endLineNumber: ln, endColumn: 1 });
+-				}
+-			}
+-		}
+-		return [{
+-			uniqueOwner: KRT_PR_COMMENT_OWNER,
+-			label: this.label,
+-			threads,
+-			commentingRanges: { resource: uri, ranges, fileComments: false },
+-		}];
+-	}
+-}
+-
+-function realLineToModelLine(resource: IKrtPrResource, realLine: number): number | undefined {
+-	const idx = resource.realLines.indexOf(realLine);
+-	return idx === -1 ? undefined : idx + 1;
+-}
+-
+-function krtCommentToLanguageComment(c: KrtComment, uniqueIdInThread: number): LanguageComment {
+-	return {
+-		uniqueIdInThread,
+-		body: c.body,
+-		userName: c.author.login,
+-		userIconPath: c.author.avatarUrl ? URI.parse(c.author.avatarUrl) : undefined,
+-		timestamp: c.createdAt,
+-	};
+-}
+diff --git a/src/vs/workbench/contrib/krt/browser/pr/krtPrCommentRegistry.ts b/src/vs/workbench/contrib/krt/browser/pr/krtPrCommentRegistry.ts
+deleted file mode 100644
+index 80d65cf419c..00000000000
+--- a/src/vs/workbench/contrib/krt/browser/pr/krtPrCommentRegistry.ts
++++ /dev/null
+@@ -1,73 +0,0 @@
+-/*---------------------------------------------------------------------------------------------
+- *  Copyright (c) Microsoft Corporation. All rights reserved.
+- *  Licensed under the MIT License. See License.txt in the project root for license information.
+- *--------------------------------------------------------------------------------------------*/
+-
+-import { Emitter, Event } from '../../../../../base/common/event.js';
+-import { IDisposable, toDisposable } from '../../../../../base/common/lifecycle.js';
+-import { URI } from '../../../../../base/common/uri.js';
+-
+-export type DiffSide = 'LEFT' | 'RIGHT';
+-
+-/**
+- * Per-side metadata for a diff-editor model URI mounted by
+- * `KrtMonacoDiffView`. The native comments controller reads this to:
+- *   1. translate GitHub's real-file-line anchors into the model's
+- *      compact 1..N line numbers, and
+- *   2. compute commenting ranges (every model line that maps to a real
+- *      file line is commentable).
+- *
+- * `previousPath` differs from `path` only on renames. For LEFT-side
+- * comments GitHub keys on the pre-rename path, so the controller uses
+- * `previousPath` when matching; RIGHT-side uses `path`.
+- */
+-export interface IKrtPrResource {
+-	readonly side: DiffSide;
+-	readonly path: string;
+-	readonly previousPath: string;
+-	readonly realLines: ReadonlyArray<number | undefined>;
+-	readonly pr: {
+-		readonly url: string;
+-		readonly owner: string;
+-		readonly repo: string;
+-		readonly number: number;
+-		readonly headSha: string;
+-	};
+-}
+-
+-const registry = new Map<string, IKrtPrResource>();
+-const _onDidChange = new Emitter<void>();
+-export const onDidChangeKrtPrResources: Event<void> = _onDidChange.event;
+-
+-/**
+- * Called by `KrtMonacoDiffView` once per model URI it mounts. The
+- * returned disposable removes the entry — but only if it still points
+- * at the same `resource` instance, so a later registration on the
+- * same URI (overlapping diff views during re-render) doesn't get
+- * clobbered when the previous one disposes.
+- */
+-export function registerKrtPrResource(uri: URI, resource: IKrtPrResource): IDisposable {
+-	const key = uri.toString();
+-	registry.set(key, resource);
+-	_onDidChange.fire();
+-	return toDisposable(() => {
+-		if (registry.get(key) === resource) {
+-			registry.delete(key);
+-			_onDidChange.fire();
+-		}
+-	});
+-}
+-
+-export function lookupKrtPrResource(uri: URI): IKrtPrResource | undefined {
+-	return registry.get(uri.toString());
+-}
+-
+-export function findKrtPrResourcesByPrUrl(prUrl: string): ReadonlyArray<{ readonly uri: URI; readonly resource: IKrtPrResource }> {
+-	const out: { uri: URI; resource: IKrtPrResource }[] = [];
+-	for (const [key, resource] of registry) {
+-		if (resource.pr.url === prUrl) {
+-			out.push({ uri: URI.parse(key), resource });
+-		}
+-	}
+-	return out;
+-}
+diff --git a/src/vs/workbench/contrib/krt/browser/pr/krtPrCommentThread.ts b/src/vs/workbench/contrib/krt/browser/pr/krtPrCommentThread.ts
+deleted file mode 100644
+index 248c1320716..00000000000
+--- a/src/vs/workbench/contrib/krt/browser/pr/krtPrCommentThread.ts
++++ /dev/null
+@@ -1,160 +0,0 @@
+-/*---------------------------------------------------------------------------------------------
+- *  Copyright (c) Microsoft Corporation. All rights reserved.
+- *  Licensed under the MIT License. See License.txt in the project root for license information.
+- *--------------------------------------------------------------------------------------------*/
+-
+-import { Emitter, Event } from '../../../../../base/common/event.js';
+-import { IRange } from '../../../../../editor/common/core/range.js';
+-import {
+-	Comment,
+-	CommentAuthorInformation,
+-	CommentInput,
+-	CommentThread,
+-	CommentThreadCollapsibleState,
+-	CommentThreadState,
+-	CommentThreadApplicability,
+-} from '../../../../../editor/common/languages.js';
+-
+-/**
+- * Minimal `CommentThread<IRange>` implementation used by
+- * `KrtPrCommentController`. Mirrors `MainThreadCommentThread` but
+- * without the extension-host plumbing — KRT's threads come from
+- * GitHub via `gh`, not from an extension RPC.
+- *
+- * The thread's `range` is in *model* line numbers (1..N), not real
+- * file lines, because that's what the editor positions zone widgets
+- * by. Translation happens at construction time in the controller.
+- */
+-export class KrtPrCommentThread implements CommentThread<IRange> {
+-
+-	readonly commentThreadHandle: number;
+-	readonly controllerHandle: number;
+-	readonly threadId: string;
+-	readonly resource: string;
+-	extensionId?: string;
+-
+-	private _range: IRange | undefined;
+-	get range(): IRange | undefined { return this._range; }
+-	set range(value: IRange | undefined) { this._range = value; }
+-
+-	private _comments: ReadonlyArray<Comment> | undefined;
+-	get comments(): ReadonlyArray<Comment> | undefined { return this._comments; }
+-	set comments(value: ReadonlyArray<Comment> | undefined) {
+-		this._comments = value;
+-		this._onDidChangeComments.fire(value);
+-	}
+-
+-	private readonly _onDidChangeComments = new Emitter<readonly Comment[] | undefined>();
+-	readonly onDidChangeComments: Event<readonly Comment[] | undefined> = this._onDidChangeComments.event;
+-
+-	private _label: string | undefined;
+-	get label(): string | undefined { return this._label; }
+-	set label(value: string | undefined) {
+-		this._label = value;
+-		this._onDidChangeLabel.fire(value);
+-	}
+-
+-	private readonly _onDidChangeLabel = new Emitter<string | undefined>();
+-	readonly onDidChangeLabel: Event<string | undefined> = this._onDidChangeLabel.event;
+-
+-	contextValue: string | undefined;
+-
+-	private _collapsibleState: CommentThreadCollapsibleState | undefined;
+-	get collapsibleState(): CommentThreadCollapsibleState | undefined { return this._collapsibleState; }
+-	set collapsibleState(value: CommentThreadCollapsibleState | undefined) {
+-		if (this._initialCollapsibleState === undefined) {
+-			this._initialCollapsibleState = value;
+-			this._onDidChangeInitialCollapsibleState.fire(value);
+-		}
+-		if (value !== this._collapsibleState) {
+-			this._collapsibleState = value;
+-			this._onDidChangeCollapsibleState.fire(value);
+-		}
+-	}
+-	private readonly _onDidChangeCollapsibleState = new Emitter<CommentThreadCollapsibleState | undefined>();
+-	readonly onDidChangeCollapsibleState: Event<CommentThreadCollapsibleState | undefined> = this._onDidChangeCollapsibleState.event;
+-
+-	private _initialCollapsibleState: CommentThreadCollapsibleState | undefined;
+-	get initialCollapsibleState(): CommentThreadCollapsibleState | undefined { return this._initialCollapsibleState; }
+-	// `ReviewZoneWidget` writes to this when it constructs (matches the
+-	// pattern in `MainThreadCommentThread`). Without a setter the
+-	// assignment throws and the widget never renders.
+-	set initialCollapsibleState(value: CommentThreadCollapsibleState | undefined) {
+-		this._initialCollapsibleState = value;
+-		this._onDidChangeInitialCollapsibleState.fire(value);
+-	}
+-	private readonly _onDidChangeInitialCollapsibleState = new Emitter<CommentThreadCollapsibleState | undefined>();
+-	readonly onDidChangeInitialCollapsibleState: Event<CommentThreadCollapsibleState | undefined> = this._onDidChangeInitialCollapsibleState.event;
+-
+-	private _state: CommentThreadState | undefined;
+-	get state(): CommentThreadState | undefined { return this._state; }
+-	set state(value: CommentThreadState | undefined) {
+-		this._state = value;
+-		this._onDidChangeState.fire(value);
+-	}
+-	private readonly _onDidChangeState = new Emitter<CommentThreadState | undefined>();
+-	readonly onDidChangeState: Event<CommentThreadState | undefined> = this._onDidChangeState.event;
+-
+-	applicability: CommentThreadApplicability | undefined;
+-
+-	private _canReply: boolean | CommentAuthorInformation;
+-	get canReply(): boolean | CommentAuthorInformation { return this._canReply; }
+-	set canReply(value: boolean | CommentAuthorInformation) {
+-		this._canReply = value;
+-		this._onDidChangeCanReply.fire(!!value);
+-	}
+-	private readonly _onDidChangeCanReply = new Emitter<boolean>();
+-	readonly onDidChangeCanReply: Event<boolean> = this._onDidChangeCanReply.event;
+-
+-	private _input: CommentInput | undefined;
+-	get input(): CommentInput | undefined { return this._input; }
+-	set input(value: CommentInput | undefined) {
+-		this._input = value;
+-		this._onDidChangeInput.fire(value);
+-	}
+-	private readonly _onDidChangeInput = new Emitter<CommentInput | undefined>();
+-	readonly onDidChangeInput: Event<CommentInput | undefined> = this._onDidChangeInput.event;
+-
+-	isDisposed = false;
+-	isTemplate: boolean;
+-
+-	constructor(args: {
+-		commentThreadHandle: number;
+-		controllerHandle: number;
+-		threadId: string;
+-		resource: string;
+-		range: IRange | undefined;
+-		comments: readonly Comment[];
+-		isTemplate?: boolean;
+-		canReply?: boolean | CommentAuthorInformation;
+-		state?: CommentThreadState;
+-		collapsibleState?: CommentThreadCollapsibleState;
+-	}) {
+-		this.commentThreadHandle = args.commentThreadHandle;
+-		this.controllerHandle = args.controllerHandle;
+-		this.threadId = args.threadId;
+-		this.resource = args.resource;
+-		this._range = args.range;
+-		this._comments = args.comments;
+-		this.isTemplate = args.isTemplate ?? false;
+-		this._canReply = args.canReply ?? false;
+-		this._state = args.state ?? CommentThreadState.Unresolved;
+-		this._collapsibleState = args.collapsibleState ?? CommentThreadCollapsibleState.Expanded;
+-		this._initialCollapsibleState = this._collapsibleState;
+-	}
+-
+-	isDocumentCommentThread(): this is CommentThread<IRange> {
+-		return true;
+-	}
+-
+-	dispose(): void {
+-		this.isDisposed = true;
+-		this._onDidChangeComments.dispose();
+-		this._onDidChangeLabel.dispose();
+-		this._onDidChangeCollapsibleState.dispose();
+-		this._onDidChangeInitialCollapsibleState.dispose();
+-		this._onDidChangeState.dispose();
+-		this._onDidChangeCanReply.dispose();
+-		this._onDidChangeInput.dispose();
+-	}
+-}
+diff --git a/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditor.contribution.ts b/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditor.contribution.ts
+index b8e044fbb60..22921703154 100644
+--- a/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditor.contribution.ts
++++ b/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditor.contribution.ts
+@@ -5,13 +5,10 @@
+ 
+ import { localize } from '../../../../../nls.js';
+ import { SyncDescriptor } from '../../../../../platform/instantiation/common/descriptors.js';
+-import { InstantiationType, registerSingleton } from '../../../../../platform/instantiation/common/extensions.js';
+ import { IInstantiationService } from '../../../../../platform/instantiation/common/instantiation.js';
+ import { Registry } from '../../../../../platform/registry/common/platform.js';
+ import { EditorPaneDescriptor, IEditorPaneRegistry } from '../../../../browser/editor.js';
+ import { EditorExtensions, IEditorFactoryRegistry, IEditorSerializer } from '../../../../common/editor.js';
+-import './krtCommentsView.contribution.js';
+-import { IKrtPrCommentController, KrtPrCommentController } from './krtPrCommentController.js';
+ import { KrtPullRequestEditorInput } from './krtPullRequestEditorInput.js';
+ import { KrtPullRequestEditorPane } from './krtPullRequestEditorPane.js';
+ 
+@@ -50,11 +47,6 @@ class KrtPullRequestEditorInputSerializer implements IEditorSerializer {
+ 	}
+ }
+ 
+-// Register the native review-comments controller eagerly so it's
+-// already attached to `ICommentService` by the time the first PR
+-// diff editor mounts and asks for comments.
+-registerSingleton(IKrtPrCommentController, KrtPrCommentController, InstantiationType.Eager);
+-
+ Registry.as<IEditorFactoryRegistry>(EditorExtensions.EditorFactory)
+ 	.registerEditorSerializer(KrtPullRequestEditorInput.ID, KrtPullRequestEditorInputSerializer);
+ 
+diff --git a/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.ts b/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.ts
+index d9dfb726cb9..ebd1883f82d 100644
+--- a/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.ts
++++ b/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.ts
+@@ -14,7 +14,6 @@ import { URI } from '../../../../../base/common/uri.js';
+ import { localize } from '../../../../../nls.js';
+ import { ICommandService } from '../../../../../platform/commands/common/commands.js';
+ import { IEditorOptions } from '../../../../../platform/editor/common/editor.js';
+-import { IInstantiationService } from '../../../../../platform/instantiation/common/instantiation.js';
+ import { IStorageService, StorageScope, StorageTarget } from '../../../../../platform/storage/common/storage.js';
+ import { ITelemetryService } from '../../../../../platform/telemetry/common/telemetry.js';
+ import { IThemeService } from '../../../../../platform/theme/common/themeService.js';
+@@ -28,8 +27,6 @@ import { IFileService } from '../../../../../platform/files/common/files.js';
+ import { getWorkspacePreFlight, KrtPreFlight } from '../workspace/krtVcs.js';
+ import { switchTo } from '../workspace/krtSwitchOps.js';
+ import { IKrtSwitchResumeService } from '../workspace/krtSwitchResume.js';
+-import { KrtMonacoDiffView } from './krtMonacoDiff.js';
+-import { IKrtPrCommentController } from './krtPrCommentController.js';
+ import { isKrtError } from '../../../../../platform/krt/common/errors.js';
+ import { Chapter, EdgeKind, EDGE_KINDS, TourVariant } from '../ai/krtTourTypes.js';
+ import { expandEmojiShortcodes } from '../ai/krtEmoji.js';
+@@ -135,8 +132,6 @@ export class KrtPullRequestEditorPane extends EditorPane {
+ 	private isCheckedOut = false;
+ 	private reviewComments: readonly Comment[] | undefined;
+ 	private reviewCommentsLoading = false;
+-	private liveReviewComments: Comment[] = [];
+-	private composingAt: { path: string; line: number; side: 'LEFT' | 'RIGHT' } | undefined;
+ 	private diffTreeRowsByPath = new Map<string, HTMLElement>();
+ 	private diffTreeCountEl: HTMLElement | undefined;
+ 
+@@ -170,14 +165,12 @@ export class KrtPullRequestEditorPane extends EditorPane {
+ 		@IOpenerService private readonly openerService: IOpenerService,
+ 		@ITourGenerator private readonly tourGenerator: ITourGenerator,
+ 		@ICommandService private readonly commandService: ICommandService,
+-		@IInstantiationService private readonly instantiationService: IInstantiationService,
+ 		@IKrtWorkspaceRegistry private readonly workspaceRegistry: IKrtWorkspaceRegistry,
+ 		@IKrtGitService private readonly krtGitService: IKrtGitService,
+ 		@IKrtSwitchResumeService private readonly switchResumeService: IKrtSwitchResumeService,
+ 		@IDialogService private readonly dialogService: IDialogService,
+ 		@INotificationService private readonly notificationService: INotificationService,
+ 		@IFileService private readonly fileService: IFileService,
+-		@IKrtPrCommentController private readonly krtCommentController: IKrtPrCommentController,
+ 	) {
+ 		super(KrtPullRequestEditorPane.ID, group, telemetryService, themeService, krtStorageService);
+ 		// Re-check the workspace's HEAD whenever the resume token
+@@ -476,14 +469,6 @@ export class KrtPullRequestEditorPane extends EditorPane {
+ 
+ 	override async setInput(input: KrtPullRequestEditorInput, options: IEditorOptions | undefined, context: IEditorOpenContext, token: CancellationToken): Promise<void> {
+ 		await super.setInput(input, options, context, token);
+-		// Drop any native review-comment threads owned by the PR we're
+-		// navigating away from — otherwise the `ICommentService` keeps
+-		// pointing them at stale URIs once the diff editors get rebuilt
+-		// for the new PR.
+-		const previousPrUrl = this.currentInput?.url;
+-		if (previousPrUrl && previousPrUrl !== input.url) {
+-			this.krtCommentController.clearCommentsForPr(previousPrUrl);
+-		}
+ 		this.currentInput = input;
+ 		this.currentPr = undefined;
+ 		this.automationEvents = undefined;
+@@ -497,8 +482,6 @@ export class KrtPullRequestEditorPane extends EditorPane {
+ 		this.diffFilesError = undefined;
+ 		this.reviewComments = undefined;
+ 		this.reviewCommentsLoading = false;
+-		this.liveReviewComments = [];
+-		this.composingAt = undefined;
+ 		this.reviewedPaths = new Set(readReviewedPaths(this.krtStorageService, input.owner, input.repo, input.number));
+ 		this.collapsedDiffFiles = new Set();
+ 		this.diffRenderMode = readDiffRenderMode(this.krtStorageService);
+@@ -535,7 +518,6 @@ export class KrtPullRequestEditorPane extends EditorPane {
+ 			}
+ 			if (cached.reviewComments !== undefined) {
+ 				this.reviewComments = cached.reviewComments;
+-				this.pushReviewCommentsToController(input.url);
+ 			}
+ 			if (cached.activity !== undefined) {
+ 				this.automationEvents = cached.activity;
+@@ -688,7 +670,6 @@ export class KrtPullRequestEditorPane extends EditorPane {
+ 			return;
+ 		}
+ 		this.subMode = mode;
+-		this.composingAt = undefined;
+ 		// Remember the user's choice so a tab switch doesn't reset
+ 		// them back to PR overview.
+ 		putSubMode(pr.url, mode);
+@@ -1258,182 +1239,19 @@ export class KrtPullRequestEditorPane extends EditorPane {
+ 			return section;
+ 		}
+ 
+-		// Phase 8.5/8.6 — embedded Monaco diff editor. When a workspace is
+-		// registered for this PR's repo, the head side mounts the real
+-		// `file://` URI (LSP-eligible) and the base resolves via
+-		// `krt-git://` (`git show`). Otherwise it falls back to the
+-		// patch-reconstructed virtual URIs.
+-		const workspace = this.workspaceRegistry.findByOwnerRepo(pr.owner, pr.repo);
+-		const view = this.instantiationService.createInstance(
+-			KrtMonacoDiffView,
+-			body,
+-			{
+-				owner: pr.owner,
+-				repo: pr.repo,
+-				baseSha: pr.base.sha,
+-				headSha: pr.head.sha,
+-				renderSideBySide: this.diffRenderMode === 'side-by-side',
+-				file,
+-				workspace,
+-				pr: { url: pr.url, number: pr.number },
+-			},
++		// Phase A (rebuild) — diff rendering temporarily stripped while
++		// the new MultiDiffEditor-based stack is built. Show a placeholder
++		// so the user knows the file exists but the diff body is in
++		// flight. Mark-reviewed and the file header are still functional.
++		const placeholder = DOM.append(body, DOM.$('.krt-pr-diff-rebuilding'));
++		placeholder.textContent = localize(
++			'krt.pr.diffRebuilding',
++			"Diff view is being rebuilt on top of VS Code's MultiDiffEditor. Coming back shortly.",
+ 		);
+-		this.bodyDisposables.add(view);
+-
+-		// Inline review comments + composer attach as Monaco view zones.
+-		this.attachReviewCommentZones(view, file);
+-
+-		// Line-number click → mount the inline composer directly via
+-		// the view's `mountComposer` API. Avoids a full `renderLoaded`
+-		// rebuild (which used to take 100s of ms because every diff
+-		// editor in the stack got re-created).
+-		this.bodyDisposables.add(view.onLineNumberClick((side, line) => {
+-			this.composingAt = { path: file.path, line, side };
+-			const composer = DOM.$('.krt-pr-diff-composer');
+-			this.renderInlineComposer(composer, this.composingAt, () => {
+-				view.dismountComposer();
+-				this.composingAt = undefined;
+-			});
+-			view.mountComposer(side, line, composer);
+-		}));
+ 
+ 		return section;
+ 	}
+ 
+-
+-	private attachReviewCommentZones(view: KrtMonacoDiffView, file: PullRequestFile): void {
+-		const all = [...(this.reviewComments ?? []), ...this.liveReviewComments];
+-		const groups = new Map<string, { side: 'LEFT' | 'RIGHT'; line: number; comments: Comment[] }>();
+-		for (const c of all) {
+-			if (c.location.kind !== 'review' || c.location.path !== file.path) {
+-				continue;
+-			}
+-			const side = c.location.side;
+-			const line = c.location.line;
+-			const key = `${side}:${line}`;
+-			const existing = groups.get(key);
+-			if (existing) {
+-				existing.comments.push(c);
+-			} else {
+-				groups.set(key, { side, line, comments: [c] });
+-			}
+-		}
+-		for (const { side, line, comments } of groups.values()) {
+-			const block = DOM.$('.krt-pr-diff-thread');
+-			for (const c of comments.sort((a, b) => a.createdAt < b.createdAt ? -1 : a.createdAt > b.createdAt ? 1 : 0)) {
+-				this.renderReviewCommentCard(block, c);
+-			}
+-			this.bodyDisposables.add(view.addLineZone({ side, afterLine: line, domNode: block }));
+-		}
+-
+-		// Inline composer.
+-		if (this.composingAt && this.composingAt.path === file.path) {
+-			const target = this.composingAt;
+-			const composer = DOM.$('.krt-pr-diff-composer');
+-			this.renderInlineComposer(composer, target);
+-			this.bodyDisposables.add(view.addLineZone({ side: target.side, afterLine: target.line, domNode: composer }));
+-		}
+-	}
+-
+-	private renderReviewCommentCard(parent: HTMLElement, comment: Comment): void {
+-		const row = DOM.append(parent, DOM.$('.krt-pr-comment'));
+-		const head = DOM.append(row, DOM.$('.krt-pr-comment-head'));
+-		const author = DOM.append(head, DOM.$('span.krt-pr-comment-author'));
+-		author.textContent = comment.author.login;
+-		const verb = DOM.append(head, DOM.$('span.krt-pr-comment-verb'));
+-		verb.textContent = localize('krt.pr.commented', "commented");
+-		const sep = DOM.append(head, DOM.$('span.krt-pr-comment-sep'));
+-		sep.textContent = '·';
+-		const when = DOM.append(head, DOM.$('span.krt-pr-comment-when'));
+-		when.textContent = relativeTime(comment.createdAt);
+-		const body = DOM.append(row, DOM.$('.krt-pr-comment-body'));
+-		if (comment.body.trim()) {
+-			const md = new MarkdownString(expandEmojiShortcodes(comment.body), { isTrusted: false });
+-			const rendered = renderMarkdown(md, { actionHandler: link => this.openExternal(link) });
+-			this.bodyDisposables.add(rendered);
+-			body.appendChild(rendered.element);
+-		} else {
+-			body.classList.add('empty');
+-			body.textContent = localize('krt.pr.commentEmpty', "(empty comment)");
+-		}
+-	}
+-
+-	private renderInlineComposer(parent: HTMLElement, target: { path: string; line: number; side: 'LEFT' | 'RIGHT' }, onCancel?: () => void): void {
+-		const card = DOM.append(parent, DOM.$('.krt-pr-diff-composer-card'));
+-		const note = DOM.append(card, DOM.$('.krt-pr-diff-composer-note'));
+-		note.textContent = localize('krt.pr.composerNote', "Comment on {0}:{1}", target.path, target.line);
+-		const textarea = DOM.append(card, DOM.$('textarea.krt-pr-reply-input')) as HTMLTextAreaElement;
+-		textarea.placeholder = localize('krt.pr.replyPlaceholder', "Leave a comment…");
+-		textarea.rows = 3;
+-		const actions = DOM.append(card, DOM.$('.krt-pr-reply-actions'));
+-		const errorEl = DOM.append(card, DOM.$('.krt-pr-reply-error'));
+-		errorEl.hidden = true;
+-		const cancel = DOM.append(actions, DOM.$('button.krt-pr-reply-cancel')) as HTMLButtonElement;
+-		cancel.type = 'button';
+-		cancel.textContent = localize('krt.pr.replyCancel', "Cancel");
+-		const submit = DOM.append(actions, DOM.$('button.krt-pr-reply-submit')) as HTMLButtonElement;
+-		submit.type = 'button';
+-		submit.textContent = localize('krt.pr.replySubmit', "Comment");
+-		queueMicrotask(() => textarea.focus());
+-
+-		const setBusy = (busy: boolean) => {
+-			submit.disabled = busy;
+-			cancel.disabled = busy;
+-			textarea.disabled = busy;
+-			submit.textContent = busy
+-				? localize('krt.pr.replyPosting', "Posting…")
+-				: localize('krt.pr.replySubmit', "Comment");
+-		};
+-
+-		this.bodyDisposables.add(DOM.addDisposableListener(cancel, 'click', () => {
+-			if (onCancel) {
+-				// Lazy-dismount path (the click-to-comment flow). Avoids
+-				// a full re-render — the view zone is removed in place.
+-				onCancel();
+-				return;
+-			}
+-			this.composingAt = undefined;
+-			if (this.currentPr) {
+-				this.renderLoaded(this.currentPr);
+-			}
+-		}));
+-		this.bodyDisposables.add(DOM.addDisposableListener(submit, 'click', async () => {
+-			const body = textarea.value.trim();
+-			if (!body || !this.currentPr) {
+-				return;
+-			}
+-			errorEl.hidden = true;
+-			errorEl.textContent = '';
+-			setBusy(true);
+-			try {
+-				const created = await this.pullRequestProvider.postReviewComment(this.currentPr.url, {
+-					commitId: this.currentPr.head.sha,
+-					path: target.path,
+-					line: target.line,
+-					side: target.side,
+-					body,
+-				});
+-				if (this.currentPr.url !== this.currentInput?.url) {
+-					return;
+-				}
+-				// Same rationale as `postIssueComment` — we render the
+-				// new comment from `liveReviewComments` for the rest of
+-				// this session, but the next setInput should re-pull.
+-				invalidatePrCache(this.currentPr.url);
+-				this.liveReviewComments = [...this.liveReviewComments, created];
+-				this.composingAt = undefined;
+-				this.pushReviewCommentsToController(this.currentPr.url);
+-				this.renderLoaded(this.currentPr);
+-			} catch (e) {
+-				errorEl.hidden = false;
+-				errorEl.textContent = isKrtError(e) ? `${e.message} — ${e.hint}` : String(e);
+-				this.logService.warn('[krt] pr-pane post review comment failed', e);
+-			} finally {
+-				setBusy(false);
+-			}
+-		}));
+-	}
+-
+ 	private toggleReviewed(path: string, reviewed: boolean): void {
+ 		if (reviewed) {
+ 			this.reviewedPaths.add(path);
+@@ -1489,33 +1307,16 @@ export class KrtPullRequestEditorPane extends EditorPane {
+ 			this.reviewComments = comments;
+ 			this.reviewCommentsLoading = false;
+ 			putReviewComments(pr.url, comments);
+-			this.pushReviewCommentsToController(pr.url);
+ 			if (this.subMode === 'diff') {
+ 				this.renderLoaded(pr);
+ 			}
+ 		} catch (e) {
+ 			this.reviewCommentsLoading = false;
+ 			this.reviewComments = [];
+-			this.pushReviewCommentsToController(pr.url);
+ 			this.logService.warn('[krt] pr-pane review-comments fetch failed', e);
+ 		}
+ 	}
+ 
+-	/**
+-	 * Phase 9.5 — fan out the merged review-comments set
+-	 * (`reviewComments` + `liveReviewComments`) to
+-	 * `IKrtPrCommentController`. The controller looks up which diff
+-	 * URIs are currently registered for this PR and pushes
+-	 * `CommentThread` instances to the workbench's `ICommentService`,
+-	 * which renders them as native thread widgets in the diff
+-	 * editors. Safe to call any time after the comments resolve;
+-	 * registry-side mounts trigger a replay.
+-	 */
+-	private pushReviewCommentsToController(prUrl: string): void {
+-		const merged = [...(this.reviewComments ?? []), ...this.liveReviewComments];
+-		this.krtCommentController.setCommentsForPr(prUrl, merged);
+-	}
+-
+ 	// ---------- Tour sub-mode ----------
+ 
+ 	private renderTourView(pr: PullRequest): void {
+@@ -1833,24 +1634,15 @@ export class KrtPullRequestEditorPane extends EditorPane {
+ 					: localize('krt.pr.diffNoPatchAvailable', "No patch available (binary or too large).");
+ 				continue;
+ 			}
+-			// Phase 8.5/8.6 — Monaco mini-diff. Read-only, no comments /
+-			// composer; same workspace plumbing as the main diff view so
+-			// LSP works in tour chapters too.
+-			const tourWorkspace = this.workspaceRegistry.findByOwnerRepo(pr.owner, pr.repo);
+-			const view = this.instantiationService.createInstance(
+-				KrtMonacoDiffView,
+-				body,
+-				{
+-					owner: pr.owner,
+-					repo: pr.repo,
+-					baseSha: pr.base.sha,
+-					headSha: pr.head.sha,
+-					renderSideBySide: this.diffRenderMode === 'side-by-side',
+-					file,
+-					workspace: tourWorkspace,
+-				},
++			// Phase A (rebuild) — mini-diff rendering temporarily stripped.
++			// Tour chapter summaries / files / prose still render; the per-
++			// file mini-diff body comes back when Phase D migrates Tour to
++			// the new MultiDiffEditor stack.
++			const placeholder = DOM.append(body, DOM.$('.krt-pr-tour-mini-empty'));
++			placeholder.textContent = localize(
++				'krt.pr.diffRebuilding',
++				"Diff view is being rebuilt on top of VS Code's MultiDiffEditor. Coming back shortly.",
+ 			);
+-			this.bodyDisposables.add(view);
+ 		}
+ 	}
+ 
+diff --git a/src/vs/workbench/contrib/krt/browser/workspace/krtGitContentProvider.ts b/src/vs/workbench/contrib/krt/browser/workspace/krtGitContentProvider.ts
+index ecfc4efeb9a..77185ab38d2 100644
+--- a/src/vs/workbench/contrib/krt/browser/workspace/krtGitContentProvider.ts
++++ b/src/vs/workbench/contrib/krt/browser/workspace/krtGitContentProvider.ts
+@@ -18,28 +18,6 @@ import { IKrtGitService } from '../../../../../platform/krt/common/krtGit.js';
+ import { IKrtWorkspaceRegistry } from './krtWorkspaceRegistry.js';
+ 
+ export const KRT_GIT_SCHEME = 'krt-git';
+-export const KRT_PR_BASE_SCHEME = 'krt-pr-base';
+-export const KRT_PR_HEAD_SCHEME = 'krt-pr-head';
+-
+-/**
+- * Passthrough provider for the patch-derived virtual URI schemes
+- * (`krt-pr-base://`, `krt-pr-head://`). The diff view creates these
+- * models directly via `IModelService.createModel`. Downstream features
+- * (Monaco hover, peek, language services, …) may still call
+- * `ITextModelService.createModelReference` against any URI an editor
+- * is showing, and without a registered content provider that errors
+- * with "Unable to resolve resource". Returning the existing cached
+- * model satisfies the resolver contract without producing fresh
+- * content.
+- */
+-class KrtPrVirtualPassthroughProvider implements ITextModelContentProvider {
+-	constructor(
+-		@IModelService private readonly modelService: IModelService,
+-	) { }
+-	provideTextContent(resource: URI): Promise<ITextModel | null> {
+-		return Promise.resolve(this.modelService.getModel(resource));
+-	}
+-}
+ 
+ /**
+  * Resolves `krt-git://<folderUri-encoded>/<ref>/<path>` URIs by
+@@ -140,16 +118,6 @@ export class KrtGitContentProviderContribution extends Disposable implements IWo
+ 		super();
+ 		const provider = instantiationService.createInstance(KrtGitContentProvider);
+ 		this._register(textModelService.registerTextModelContentProvider(KRT_GIT_SCHEME, provider));
+-		// Phase 8.6 LSP path — register passthrough providers for the
+-		// patch-derived virtual schemes so `createModelReference` calls
+-		// from peek / hover / language services don't error with
+-		// "Unable to resolve resource". The diff view creates the
+-		// models directly via `IModelService.createModel`; the
+-		// passthrough's job is purely to advertise the schemes as
+-		// resolvable so the resolver picks the cached model.
+-		const passthrough = instantiationService.createInstance(KrtPrVirtualPassthroughProvider);
+-		this._register(textModelService.registerTextModelContentProvider(KRT_PR_BASE_SCHEME, passthrough));
+-		this._register(textModelService.registerTextModelContentProvider(KRT_PR_HEAD_SCHEME, passthrough));
+ 	}
+ }
+ 
+-- 
+2.52.0
+

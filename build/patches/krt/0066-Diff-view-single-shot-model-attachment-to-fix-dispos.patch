@@ -1,0 +1,348 @@
+From 768e5f90bdab971acb6f1083d37e56bdd96f76fc Mon Sep 17 00:00:00 2001
+From: Kol Crooks <kol.crooks@datadoghq.com>
+Date: Thu, 7 May 2026 12:09:00 -0400
+Subject: [PATCH] Diff view: single-shot model attachment to fix
+ dispose-during-interaction error
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Patch 0064/0065's pattern was: synchronously mount virtual models, then
+asynchronously swap to workspace-backed models via a second
+`setDiffModel` call. Clicking a line on the upgraded diff threw
+"TextModel got disposed before DiffEditorWidget model got reset" and
+the diff disappeared. The error fires from
+`DiffEditorWidget._diffModel`'s `autorunWithStore` when one of the
+attached models' `onWillDispose` fires while the autorun still
+considers the model live — i.e. the swap left dangling listener state
+that became active on the next user interaction.
+
+Drop the swap entirely. Restore the single-attach pattern from the
+pre-rollback Phase 8.5+8.6+8.7 commit (`01509fc`):
+
+- Constructor builds the widget, sets the static height estimate,
+  pre-populates `realLines` from the patch (so synchronously-wired
+  callers see a sane map), and kicks off a single async
+  `attachModels`.
+- `attachModels` resolves workspace-backed models if the workspace is
+  registered + working tree on PR head + both refs resolve cleanly,
+  otherwise builds virtual patch-reconstructed models. Calls
+  `setDiffModel` exactly once with whichever pair won.
+- Trade-off: the diff is briefly empty (~50ms) while resolution
+  runs. The pre-existing static-height estimate keeps the layout
+  stable so there's no jump.
+
+Also fix `onLineNumberClick`: the old wiring captured the
+`realLines` array by value at wire time, so clicks fired with the
+patch-derived sparse map even after the async path swapped in an
+identity map. Read through `this.headRealLines`/`this.baseRealLines`
+inside the closure so the click handler always sees the current map.
+
+Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+---
+ .../contrib/krt/browser/pr/krtMonacoDiff.ts   | 189 ++++++++++--------
+ 1 file changed, 105 insertions(+), 84 deletions(-)
+
+diff --git a/src/vs/workbench/contrib/krt/browser/pr/krtMonacoDiff.ts b/src/vs/workbench/contrib/krt/browser/pr/krtMonacoDiff.ts
+index 4f50092aec8..70723d76c24 100644
+--- a/src/vs/workbench/contrib/krt/browser/pr/krtMonacoDiff.ts
++++ b/src/vs/workbench/contrib/krt/browser/pr/krtMonacoDiff.ts
+@@ -20,7 +20,7 @@ import { ILogService } from '../../../../../platform/log/common/log.js';
+ import { encodeKrtGit } from '../workspace/krtGitContentProvider.js';
+ import { KrtWorkspace } from '../workspace/krtWorkspaceRegistry.js';
+ import { IKrtPrResource, registerKrtPrResource } from './krtPrCommentRegistry.js';
+-import { reconstructFromPatch } from './krtPatchReconstruct.js';
++import { Reconstructed, reconstructFromPatch } from './krtPatchReconstruct.js';
+ 
+ export type DiffSide = 'LEFT' | 'RIGHT';
+ 
+@@ -172,10 +172,9 @@ export class KrtMonacoDiffView extends Disposable {
+ 				originalEditable: false,
+ 				renderSideBySide: opts.renderSideBySide ?? true,
+ 				useInlineViewWhenSpaceIsLimited: true,
+-				// Initial render uses patch-direct virtual models with no
+-				// large unchanged regions to fold; if the async upgrade
+-				// swaps to full-content workspace-backed models, we flip
+-				// this on so the unchanged context collapses.
++				// Default OFF — the async resolution below flips this on
++				// when both sides upgrade to full content. With virtual
++				// patch-direct models there's nothing to fold.
+ 				hideUnchangedRegions: { enabled: false },
+ 				renderOverviewRuler: false,
+ 				automaticLayout: true,
+@@ -193,21 +192,24 @@ export class KrtMonacoDiffView extends Disposable {
+ 			},
+ 		));
+ 
+-		// Synchronous initial render with patch-reconstructed virtual
+-		// models. The async upgrade below swaps these for workspace-
+-		// backed models (file:// + krt-git://) when applicable, so LSP
+-		// extensions activate against the head URI. Doing the virtual
+-		// render first means the diff is visible immediately; the
+-		// upgrade is invisible UX-wise except for hover / goto-def
+-		// becoming live a moment later.
+-		this.applyVirtualModels();
+-
+-		// Phase 8.6 LSP path — kick off async upgrade to file:// + krt-git://.
+-		// The upgrade is best-effort; on any failure we stay on the
+-		// virtual models the constructor already mounted.
+-		if (opts.workspace) {
+-			void this.tryUpgradeForLsp(opts.workspace);
+-		}
++		// Pre-compute the patch-derived realLines map so synchronously-
++		// wired callers (line-number click handler, comment registry
++		// during initial mount) see the right map. The async
++		// `attachModels` overwrites these with identity maps when the
++		// workspace upgrade succeeds.
++		const reconstructed = reconstructFromPatch(opts.file.patch ?? '');
++		this.baseRealLines = reconstructed.base.realLines;
++		this.headRealLines = reconstructed.head.realLines;
++
++		// Single-shot model attachment. Mixing the previous
++		// "synchronously mount virtual, asynchronously upgrade" pattern
++		// caused Monaco's `_diffModel` autorun to fire `onWillDispose`
++		// errors on later model interactions ("TextModel got disposed
++		// before DiffEditorWidget model got reset"). Calling
++		// `setDiffModel` exactly once eliminates the swap entirely.
++		// Trade-off: the diff is briefly empty (~50ms) while resolution
++		// runs; on a fast path the user usually doesn't notice.
++		void this.attachModels(reconstructed);
+ 
+ 		// `onDidContentSizeChange` only matters for changes the static
+ 		// estimate can't predict — review-comment view zones rendering
+@@ -249,17 +251,61 @@ export class KrtMonacoDiffView extends Disposable {
+ 		);
+ 	}
+ 
+-	private applyVirtualModels(): void {
+-		const reconstructed = reconstructFromPatch(this.opts.file.patch ?? '');
++	private buildVirtualModels(reconstructed: Reconstructed): { base: ITextModel; head: ITextModel } {
+ 		const baseModel = this.getOrCreate(this.virtualBaseUri(), reconstructed.base.text);
+ 		const headModel = this.getOrCreate(this.virtualHeadUri(), reconstructed.head.text);
++		return { base: baseModel, head: headModel };
++	}
+ 
+-		this.baseRealLines = reconstructed.base.realLines;
+-		this.headRealLines = reconstructed.head.realLines;
++	/**
++	 * Single-shot model resolution + attach. Picks workspace-backed
++	 * URIs (file:// + krt-git://) when the working tree is on the PR
++	 * head and both sides resolve cleanly, otherwise falls back to the
++	 * patch-reconstructed virtual URIs. Calls `setDiffModel` exactly
++	 * once — the previous "synchronous virtual then async upgrade"
++	 * pattern triggered Monaco's `onWillDispose`-on-old-model error
++	 * path on subsequent interactions.
++	 */
++	private async attachModels(reconstructed: Reconstructed): Promise<void> {
++		const upgrade = this.opts.workspace
++			? await this.tryWorkspaceModels(this.opts.workspace)
++			: undefined;
++		if (this._store.isDisposed) {
++			return;
++		}
+ 
+-		this.applyDiffModel(baseModel, headModel);
+-		this.applyLineNumbers(/*identity*/ false);
+-		this.registerCommentResources(baseModel.uri, headModel.uri);
++		let base: ITextModel;
++		let head: ITextModel;
++		let identity: boolean;
++		if (upgrade) {
++			base = upgrade.base;
++			head = upgrade.head;
++			this.baseRealLines = identityArray(base.getLineCount());
++			this.headRealLines = identityArray(head.getLineCount());
++			identity = true;
++		} else {
++			const virtual = this.buildVirtualModels(reconstructed);
++			base = virtual.base;
++			head = virtual.head;
++			this.baseRealLines = reconstructed.base.realLines;
++			this.headRealLines = reconstructed.head.realLines;
++			identity = false;
++		}
++
++		this.applyDiffModel(base, head);
++		this.applyLineNumbers(identity);
++		this.registerCommentResources(base.uri, head.uri);
++
++		if (identity) {
++			// Both sides full content — collapse unchanged regions so
++			// the visual stays focused on the changes plus a few lines
++			// of real surrounding context. On virtual models this would
++			// reveal padding blanks (or, with patch-direct rendering,
++			// nothing) so we leave it off there.
++			this.widget.updateOptions({
++				hideUnchangedRegions: { enabled: true, contextLineCount: 3, minimumLineCount: 4 },
++			});
++		}
+ 	}
+ 
+ 	private applyDiffModel(base: ITextModel, head: ITextModel): void {
+@@ -337,58 +383,51 @@ export class KrtMonacoDiffView extends Disposable {
+ 	}
+ 
+ 	/**
+-	 * Asynchronously upgrade the head + base models to workspace-backed
+-	 * URIs so language extensions (rust-analyzer, gopls, pyright, …)
+-	 * activate against the head side. The head goes to a real `file://`
+-	 * URI when the working tree is on the PR's head SHA — that's the
+-	 * URI scheme language servers anchor on. The base goes to a
+-	 * `krt-git://` URI whose content provider shells `git show
++	 * Resolve workspace-backed text models so language extensions
++	 * (rust-analyzer, gopls, pyright, …) activate against the head
++	 * side. Head: real `file://` URI when the working tree is on the
++	 * PR's head SHA — that's the URI scheme language servers anchor
++	 * on. Base: `krt-git://` whose content provider shells `git show
+ 	 * ${baseSha}:${path}`.
+ 	 *
+ 	 * **All-or-nothing.** Mixing full content on one side with the
+ 	 * patch-reconstructed virtual model on the other looks visually
+ 	 * broken: the diff editor compares them and every line outside the
+-	 * patch's hunks shows as a difference. So we only swap to workspace
+-	 * URIs when *both* sides resolve cleanly. Any failure (working tree
+-	 * drifted, base SHA not fetched, …) leaves the constructor-mounted
+-	 * virtual diff in place.
++	 * patch's hunks shows as a difference. So we only return models
++	 * when *both* sides resolve cleanly; any failure (working tree
++	 * drifted, base SHA not fetched, …) returns `undefined` and the
++	 * caller falls back to the virtual diff.
+ 	 *
+-	 * Added/removed files keep the synchronous virtual diff: the patch
+-	 * already shows their full content (one side is empty, the other
+-	 * is everything). LSP for those would also be desirable but isn't
+-	 * worth the per-side complexity in this pass.
++	 * Added/removed files keep the virtual diff: the patch already
++	 * shows their full content (one side is empty, the other is
++	 * everything). LSP for those isn't worth the per-side complexity.
+ 	 */
+-	private async tryUpgradeForLsp(workspace: KrtWorkspace): Promise<void> {
++	private async tryWorkspaceModels(workspace: KrtWorkspace): Promise<{ base: ITextModel; head: ITextModel } | undefined> {
+ 		const file = this.opts.file;
+-		// Added/removed files: skip the upgrade. The virtual diff already
+-		// renders correctly (one side is naturally empty).
+ 		if (file.status === 'added' || file.status === 'removed') {
+-			return;
++			return undefined;
+ 		}
+ 		const path = file.path;
+ 		const previousPath = file.previousPath ?? path;
+ 
+ 		// Working tree must be on PR head — otherwise file:// would
+ 		// reflect a different commit's content and the diff would show
+-		// the wrong "head" on the right side. The base side
+-		// (`krt-git://${baseSha}`) is fetched-content-bound and doesn't
+-		// depend on the working tree, but if we can't honour the head
+-		// side we have to abandon both to avoid mixed-content visuals.
++		// the wrong "head" on the right side.
+ 		let workingTreeSha: string;
+ 		try {
+ 			workingTreeSha = await this.gitService.getHeadSha(workspace.folderPath);
+ 		} catch (err) {
+ 			this.logService.warn(`[krt] diff: getHeadSha failed for ${workspace.folderPath} — staying on virtual diff`, err);
+-			return;
++			return undefined;
+ 		}
+ 		if (this._store.isDisposed) {
+-			return;
++			return undefined;
+ 		}
+ 		if (workingTreeSha !== this.opts.headSha) {
+ 			this.logService.info(
+ 				`[krt] diff: workspace ${workspace.folderPath} is on ${workingTreeSha.slice(0, 7)} but PR head is ${this.opts.headSha.slice(0, 7)} — staying on virtual diff (no LSP). Check out the PR head SHA to enable LSP.`,
+ 			);
+-			return;
++			return undefined;
+ 		}
+ 
+ 		// Resolve both sides in parallel via `allSettled` so a one-sided
+@@ -404,7 +443,7 @@ export class KrtMonacoDiffView extends Disposable {
+ 		if (this._store.isDisposed) {
+ 			headRef?.dispose();
+ 			baseRef?.dispose();
+-			return;
++			return undefined;
+ 		}
+ 		if (!headRef || !baseRef) {
+ 			if (headSettled.status === 'rejected') {
+@@ -416,38 +455,18 @@ export class KrtMonacoDiffView extends Disposable {
+ 					baseSettled.reason,
+ 				);
+ 			}
+-			// Partial resolution — abandon to avoid the mixed-content
+-			// visual breakage described in this method's docstring.
+ 			headRef?.dispose();
+ 			baseRef?.dispose();
+-			return;
++			return undefined;
+ 		}
+ 
+ 		this._register(headRef);
+ 		this._register(baseRef);
+ 
+-		const baseModel = baseRef.object.textEditorModel;
+-		const headModel = headRef.object.textEditorModel;
+-
+-		this.applyDiffModel(baseModel, headModel);
+-
+-		// realLines is identity for full-content workspace-backed
+-		// models — the gutter shows real file line numbers naturally
+-		// because each model line IS a real file line. Both sides
+-		// upgraded together, so we can use Monaco's built-in numbering
+-		// (`'on'`) instead of the patch-derived sparse callback.
+-		this.headRealLines = identityArray(headModel.getLineCount());
+-		this.baseRealLines = identityArray(baseModel.getLineCount());
+-		this.applyLineNumbers(/*identity*/ true);
+-		this.registerCommentResources(baseModel.uri, headModel.uri);
+-
+-		// Both sides now have full content — collapse unchanged regions
+-		// so the visual stays focused on the changes plus a few lines of
+-		// real surrounding context (`+ N hidden lines` is meaningful
+-		// here, unlike the virtual case where it would reveal nothing).
+-		this.widget.updateOptions({
+-			hideUnchangedRegions: { enabled: true, contextLineCount: 3, minimumLineCount: 4 },
+-		});
++		return {
++			base: baseRef.object.textEditorModel,
++			head: headRef.object.textEditorModel,
++		};
+ 	}
+ 
+ 	/**
+@@ -527,7 +546,7 @@ export class KrtMonacoDiffView extends Disposable {
+ 	 * inline composer when a reviewer clicks a line number.
+ 	 */
+ 	onLineNumberClick(callback: (side: DiffSide, line: number) => void): IDisposable {
+-		const wire = (editor: ICodeEditor, side: DiffSide, realLines: ReadonlyArray<number | undefined>) =>
++		const wire = (editor: ICodeEditor, side: DiffSide) =>
+ 			editor.onMouseDown(e => {
+ 				if (e.target.type !== MouseTargetType.GUTTER_LINE_NUMBERS) {
+ 					return;
+@@ -536,17 +555,19 @@ export class KrtMonacoDiffView extends Disposable {
+ 				if (modelLine === undefined) {
+ 					return;
+ 				}
+-				// Translate model line → real file line via the per-side
+-				// map. Comments anchor to the file's real line number,
+-				// not the model's compact line.
++				// Read realLines through `this` so the async-resolution
++				// path that swaps the patch-derived sparse map for an
++				// identity map is visible here. Capturing the array at
++				// `wire` time strands the click handler with the old map.
++				const realLines = side === 'RIGHT' ? this.headRealLines : this.baseRealLines;
+ 				const real = realLines[modelLine - 1];
+ 				if (real !== undefined) {
+ 					callback(side, real);
+ 				}
+ 			});
+ 		const store = new DisposableStore();
+-		store.add(wire(this.widget.getModifiedEditor(), 'RIGHT', this.headRealLines));
+-		store.add(wire(this.widget.getOriginalEditor(), 'LEFT', this.baseRealLines));
++		store.add(wire(this.widget.getModifiedEditor(), 'RIGHT'));
++		store.add(wire(this.widget.getOriginalEditor(), 'LEFT'));
+ 		this._register(store);
+ 		return store;
+ 	}
+-- 
+2.52.0
+

@@ -1,0 +1,129 @@
+From 9fe9ecbbc2d9f5dad254b8a55bf3fb8797497776 Mon Sep 17 00:00:00 2001
+From: Kol Crooks <kol.crooks@datadoghq.com>
+Date: Wed, 6 May 2026 13:24:59 -0400
+Subject: [PATCH] Monaco diff: fixed 560px card with internal scroll
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Auto-fit-to-content was fighting Monaco's reactive layout pipeline —
+`hideUnchangedRegions` collapses on a later autorun tick than
+`waitForDiff()` resolves, so the layoutToContent staggered refits
+(even at 500ms) kept reading interim heights and the diff card ended
+up hundreds of pixels too tall.
+
+Switched to a fixed-height per-file card (560px) with
+`automaticLayout: true`. Monaco owns the inner scroll; the user
+scrolls the outer pane to walk between files. Trade-off: a single
+giant file forces a nested scroll inside its card, but that's a much
+better failure mode than the previous "card extends 1000px below the
+content".
+
+The internal scrollbar's `alwaysConsumeMouseWheel: false` means once
+you hit the card's edge the wheel events flow back to the outer
+pane — feels natural in practice.
+---
+ .../contrib/krt/browser/pr/krtMonacoDiff.ts   | 62 +++++--------------
+ 1 file changed, 15 insertions(+), 47 deletions(-)
+
+diff --git a/src/vs/workbench/contrib/krt/browser/pr/krtMonacoDiff.ts b/src/vs/workbench/contrib/krt/browser/pr/krtMonacoDiff.ts
+index 74db8d8fedc..d42a90e4edf 100644
+--- a/src/vs/workbench/contrib/krt/browser/pr/krtMonacoDiff.ts
++++ b/src/vs/workbench/contrib/krt/browser/pr/krtMonacoDiff.ts
+@@ -45,7 +45,14 @@ interface ILineZoneOptions {
+ 	readonly domNode: HTMLElement;
+ }
+ 
+-const MAX_HEIGHT_PX = 2000;
++// Each diff card is a fixed-height window with internal scroll. Auto-
++// fit-to-content is fragile against Monaco's reactive layout pipeline
++// (`hideUnchangedRegions` collapses on a later autorun tick than
++// `waitForDiff`, etc.) — the user scrolls the outer pane to walk
++// between files and the diff scrolls inside its card if a single file
++// is taller than `CARD_HEIGHT_PX`. v1; revisit if the nested-scroll
++// UX bites.
++const CARD_HEIGHT_PX = 560;
+ 
+ /**
+  * Embeds Monaco's `DiffEditorWidget` in a container, populates it with
+@@ -72,12 +79,7 @@ export class KrtMonacoDiffView extends Disposable {
+ 		super();
+ 
+ 		this.container = DOM.append(parent, DOM.$('.krt-pr-diff-monaco'));
+-		// Start with a placeholder height so the inner code editors
+-		// render their first frame. With `automaticLayout: false` and a
+-		// 0-height container, Monaco's `getContentHeight()` stays 0
+-		// forever and `layoutToContent` can't recover. Final height is
+-		// driven by the staggered refits below + `onDidContentSizeChange`.
+-		this.container.style.height = '240px';
++		this.container.style.height = `${CARD_HEIGHT_PX}px`;
+ 
+ 		this.widget = this._register(instantiationService.createInstance(
+ 			DiffEditorWidget,
+@@ -93,12 +95,13 @@ export class KrtMonacoDiffView extends Disposable {
+ 					minimumLineCount: 4,
+ 				},
+ 				renderOverviewRuler: false,
+-				automaticLayout: false,
++				automaticLayout: true,
+ 				scrollBeyondLastLine: false,
+ 				minimap: { enabled: false },
+ 				scrollbar: {
++					// Monaco owns the wheel inside the card; the outer
++					// pane only takes over once you hit the card's edge.
+ 					alwaysConsumeMouseWheel: false,
+-					handleMouseWheel: false,
+ 				},
+ 				lineNumbersMinChars: 4,
+ 			},
+@@ -203,44 +206,9 @@ export class KrtMonacoDiffView extends Disposable {
+ 		// Leave them in `IModelService` for the workbench's lifetime; they
+ 		// share a URI per (owner, repo, sha, path) so memory stays bounded.
+ 
+-		this.widget.layout();
+-		// Staggered refits catch `hideUnchangedRegions` collapsing — its
+-		// autorun fires after `waitForDiff` resolves but inside a later
+-		// reactive tick, so a single post-`waitForDiff` refit reads the
+-		// pre-collapse height. Multiple delayed refits converge on the
+-		// actual visible height; the timers are tracked on the disposable
+-		// store so they don't fire against a torn-down widget.
+-		const timers = new Set<ReturnType<typeof setTimeout>>();
+-		this._register(toDisposable(() => {
+-			for (const t of timers) {
+-				clearTimeout(t);
+-			}
+-			timers.clear();
+-		}));
+-		void this.widget.waitForDiff().then(() => {
+-			for (const delay of [0, 50, 200, 500]) {
+-				const t = setTimeout(() => {
+-					timers.delete(t);
+-					this.layoutToContent();
+-				}, delay);
+-				timers.add(t);
+-			}
+-		});
+-
+-		// Dynamic refit on subsequent content-size changes (e.g. user
+-		// expands "Show unchanged regions").
+-		this._register(this.widget.onDidContentSizeChange(() => this.layoutToContent()));
+-	}
+-
+-	private layoutToContent(): void {
+-		const contentHeight = Math.min(this.widget.getContentHeight(), MAX_HEIGHT_PX);
+-		// Add a small chrome margin so the bottom row isn't flush against
+-		// the section's border.
+-		const target = Math.max(contentHeight + 8, 60);
+-		if (this.container.clientHeight !== target) {
+-			this.container.style.height = `${target}px`;
+-			this.widget.layout();
+-		}
++		// `automaticLayout: true` means the widget watches its container
++		// size; we sized the container statically above, so no further
++		// height management is needed here.
+ 	}
+ 
+ 	/**
+-- 
+2.52.0
+
