@@ -1,15 +1,9 @@
-From 2bd4ee63ee7aef97556f2514e2fdc041d19e6a98 Mon Sep 17 00:00:00 2001
+From a43d3c01d7e0cf5864e891033465056986e6ecd5 Mon Sep 17 00:00:00 2001
 From: julietmoss <juliet.moss@datadoghq.com>
-Date: Mon, 11 May 2026 15:24:11 -0400
-Subject: [PATCH] Fix #3: clickable API key link + key persistence in dev
+Date: Tue, 12 May 2026 14:38:08 -0400
+Subject: [PATCH 3/4] Fix #3: clickable API key link + key persistence in dev
  builds
 
-- Replace quickInputService.input() with createInputBox() and add an
-  external-link button that opens platform.claude.com/settings/...
-  (plain prompt text can't be clicked or selected in VS Code's quick input)
-- Fall back to prefixed plaintext storage when IEncryptionService
-  (safeStorage) is unavailable, e.g. in dev builds; read side handles
-  both encrypted and raw-prefixed blobs
 ---
  .../krt/browser/ai/krtAi.contribution.ts      | 56 ++++++++++++++-----
  .../contrib/krt/browser/ai/krtAiSettings.ts   | 53 ++++++------------
@@ -17,7 +11,7 @@ Subject: [PATCH] Fix #3: clickable API key link + key persistence in dev
  3 files changed, 63 insertions(+), 54 deletions(-)
 
 diff --git a/src/vs/workbench/contrib/krt/browser/ai/krtAi.contribution.ts b/src/vs/workbench/contrib/krt/browser/ai/krtAi.contribution.ts
-index 0f3f2b80f44..6f3e230339f 100644
+index 5b885a7928a..6f3e230339f 100644
 --- a/src/vs/workbench/contrib/krt/browser/ai/krtAi.contribution.ts
 +++ b/src/vs/workbench/contrib/krt/browser/ai/krtAi.contribution.ts
 @@ -4,13 +4,18 @@
@@ -52,7 +46,7 @@ index 0f3f2b80f44..6f3e230339f 100644
 -
 -		const value = await quickInputService.input({
 -			title: localize('krt.ai.configureKey.inputTitle', "Anthropic API Key"),
--			prompt: localize('krt.ai.configureKey.inputPrompt', "Paste your Anthropic API key. Stored encrypted in the OS keychain. Leave blank to clear. Don't have a key? https://platform.claude.com/settings/workspaces/default/keys"),
+-			prompt: localize('krt.ai.configureKey.inputPrompt', "Paste your Anthropic API key. Stored encrypted in the OS keychain. Leave blank to clear."),
 -			placeHolder: 'sk-ant-…',
 -			password: true,
 -			ignoreFocusLost: true,
@@ -201,7 +195,7 @@ index 9812584c7f0..ba68f60bfc6 100644
   */
  export function readBaseUrl(storageService: IStorageService): string {
 diff --git a/src/vs/workbench/contrib/krt/browser/ai/krtTourGenerator.ts b/src/vs/workbench/contrib/krt/browser/ai/krtTourGenerator.ts
-index 6811d3a0927..ed225dae615 100644
+index 21ff879c19e..41284e3fe6e 100644
 --- a/src/vs/workbench/contrib/krt/browser/ai/krtTourGenerator.ts
 +++ b/src/vs/workbench/contrib/krt/browser/ai/krtTourGenerator.ts
 @@ -5,9 +5,9 @@
