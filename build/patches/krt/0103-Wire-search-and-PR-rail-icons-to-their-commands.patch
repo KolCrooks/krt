@@ -1,0 +1,76 @@
+From d2532d69282ba76339024f7da8e9370c068a141b Mon Sep 17 00:00:00 2001
+From: julietmoss <juliet.moss@datadoghq.com>
+Date: Tue, 12 May 2026 14:37:28 -0400
+Subject: [PATCH 2/4] Wire search and PR rail icons to their commands
+
+---
+ .bits/settings.json                                | 14 ++++++++++++++
+ .../contrib/krt/browser/pr/.bits/settings.json     |  7 +++++++
+ src/vs/workbench/services/krt/browser/krtRail.ts   |  9 +++++----
+ 3 files changed, 26 insertions(+), 4 deletions(-)
+ create mode 100644 .bits/settings.json
+ create mode 100644 src/vs/workbench/contrib/krt/browser/pr/.bits/settings.json
+
+diff --git a/.bits/settings.json b/.bits/settings.json
+new file mode 100644
+index 00000000000..091ca6512d6
+--- /dev/null
++++ b/.bits/settings.json
+@@ -0,0 +1,14 @@
++{
++  "permissions": {
++    "allow": [
++      "Bash(node_modules/.bin/tsc:*)",
++      "Bash(npm run compile:*)",
++      "Bash(git stash:*)",
++      "Bash(sed:*)",
++      "Bash(git --no-pager:*)",
++      "Bash(git format-patch:*)",
++      "Bash(git diff:*)",
++      "Bash(cp:*)"
++    ]
++  }
++}
+\ No newline at end of file
+diff --git a/src/vs/workbench/contrib/krt/browser/pr/.bits/settings.json b/src/vs/workbench/contrib/krt/browser/pr/.bits/settings.json
+new file mode 100644
+index 00000000000..05a2bd185f4
+--- /dev/null
++++ b/src/vs/workbench/contrib/krt/browser/pr/.bits/settings.json
+@@ -0,0 +1,7 @@
++{
++  "permissions": {
++    "allow": [
++      "Bash(git -C:*)"
++    ]
++  }
++}
+\ No newline at end of file
+diff --git a/src/vs/workbench/services/krt/browser/krtRail.ts b/src/vs/workbench/services/krt/browser/krtRail.ts
+index 8f8cac320bc..d8a6dab1191 100644
+--- a/src/vs/workbench/services/krt/browser/krtRail.ts
++++ b/src/vs/workbench/services/krt/browser/krtRail.ts
+@@ -22,15 +22,16 @@ const KRT_RAIL_BUTTONS: ReadonlyArray<KrtRailButton> = [
+ 		key: 'search',
+ 		icon: 'search',
+ 		tooltip: localize('krt.rail.search', "Search PRs"),
+-		// Phase 4 wires this to the KRT search overlay.
+-		onClick: () => { /* no-op until Phase 4 */ },
++		// Opens the KRT search overlay (same as ⌘K).
++		onClick: commandService => { commandService.executeCommand('krt.search'); },
+ 	},
+ 	{
+ 		key: 'pr',
+ 		icon: 'pr',
+ 		tooltip: localize('krt.rail.pr', "PR view"),
+-		// Phase 5 sets the active PR tab's view mode.
+-		onClick: () => { /* no-op until Phase 5 */ },
++		// Until Phase 5 can set the active tab's view mode, treat the PR
++		// icon as "open a PR" — same action as F1 → KRT: Open PR.
++		onClick: commandService => { commandService.executeCommand('krt.openPullRequest'); },
+ 	},
+ 	{
+ 		key: 'review',
+-- 
+2.54.0
+

@@ -1,8 +1,18 @@
+From cd8178bc1bbe8ad3b3c2e288c103a9d15f910494 Mon Sep 17 00:00:00 2001
+From: julietmoss <juliet.moss@datadoghq.com>
+Date: Tue, 12 May 2026 14:36:19 -0400
+Subject: [PATCH 1/4] PR browse: scoped empty states
+
+---
+ .../pullRequestProviderMainService.ts           |  3 +++
+ .../krt/browser/search/krtSearchOverlay.ts      | 17 +++++++++++++----
+ 2 files changed, 16 insertions(+), 4 deletions(-)
+
 diff --git a/src/vs/platform/krt/electron-main/pullRequestProviderMainService.ts b/src/vs/platform/krt/electron-main/pullRequestProviderMainService.ts
-index 1a1a65300bc..81d48bd70c1 100644
+index c1a9421b6d1..a37ec4181e2 100644
 --- a/src/vs/platform/krt/electron-main/pullRequestProviderMainService.ts
 +++ b/src/vs/platform/krt/electron-main/pullRequestProviderMainService.ts
-@@ -280,6 +280,9 @@ function buildSearchQuery(query: string, scope: SearchScope): string {
+@@ -321,6 +321,9 @@ function buildSearchQuery(query: string, scope: SearchScope, repos?: readonly {
  	switch (scope) {
  		case 'all-open':
  			qualifiers.push('is:open');
@@ -13,10 +23,10 @@ index 1a1a65300bc..81d48bd70c1 100644
  		case 'reviewed':
  			qualifiers.push('reviewed-by:@me');
 diff --git a/src/vs/workbench/contrib/krt/browser/search/krtSearchOverlay.ts b/src/vs/workbench/contrib/krt/browser/search/krtSearchOverlay.ts
-index 0bcec2a661f..bb6cef645b9 100644
+index f11b9a262df..41c305f1336 100644
 --- a/src/vs/workbench/contrib/krt/browser/search/krtSearchOverlay.ts
 +++ b/src/vs/workbench/contrib/krt/browser/search/krtSearchOverlay.ts
-@@ -173,6 +173,7 @@ class KrtSearchOverlay extends Disposable {
+@@ -191,6 +191,7 @@ class KrtSearchOverlay extends Disposable {
  	private attachEventListeners(): void {
  		this.listeners.add(DOM.addDisposableListener(this.inputElement, 'input', () => {
  			this.query = this.inputElement.value;
@@ -24,13 +34,13 @@ index 0bcec2a661f..bb6cef645b9 100644
  			this.scheduleSearch();
  		}));
  		this.listeners.add(DOM.addDisposableListener(this.inputElement, 'keydown', (raw) => {
-@@ -296,9 +297,17 @@ class KrtSearchOverlay extends Disposable {
- 		}
- 		if (this.results.length === 0) {
+@@ -341,9 +342,17 @@ class KrtSearchOverlay extends Disposable {
+ 				return;
+ 			}
  			const el = DOM.append(this.resultsElement, DOM.$('.krt-search-empty'));
 -			el.textContent = this.query
 -				? localize('krt.search.noMatches', "No PRs match.")
--				: localize('krt.search.startTyping', "Type to search PRs across GitHub.");
+-				: localize('krt.search.startTyping', "Type to search PRs in your registered workspaces.");
 +			if (this.query) {
 +				el.textContent = localize('krt.search.noMatches', "No PRs match.");
 +			} else {
@@ -45,7 +55,7 @@ index 0bcec2a661f..bb6cef645b9 100644
  			return;
  		}
  		this.resultRowElements = [];
-@@ -364,7 +373,7 @@ class KrtSearchOverlay extends Disposable {
+@@ -409,7 +418,7 @@ class KrtSearchOverlay extends Disposable {
  	private refreshRecents(): void {
  		DOM.clearNode(this.recentsGrid);
  		const recents = readRecentPullRequests(this.storageService).slice(0, RECENTS_GRID_LIMIT);
@@ -54,3 +64,6 @@ index 0bcec2a661f..bb6cef645b9 100644
  			this.recentsContainer.hidden = true;
  			return;
  		}
+-- 
+2.54.0
+
