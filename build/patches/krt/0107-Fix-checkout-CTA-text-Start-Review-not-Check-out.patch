@@ -1,0 +1,43 @@
+From 375ba15ad7b6c6f81219e8153d57d90f1044e079 Mon Sep 17 00:00:00 2001
+From: julietmoss <juliet.moss@datadoghq.com>
+Date: Tue, 12 May 2026 15:06:37 -0400
+Subject: [PATCH 2/2] Fix checkout CTA text: 'Start Review' not 'Check out'
+
+---
+ .../contrib/krt/browser/pr/krtPullRequestEditorPane.ts      | 6 +++---
+ 1 file changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.ts b/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.ts
+index e4e5c1874ab..8df5e85160f 100644
+--- a/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.ts
++++ b/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.ts
+@@ -1560,7 +1560,7 @@ export class KrtPullRequestEditorPane extends EditorPane {
+ 			const body = DOM.append(cta, DOM.$('.krt-pr-diff-cta-body'));
+ 			body.textContent = localize(
+ 				'krt.pr.diffCtaCheckout.body',
+-				"KRT renders the diff against the working tree at the PR's head commit. Click Check out in the header above; KRT switches the working tree non-destructively (jj op restore / git stash) and the diff appears here with full LSP support.",
++				"KRT renders the diff against the working tree at the PR's head commit. Click Start Review in the header above; KRT switches the working tree non-destructively (jj op restore / git stash) and the diff appears here with full LSP support.",
+ 			);
+ 			return;
+ 		}
+@@ -2041,7 +2041,7 @@ export class KrtPullRequestEditorPane extends EditorPane {
+ 			const cta = DOM.append(wrap, DOM.$('.krt-pr-tour-mini-cta'));
+ 			cta.textContent = localize(
+ 				'krt.pr.tour.checkoutHint',
+-				"Check out PR #{0} (button in the header above) to see chapter diffs.",
++				"Click Start Review in the header above to check out PR #{0} and see chapter diffs.",
+ 				pr.number,
+ 			);
+ 			return;
+@@ -2466,7 +2466,7 @@ export class KrtPullRequestEditorPane extends EditorPane {
+ 			const body = DOM.append(cta, DOM.$('.krt-pr-diff-cta-body'));
+ 			body.textContent = localize(
+ 				'krt.pr.storyboard.diffCtaCheckout.body',
+-				"Click Check out in the PR header. KRT switches the working tree non-destructively and the chapter's diff appears here with full LSP.",
++				"Click Start Review in the PR header. KRT switches the working tree non-destructively and the chapter's diff appears here with full LSP.",
+ 			);
+ 			return;
+ 		}
+-- 
+2.54.0
+
