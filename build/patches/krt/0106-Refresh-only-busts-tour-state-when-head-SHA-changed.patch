@@ -1,0 +1,44 @@
+From d59b017755ab298eb42a1437c9f5490b65793767 Mon Sep 17 00:00:00 2001
+From: julietmoss <juliet.moss@datadoghq.com>
+Date: Tue, 12 May 2026 14:39:33 -0400
+Subject: [PATCH 3/4] Refresh only busts tour state when head SHA changed
+
+---
+ .../krt/browser/pr/krtPullRequestEditorPane.ts     | 14 ++++++++++++++
+ 1 file changed, 14 insertions(+)
+
+diff --git a/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.ts b/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.ts
+index df2a963b7a0..e4e5c1874ab 100644
+--- a/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.ts
++++ b/src/vs/workbench/contrib/krt/browser/pr/krtPullRequestEditorPane.ts
+@@ -394,6 +394,7 @@ export class KrtPullRequestEditorPane extends EditorPane {
+ 		invalidatePrCache(input.url);
+ 		this.fetchToken++;
+ 		const myToken = this.fetchToken;
++		const previousSha = this.currentPr?.head.sha;
+ 		const previousPr = this.currentPr;
+ 		this.currentPr = undefined;
+ 		this.updateHeaderActionsEnablement();
+@@ -406,6 +407,19 @@ export class KrtPullRequestEditorPane extends EditorPane {
+ 			input.setTitle(pr.title);
+ 			this.currentPr = pr;
+ 			this.liveComments = [...pr.comments];
++			// Only bust tour state when new commits were pushed — the tour cache
++			// is keyed by headSha, so a SHA change means a cache miss and
++			// regeneration. If the SHA is unchanged, keep the existing tour.
++			if (!previousSha || previousSha !== pr.head.sha) {
++				this.tourFetchToken++;
++				this.tourState = undefined;
++				this.tourLoading = false;
++				this.tourStreaming = false;
++				this.tourError = undefined;
++				this.tourNoKey = false;
++				this.tourSelectedChapterId = undefined;
++				this.storyboardSelectedId = undefined;
++			}
+ 			this.renderLoaded(pr);
+ 		} catch (err) {
+ 			if (this.currentInput !== input || this.fetchToken !== myToken) {
+-- 
+2.54.0
+
