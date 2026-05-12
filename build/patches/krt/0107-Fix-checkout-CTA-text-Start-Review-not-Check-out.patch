@@ -1,7 +1,7 @@
-From 375ba15ad7b6c6f81219e8153d57d90f1044e079 Mon Sep 17 00:00:00 2001
+From eaea1fc79cc6bd5c8b67bdf7f1b0c82f70a993e7 Mon Sep 17 00:00:00 2001
 From: julietmoss <juliet.moss@datadoghq.com>
 Date: Tue, 12 May 2026 15:06:37 -0400
-Subject: [PATCH 2/2] Fix checkout CTA text: 'Start Review' not 'Check out'
+Subject: [PATCH 4/4] Fix checkout CTA text: 'Start Review' not 'Check out'
 
 ---
  .../contrib/krt/browser/pr/krtPullRequestEditorPane.ts      | 6 +++---

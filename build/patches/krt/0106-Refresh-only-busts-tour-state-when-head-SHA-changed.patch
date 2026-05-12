@@ -1,7 +1,7 @@
-From d26c4a826211cb491e02777154255da59df04ef4 Mon Sep 17 00:00:00 2001
+From d59b017755ab298eb42a1437c9f5490b65793767 Mon Sep 17 00:00:00 2001
 From: julietmoss <juliet.moss@datadoghq.com>
 Date: Tue, 12 May 2026 14:39:33 -0400
-Subject: [PATCH 1/2] Refresh only busts tour state when head SHA changed
+Subject: [PATCH 3/4] Refresh only busts tour state when head SHA changed
 
 ---
  .../krt/browser/pr/krtPullRequestEditorPane.ts     | 14 ++++++++++++++
