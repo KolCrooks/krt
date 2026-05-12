@@ -1,7 +1,7 @@
-From a43d3c01d7e0cf5864e891033465056986e6ecd5 Mon Sep 17 00:00:00 2001
+From ee6317af31978edb44122d200c43c1088abb1c12 Mon Sep 17 00:00:00 2001
 From: julietmoss <juliet.moss@datadoghq.com>
 Date: Tue, 12 May 2026 14:38:08 -0400
-Subject: [PATCH 3/4] Fix #3: clickable API key link + key persistence in dev
+Subject: [PATCH 2/4] Fix #3: clickable API key link + key persistence in dev
  builds
 
 ---
