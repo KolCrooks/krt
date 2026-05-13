@@ -84,22 +84,23 @@ add a `vs/workbench/contrib/krt/` tree for all the new views.
 ```
 krt/                                     # this repo (you are here)
 ├── PLAN.md                              # this file
-├── vscode/                              # git submodule → fork of microsoft/vscode
+├── vscode/                              # vendored fork of microsoft/vscode
 │   └── src/vs/workbench/contrib/krt/    # all KRT-specific UI code
-├── build/                               # VSCodium-style build scripts, adapted
-│   ├── prepare_vscode.sh
-│   ├── product.json                     # KRT branding + URLs
-│   └── patches/                         # patches applied on top of upstream vscode
-│       └── krt/                         # KRT's own patches (titlebar, rail, tabs…)
+├── build/                               # build scripts
+│   ├── build.sh                         # one-shot npm install + compile
+│   └── clean.sh                         # wipe vscode/ build artifacts
 ├── design/                              # checked-in copy of the design bundle
 │   └── kol-s-review-tool/               # from the Claude Design handoff
 └── docs/                                # ADRs, contributor guide, release notes
+    ├── upstream-vscode.md               # fork base + upstream-bump workflow
     └── phases/                          # one working checklist per phase, written when the phase starts
 ```
 
-This keeps KRT-specific code visible at the top level, while the upstream VSCode
-checkout stays as a submodule that's kept rebasable against `microsoft/vscode`
-main.
+This keeps KRT-specific code visible at the top level. `vscode/` is vendored
+source — no submodule, no patches. Originally (Phase 0) we ran a clone-and-patch
+setup; on 2026-05-13 the patch series was collapsed into the committed source
+and the nested `.git` was dropped. See `docs/upstream-vscode.md` for the
+upstream-bump workflow.
 
 ### Licensing reality check
 
@@ -623,10 +624,13 @@ The early-architecture questions are resolved as follows:
 
 ## 6. Risks and how we'll handle them
 
-- **Upstream churn** — `microsoft/vscode` lands ~150 commits/week. Our patches
-  to title bar / activity bar / tabs will rot. Mitigation: rebase weekly,
-  prefer additive contributions (`workbench/contrib/krt/`) over invasive
-  patches; keep the patch set as small as possible.
+- **Upstream churn** — `microsoft/vscode` lands ~150 commits/week. Our
+  divergence (title bar / activity bar / tabs / custom editor inputs) will
+  bit-rot against upstream. Mitigation: merge upstream weekly (see
+  `docs/upstream-vscode.md` for the workflow), prefer additive
+  contributions under `vscode/src/vs/workbench/contrib/krt/` over invasive
+  edits to upstream files; keep the upstream-edit surface as small as we
+  can.
 - **Editor coupling** — VSCode's editor groups assume editors edit text. Our
   PR-mode editor inputs are non-text. Mitigation: model them as
   `IEditorInput` with a custom `EditorPane`, mirroring how the existing

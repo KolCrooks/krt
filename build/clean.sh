@@ -1,34 +1,43 @@
 #!/usr/bin/env bash
-# clean.sh — reset vscode/ to a clean state at the pinned tag.
-# Destroys any local changes inside vscode/ — it's a vendored submodule, not
-# a place to keep work. Patches under build/patches/krt/ are the source of
-# truth for KRT's own changes.
+# clean.sh — wipe build artifacts inside vscode/ (compile output, node_modules,
+# downloaded Electron). Does NOT touch source files — vscode/ is vendored, so
+# anything outside the ignored set is committed work.
+#
+# Run from the repo root: `bash build/clean.sh`.
 
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 VSCODE_DIR="$REPO_ROOT/vscode"
-PIN_FILE="$REPO_ROOT/build/upstream-pin"
 
-if [[ ! -d "$VSCODE_DIR/.git" ]]; then
-  echo "[clean] no submodule at $VSCODE_DIR — nothing to do"
+if [[ ! -d "$VSCODE_DIR" ]]; then
+  echo "[clean] $VSCODE_DIR missing — nothing to do"
   exit 0
 fi
 
-PIN="$(tr -d '[:space:]' < "$PIN_FILE")"
-
 cd "$VSCODE_DIR"
 
-if [[ -d .git/rebase-apply ]]; then
-  echo "[clean] aborting in-progress git am"
-  git am --abort || true
-fi
+# Targets match vscode/.gitignore — everything here is build-time output.
+echo "[clean] removing vscode/ build artifacts"
+rm -rf \
+  node_modules \
+  out \
+  out-build \
+  out-vscode \
+  out-vscode-min \
+  .build \
+  .tmp \
+  .cache \
+  .profile-oss
 
-echo "[clean] reset vscode/ to $PIN"
-git reset --hard "refs/tags/$PIN" >/dev/null 2>&1 || git reset --hard "$PIN"
+# Per-extension build output (out/ + node_modules/ + tsbuildinfo).
+find extensions .vscode/extensions -mindepth 1 -maxdepth 4 \
+  \( -name node_modules -o -name out -o -name dist -o -name 'tsconfig.tsbuildinfo' \) \
+  -exec rm -rf {} + 2>/dev/null || true
 
-echo "[clean] git clean -xdf inside vscode/"
-git clean -xdf
+# Nested build dirs that ship their own node_modules.
+rm -rf build/node_modules build/npm/gyp/node_modules build/rspack/node_modules build/vite/node_modules
+rm -rf remote/node_modules remote/web/node_modules
 
 cd "$REPO_ROOT"
 echo "[clean] done"

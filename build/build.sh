@@ -2,8 +2,8 @@
 # build.sh — full one-shot build of KRT.
 #
 # Run from the repo root: `bash build/build.sh`.
-# Steps: prepare_vscode.sh (reset + patch), npm install, compile,
-#        rebuild native modules against Electron.
+# Steps: npm install, compile, rebuild native modules against Electron.
+# vscode/ is vendored source — edit it directly, no patch step.
 
 set -euo pipefail
 
@@ -29,8 +29,6 @@ if [[ "$NODE_MAJOR" != "22" ]]; then
   echo "[build] ERROR: Node 22 required (got $NODE_MAJOR). Run: brew install node@22" >&2
   exit 1
 fi
-
-bash "$REPO_ROOT/build/prepare_vscode.sh"
 
 # Fail fast on Microsoft endpoints in shipping source — runs before the
 # compile so we don't waste a build on a stripped-feature regression.

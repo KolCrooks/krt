@@ -1,9 +1,8 @@
 #!/usr/bin/env bash
 # check-no-ms-endpoints.sh — fail if Microsoft-coupled endpoints or telemetry
-# strings reach the patched, shipping vscode/ source.
+# strings reach the shipping vscode/ source.
 #
 # Run from the repo root: `bash build/check-no-ms-endpoints.sh`.
-# Run AFTER prepare_vscode.sh so we scan the patched + extension-stripped tree.
 #
 # Scope: only files that actually compile into the shipping binary —
 #   - vscode/src/**         (workbench / platform / editor / base)

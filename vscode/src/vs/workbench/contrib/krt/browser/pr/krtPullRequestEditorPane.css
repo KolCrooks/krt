@@ -1,0 +1,2389 @@
+/*---------------------------------------------------------------------------------------------
+ *  Copyright (c) Microsoft Corporation. All rights reserved.
+ *  Licensed under the MIT License. See License.txt in the project root for license information.
+ *--------------------------------------------------------------------------------------------*/
+
+.krt-pr-editor {
+	display: flex;
+	flex-direction: column;
+	box-sizing: border-box;
+	/* Top padding moved to `.krt-pr-editor-header` so sticky children
+	 * (diff card headers, etc.) anchor at `top: 0` of the visible
+	 * scrollport without leaving an empty padding gap above them. */
+	padding: 0 32px 48px;
+	gap: 18px;
+	overflow: auto;
+	font-family: 'Inter', system-ui, sans-serif;
+}
+
+.krt-pr-editor-header {
+	display: flex;
+	align-items: flex-start;
+	justify-content: space-between;
+	gap: 16px;
+	/* Visual breathing room that used to live on the scroll
+	 * container's `padding-top`. See `.krt-pr-editor`. */
+	padding-top: 24px;
+}
+
+.krt-pr-editor-header-text {
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+	min-width: 0;
+	flex: 1 1 auto;
+}
+
+.krt-pr-editor-title-row {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	min-width: 0;
+}
+
+.krt-pr-editor-subtitle {
+	font-size: 12px;
+	opacity: 0.7;
+	letter-spacing: 0.02em;
+}
+
+.krt-pr-editor-title {
+	font-size: 22px;
+	font-weight: 600;
+	margin: 0;
+	line-height: 1.3;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+.krt-pr-editor-state-pill {
+	flex: 0 0 auto;
+	font-size: 11px;
+	font-weight: 600;
+	letter-spacing: 0.04em;
+	text-transform: uppercase;
+	padding: 4px 10px;
+	border-radius: 999px;
+	border: 1px solid transparent;
+	color: var(--vscode-foreground);
+}
+
+.krt-pr-editor-state-pill.open {
+	background: rgba(46, 160, 67, 0.15);
+	border-color: rgba(46, 160, 67, 0.55);
+}
+
+.krt-pr-editor-state-pill.closed {
+	background: rgba(207, 34, 46, 0.15);
+	border-color: rgba(207, 34, 46, 0.55);
+}
+
+.krt-pr-editor-state-pill.merged {
+	background: rgba(130, 80, 223, 0.15);
+	border-color: rgba(130, 80, 223, 0.55);
+}
+
+.krt-pr-editor-state-pill.draft {
+	background: rgba(110, 118, 129, 0.15);
+	border-color: rgba(110, 118, 129, 0.55);
+}
+
+.krt-pr-editor-header-actions {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	flex: 0 0 auto;
+}
+
+.krt-pr-editor-header-btn {
+	font: inherit;
+	font-size: 11.5px;
+	font-weight: 500;
+	color: var(--vscode-foreground);
+	background: transparent;
+	border: 1px solid var(--vscode-contrastBorder, rgba(110, 118, 129, 0.4));
+	border-radius: 6px;
+	padding: 4px 10px;
+	cursor: pointer;
+	white-space: nowrap;
+}
+
+.krt-pr-editor-header-btn:hover:not(:disabled) {
+	background: var(--vscode-toolbar-hoverBackground, rgba(110, 118, 129, 0.15));
+}
+
+.krt-pr-editor-header-btn:disabled {
+	opacity: 0.5;
+	cursor: default;
+}
+
+.krt-pr-editor-header-btn.primary {
+	background: var(--krt-accent, var(--vscode-button-background));
+	color: var(--vscode-button-foreground, white);
+	border-color: transparent;
+}
+
+.krt-pr-editor-header-btn.primary:hover:not(:disabled) {
+	background: var(--krt-accent-2, var(--vscode-button-hoverBackground));
+}
+
+.krt-pr-editor-header-btn.danger {
+	color: var(--vscode-errorForeground, #f14c4c);
+	border-color: var(--vscode-errorForeground, rgba(241, 76, 76, 0.5));
+}
+
+.krt-pr-editor-header-btn.danger:hover:not(:disabled) {
+	background: var(--vscode-inputValidation-errorBackground, rgba(241, 76, 76, 0.1));
+}
+
+.krt-pr-editor-body {
+	font-size: 13px;
+	line-height: 1.55;
+}
+
+.krt-pr-editor-skeleton {
+	opacity: 0.6;
+	font-style: italic;
+}
+
+.krt-pr-editor-error {
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+	padding: 14px 16px;
+	border: 1px solid var(--vscode-inputValidation-errorBorder, rgba(207, 34, 46, 0.5));
+	background: var(--vscode-inputValidation-errorBackground, rgba(207, 34, 46, 0.08));
+	border-radius: 4px;
+}
+
+.krt-pr-editor-error-kind {
+	font-size: 11px;
+	font-weight: 600;
+	letter-spacing: 0.06em;
+	text-transform: uppercase;
+	opacity: 0.8;
+}
+
+.krt-pr-editor-error-message {
+	font-size: 13px;
+	font-weight: 500;
+}
+
+.krt-pr-editor-error-hint {
+	font-size: 12px;
+	opacity: 0.85;
+}
+
+/* ---- Phase 5 PR view ---- */
+
+.krt-pr-grid {
+	display: grid;
+	grid-template-columns: minmax(0, 1fr) 280px;
+	gap: 28px;
+}
+
+.krt-pr-main {
+	min-width: 0;
+	display: flex;
+	flex-direction: column;
+	gap: 18px;
+}
+
+.krt-pr-sidebar {
+	display: flex;
+	flex-direction: column;
+	gap: 14px;
+}
+
+.krt-pr-refs {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	font-size: 12px;
+	color: var(--vscode-descriptionForeground);
+}
+
+.krt-pr-ref {
+	font-family: 'JetBrains Mono', monospace;
+	font-size: 11px;
+	padding: 2px 7px;
+	border: 1px solid var(--vscode-widget-border, rgba(127, 127, 127, 0.25));
+	border-radius: 5px;
+}
+
+.krt-pr-ref-arrow {
+	opacity: 0.6;
+	font-family: 'JetBrains Mono', monospace;
+}
+
+.krt-pr-refs-spacer {
+	flex: 1;
+}
+
+.krt-pr-refs-stats {
+	font-family: 'JetBrains Mono', monospace;
+	font-size: 11.5px;
+	opacity: 0.85;
+}
+
+.krt-pr-card {
+	border: 1px solid var(--vscode-widget-border, rgba(127, 127, 127, 0.25));
+	border-radius: 10px;
+	background: var(--vscode-editorWidget-background, transparent);
+	overflow: hidden;
+}
+
+.krt-pr-card-head {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	padding: 10px 14px;
+	border-bottom: 1px solid var(--vscode-widget-border, rgba(127, 127, 127, 0.18));
+	font-size: 12px;
+	color: var(--vscode-descriptionForeground);
+}
+
+.krt-pr-card-title {
+	font-weight: 500;
+	color: var(--vscode-foreground);
+}
+
+.krt-pr-description {
+	padding: 16px 18px;
+	font-size: 13.5px;
+	line-height: 1.65;
+}
+
+.krt-pr-description.empty {
+	font-style: italic;
+	opacity: 0.6;
+}
+
+.krt-pr-description h1,
+.krt-pr-description h2,
+.krt-pr-description h3 {
+	margin: 16px 0 8px;
+	line-height: 1.3;
+}
+
+.krt-pr-description h1 { font-size: 18px; }
+.krt-pr-description h2 { font-size: 16px; }
+.krt-pr-description h3 { font-size: 14px; }
+
+.krt-pr-description p {
+	margin: 0 0 12px;
+}
+
+.krt-pr-description code {
+	font-family: 'JetBrains Mono', monospace;
+	font-size: 0.92em;
+	padding: 1px 5px;
+	border-radius: 4px;
+	background: var(--vscode-textCodeBlock-background, rgba(127, 127, 127, 0.12));
+}
+
+.krt-pr-description pre {
+	padding: 10px 12px;
+	border-radius: 6px;
+	background: var(--vscode-textCodeBlock-background, rgba(127, 127, 127, 0.12));
+	overflow-x: auto;
+}
+
+.krt-pr-description pre code {
+	background: transparent;
+	padding: 0;
+}
+
+.krt-pr-description ul,
+.krt-pr-description ol {
+	margin: 0 0 12px;
+	padding-left: 22px;
+}
+
+.krt-pr-description li {
+	margin: 3px 0;
+}
+
+.krt-pr-description a {
+	color: var(--krt-accent, var(--vscode-textLink-foreground));
+}
+
+/* Activity */
+
+.krt-pr-activity {
+	display: flex;
+	flex-direction: column;
+	gap: 14px;
+}
+
+.krt-pr-activity-tabs {
+	display: flex;
+	align-items: baseline;
+	gap: 14px;
+	border-bottom: 1px solid var(--vscode-widget-border, rgba(127, 127, 127, 0.18));
+}
+
+.krt-pr-activity-heading {
+	font-size: 11px;
+	font-weight: 600;
+	letter-spacing: 0.06em;
+	text-transform: uppercase;
+	opacity: 0.55;
+	margin-right: 6px;
+}
+
+.krt-pr-tab {
+	border: none;
+	background: transparent;
+	color: inherit;
+	font: inherit;
+	font-size: 12.5px;
+	padding: 6px 4px;
+	margin-bottom: -1px;
+	cursor: pointer;
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	border-bottom: 2px solid transparent;
+	opacity: 0.75;
+}
+
+.krt-pr-tab:hover {
+	opacity: 1;
+}
+
+.krt-pr-tab.active {
+	opacity: 1;
+	font-weight: 600;
+	border-bottom-color: var(--krt-accent, var(--vscode-focusBorder));
+}
+
+.krt-pr-tab-count {
+	font-size: 10.5px;
+	padding: 1px 7px;
+	border-radius: 8px;
+	background: var(--vscode-badge-background, rgba(127, 127, 127, 0.18));
+	color: var(--vscode-badge-foreground, inherit);
+	font-weight: 500;
+	min-width: 18px;
+	text-align: center;
+}
+
+.krt-pr-tab.active .krt-pr-tab-count {
+	background: var(--krt-accent, var(--vscode-focusBorder));
+	color: var(--vscode-button-foreground, #fff);
+}
+
+.krt-pr-empty {
+	padding: 24px 6px;
+	text-align: center;
+	font-size: 12.5px;
+	opacity: 0.65;
+}
+
+.krt-pr-empty.error {
+	color: var(--vscode-errorForeground, #d33);
+	opacity: 1;
+}
+
+.krt-pr-timeline {
+	display: flex;
+	flex-direction: column;
+	gap: 14px;
+}
+
+.krt-pr-comment {
+	border: 1px solid var(--vscode-widget-border, rgba(127, 127, 127, 0.25));
+	border-radius: 10px;
+	background: var(--vscode-editorWidget-background, transparent);
+	overflow: hidden;
+}
+
+.krt-pr-comment-head {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	padding: 8px 12px;
+	background: var(--vscode-editor-inactiveSelectionBackground, rgba(127, 127, 127, 0.06));
+	border-bottom: 1px solid var(--vscode-widget-border, rgba(127, 127, 127, 0.18));
+	font-size: 11.5px;
+	color: var(--vscode-descriptionForeground);
+}
+
+.krt-pr-comment-avatar {
+	flex: 0 0 auto;
+	width: 20px;
+	height: 20px;
+	border-radius: 999px;
+	overflow: hidden;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	font-size: 10.5px;
+	font-weight: 600;
+	color: oklch(0.25 0.05 270);
+	background: var(--vscode-toolbar-hoverBackground, rgba(127, 127, 127, 0.2));
+}
+
+img.krt-pr-comment-avatar {
+	object-fit: cover;
+}
+
+.krt-pr-comment-author {
+	font-weight: 500;
+	color: var(--vscode-foreground);
+}
+
+.krt-pr-comment-sep {
+	opacity: 0.5;
+}
+
+.krt-pr-comment-spacer {
+	flex: 1;
+}
+
+.krt-pr-comment-menu-btn {
+	flex: 0 0 auto;
+	width: 22px;
+	height: 22px;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	color: var(--vscode-descriptionForeground);
+	background: transparent;
+	border: 1px solid transparent;
+	border-radius: 4px;
+	padding: 0;
+	cursor: pointer;
+	opacity: 0.6;
+	transition: opacity 80ms, background 80ms;
+}
+
+.krt-pr-comment-menu-btn .codicon {
+	font-size: 14px;
+}
+
+.krt-pr-comment-menu-btn:hover,
+.krt-pr-comment-menu-btn:focus-visible {
+	opacity: 1;
+	background: var(--vscode-toolbar-hoverBackground, rgba(127, 127, 127, 0.12));
+	color: var(--vscode-foreground);
+}
+
+.krt-pr-comment-body {
+	padding: 10px 12px;
+	font-size: 13px;
+	line-height: 1.55;
+}
+
+.krt-pr-comment-body.empty {
+	font-style: italic;
+	opacity: 0.55;
+}
+
+.krt-pr-automation-row {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	padding: 7px 10px;
+	border: 1px solid var(--vscode-widget-border, rgba(127, 127, 127, 0.18));
+	border-radius: 8px;
+	background: var(--vscode-editor-inactiveSelectionBackground, rgba(127, 127, 127, 0.05));
+	font-size: 12.5px;
+}
+
+.krt-pr-automation-kind {
+	font-family: 'JetBrains Mono', monospace;
+	font-size: 10.5px;
+	padding: 1px 7px;
+	border-radius: 4px;
+	background: var(--vscode-badge-background, rgba(127, 127, 127, 0.18));
+	color: var(--vscode-badge-foreground, inherit);
+	flex: 0 0 auto;
+	letter-spacing: 0.02em;
+	text-transform: lowercase;
+}
+
+.krt-pr-automation-actor {
+	font-family: 'JetBrains Mono', monospace;
+	font-size: 11px;
+	color: var(--vscode-descriptionForeground);
+	flex: 0 0 auto;
+}
+
+.krt-pr-automation-summary {
+	flex: 1;
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.krt-pr-automation-when {
+	font-size: 11px;
+	opacity: 0.6;
+	flex: 0 0 auto;
+}
+
+/* Reply box */
+
+.krt-pr-reply {
+	margin-top: 4px;
+	padding: 14px;
+	border: 1px solid var(--vscode-widget-border, rgba(127, 127, 127, 0.25));
+	border-radius: 10px;
+	background: var(--vscode-editorWidget-background, transparent);
+}
+
+.krt-pr-reply-input {
+	width: 100%;
+	box-sizing: border-box;
+	border: 1px solid var(--vscode-input-border, rgba(127, 127, 127, 0.3));
+	background: var(--vscode-input-background);
+	color: var(--vscode-input-foreground);
+	border-radius: 6px;
+	padding: 8px 10px;
+	font: inherit;
+	font-size: 13px;
+	resize: vertical;
+	min-height: 64px;
+}
+
+.krt-pr-reply-input:focus {
+	outline: 1px solid var(--krt-accent, var(--vscode-focusBorder));
+	outline-offset: -1px;
+}
+
+.krt-pr-reply-actions {
+	display: flex;
+	gap: 8px;
+	margin-top: 10px;
+	align-items: center;
+}
+
+.krt-pr-reply-spacer {
+	flex: 1;
+}
+
+.krt-pr-reply-submit {
+	font: inherit;
+	font-size: 12px;
+	padding: 6px 14px;
+	border-radius: 6px;
+	border: 1px solid var(--vscode-button-border, transparent);
+	background: var(--krt-accent, var(--vscode-button-background, #5b5bff));
+	color: var(--vscode-button-foreground, #fff);
+	cursor: pointer;
+}
+
+.krt-pr-reply-submit:disabled {
+	opacity: 0.55;
+	cursor: progress;
+}
+
+.krt-pr-reply-error {
+	margin-top: 8px;
+	font-size: 12px;
+	color: var(--vscode-errorForeground, #d33);
+}
+
+/* Sidebar cards */
+
+.krt-pr-side-card {
+	padding: 14px;
+	border: 1px solid var(--vscode-widget-border, rgba(127, 127, 127, 0.25));
+	border-radius: 10px;
+	background: var(--vscode-editorWidget-background, transparent);
+}
+
+.krt-pr-side-card-title {
+	font-size: 11px;
+	font-weight: 600;
+	letter-spacing: 0.06em;
+	text-transform: uppercase;
+	opacity: 0.55;
+	margin-bottom: 10px;
+}
+
+.krt-pr-side-empty {
+	font-size: 12px;
+	opacity: 0.55;
+	font-style: italic;
+}
+
+.krt-pr-reviewer {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	padding: 5px 0;
+	font-size: 12px;
+}
+
+.krt-pr-reviewer-login {
+	flex: 1;
+	font-family: 'JetBrains Mono', monospace;
+	font-size: 11.5px;
+	color: var(--vscode-descriptionForeground);
+}
+
+.krt-pr-reviewer-state {
+	font-size: 10px;
+	font-weight: 500;
+	padding: 2px 7px;
+	border-radius: 999px;
+	border: 1px solid transparent;
+	flex: 0 0 auto;
+}
+
+.krt-pr-reviewer-state.approved {
+	background: rgba(46, 160, 67, 0.15);
+	border-color: rgba(46, 160, 67, 0.5);
+	color: var(--vscode-foreground);
+}
+
+.krt-pr-reviewer-state.changes_requested {
+	background: rgba(207, 34, 46, 0.15);
+	border-color: rgba(207, 34, 46, 0.5);
+	color: var(--vscode-foreground);
+}
+
+.krt-pr-reviewer-state.commented {
+	background: rgba(127, 127, 127, 0.18);
+	border-color: rgba(127, 127, 127, 0.4);
+}
+
+.krt-pr-reviewer-state.pending,
+.krt-pr-reviewer-state.dismissed {
+	background: rgba(127, 127, 127, 0.1);
+	border-color: rgba(127, 127, 127, 0.25);
+	opacity: 0.85;
+}
+
+.krt-pr-check {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	padding: 5px 6px;
+	margin: 0 -6px;
+	border-radius: 5px;
+	font-size: 11.5px;
+}
+
+.krt-pr-check.clickable {
+	cursor: pointer;
+}
+
+.krt-pr-check.clickable:hover {
+	background: var(--vscode-list-hoverBackground, rgba(127, 127, 127, 0.08));
+}
+
+.krt-pr-check-status {
+	flex: 0 0 auto;
+	font-family: 'JetBrains Mono', monospace;
+	font-size: 10px;
+	font-weight: 600;
+	width: 22px;
+	text-align: center;
+	padding: 1px 0;
+	border-radius: 4px;
+	border: 1px solid transparent;
+}
+
+.krt-pr-check-status.success {
+	color: rgba(46, 160, 67, 1);
+	background: rgba(46, 160, 67, 0.12);
+	border-color: rgba(46, 160, 67, 0.4);
+}
+
+.krt-pr-check-status.failure,
+.krt-pr-check-status.timed_out,
+.krt-pr-check-status.action_required {
+	color: rgba(207, 34, 46, 1);
+	background: rgba(207, 34, 46, 0.12);
+	border-color: rgba(207, 34, 46, 0.4);
+}
+
+.krt-pr-check-status.pending {
+	color: rgba(204, 152, 0, 1);
+	background: rgba(204, 152, 0, 0.12);
+	border-color: rgba(204, 152, 0, 0.4);
+}
+
+.krt-pr-check-status.cancelled,
+.krt-pr-check-status.stale,
+.krt-pr-check-status.neutral,
+.krt-pr-check-status.skipped {
+	color: var(--vscode-descriptionForeground);
+	background: rgba(127, 127, 127, 0.1);
+	border-color: rgba(127, 127, 127, 0.25);
+}
+
+.krt-pr-check-name {
+	flex: 1;
+	font-family: 'JetBrains Mono', monospace;
+	font-size: 11.5px;
+	color: var(--vscode-descriptionForeground);
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.krt-pr-check-meta {
+	flex: 0 0 auto;
+	font-size: 10.5px;
+	color: var(--vscode-descriptionForeground);
+	opacity: 0.7;
+	font-family: 'JetBrains Mono', monospace;
+}
+
+.krt-pr-check-meta.pending {
+	color: rgba(204, 152, 0, 1);
+	opacity: 1;
+}
+
+.krt-pr-check-arrow {
+	opacity: 0;
+	font-size: 11px;
+	font-family: 'JetBrains Mono', monospace;
+	transition: opacity 80ms;
+}
+
+.krt-pr-check.clickable:hover .krt-pr-check-arrow {
+	opacity: 0.6;
+}
+
+.krt-pr-labels {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 6px;
+}
+
+.krt-pr-label-chip {
+	font-size: 11px;
+	padding: 2px 8px;
+	border-radius: 999px;
+	border: 1px solid var(--vscode-widget-border, rgba(127, 127, 127, 0.3));
+	background: var(--vscode-badge-background, rgba(127, 127, 127, 0.12));
+	color: var(--vscode-badge-foreground, inherit);
+}
+
+.krt-pr-stat {
+	display: flex;
+	justify-content: space-between;
+	font-size: 11.5px;
+	padding: 2px 0;
+}
+
+.krt-pr-stat-key {
+	color: var(--vscode-descriptionForeground);
+}
+
+.krt-pr-stat-value {
+	font-family: 'JetBrains Mono', monospace;
+	color: var(--vscode-foreground);
+}
+
+.krt-pr-stat-value.add {
+	color: rgba(46, 160, 67, 1);
+}
+
+.krt-pr-stat-value.del {
+	color: rgba(207, 34, 46, 1);
+}
+
+/* ---------- Sub-mode bar ---------- */
+
+.krt-pr-submode-bar {
+	display: flex;
+	align-items: center;
+	gap: 12px;
+	padding: 8px 0 4px;
+}
+
+/* Pill-wrapped segmented control: matches the demo's outer track
+ * (subtle bg + line) holding individually-rounded subtabs with an
+ * accent-soft active state. */
+.krt-pr-segmented {
+	display: inline-flex;
+	gap: 2px;
+	padding: 2px;
+	background: var(--vscode-input-background, rgba(127, 127, 127, 0.06));
+	border: 1px solid var(--vscode-widget-border, rgba(127, 127, 127, 0.3));
+	border-radius: 7px;
+}
+
+.krt-pr-segmented-btn {
+	height: 24px;
+	padding: 0 12px;
+	border-radius: 5px;
+	background: transparent;
+	border: none;
+	font-size: 11.5px;
+	font-weight: 500;
+	color: var(--vscode-descriptionForeground, var(--vscode-foreground));
+	cursor: pointer;
+	font-family: inherit;
+}
+
+.krt-pr-segmented-btn:hover:not(.active) {
+	background: var(--vscode-toolbar-hoverBackground, rgba(127, 127, 127, 0.12));
+	color: var(--vscode-foreground);
+}
+
+.krt-pr-segmented-btn.active {
+	background: var(--krt-accent-soft, var(--vscode-button-background));
+	color: var(--krt-accent, var(--vscode-button-foreground));
+	box-shadow: inset 0 0 0 1px var(--krt-accent-line, transparent);
+}
+
+/* ---------- Diff body ---------- */
+
+/* Diff body + grid: size to content, not flex-fill. The root .krt-pr-editor is a flex column with overflow:auto, so a tall file stack scrolls naturally; flex-grow here would stretch the body to pane height regardless of content. */
+.krt-pr-editor-body.diff {
+	display: block;
+}
+
+.krt-pr-diff-topbar {
+	display: flex;
+	align-items: center;
+	justify-content: flex-end;
+	margin-bottom: 12px;
+}
+
+.krt-pr-diff-mode-toggle {
+	display: inline-flex;
+	border: 1px solid var(--vscode-contrastBorder, rgba(110, 118, 129, 0.4));
+	border-radius: 6px;
+	overflow: hidden;
+}
+
+.krt-pr-diff-mode-btn {
+	font: inherit;
+	font-size: 11.5px;
+	font-weight: 500;
+	color: var(--vscode-foreground);
+	background: transparent;
+	border: none;
+	padding: 4px 12px;
+	cursor: pointer;
+}
+
+.krt-pr-diff-mode-btn:hover:not(.active) {
+	background: var(--vscode-toolbar-hoverBackground, rgba(110, 118, 129, 0.15));
+}
+
+.krt-pr-diff-mode-btn.active {
+	background: var(--krt-accent, var(--vscode-button-background));
+	color: var(--vscode-button-foreground, white);
+}
+
+.krt-pr-diff {
+	display: grid;
+	grid-template-columns: 260px 1fr;
+	gap: 16px;
+	width: 100%;
+}
+
+/* Phase 10/D host for `KrtPrFlatDiff`. Each file's diff card sizes
+ * itself to its content height; the host stacks them vertically and
+ * the outer pane is the scroll surface. No nested viewport. */
+.krt-pr-multidiff-host {
+	display: flex;
+	flex-direction: column;
+	gap: 12px;
+	min-width: 0;
+}
+
+/* Per-file diff card: bordered, with a header strip + an
+ * auto-sized DiffEditorWidget container. */
+.krt-pr-flat-diff {
+	display: flex;
+	flex-direction: column;
+	gap: 12px;
+}
+
+.krt-pr-flat-diff-card {
+	border: 1px solid var(--vscode-widget-border, rgba(127, 127, 127, 0.3));
+	border-radius: 6px;
+	/* `clip-path` (not `overflow: hidden`) for the rounded-corner
+	 * clip so the sticky header below can escape the card and anchor
+	 * against the outer pane's scroll. `overflow: hidden` would
+	 * trap the sticky element inside the card and defeat its
+	 * stickiness. */
+	clip-path: inset(0 round 6px);
+	background: var(--vscode-editor-background);
+}
+
+.krt-pr-flat-diff-head {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	padding: 6px 12px;
+	background: var(--vscode-editor-background);
+	border-bottom: 1px solid var(--vscode-widget-border, rgba(127, 127, 127, 0.25));
+	font-size: 12px;
+	cursor: pointer;
+	user-select: none;
+	/* Sticks to the top of the outer pane scroll while the user is
+	 * inside this file's diff. When the user scrolls past the card,
+	 * the next card's sticky header takes over naturally. z-index
+	 * has to beat Monaco's review-thread zone widgets (z-index 10
+	 * for thread frames, 20 for the resize/action overlays inside
+	 * them — see vs/workbench/contrib/comments/browser/media/
+	 * review.css). 30 keeps us comfortably above. */
+	position: sticky;
+	top: 0;
+	z-index: 30;
+}
+
+.krt-pr-flat-diff-head:hover {
+	background: var(--vscode-toolbar-hoverBackground, rgba(127, 127, 127, 0.1));
+}
+
+.krt-pr-flat-diff-head:focus-visible {
+	outline: 1px solid var(--vscode-focusBorder, var(--vscode-button-background));
+	outline-offset: -1px;
+}
+
+.krt-pr-flat-diff-caret {
+	font-size: 14px;
+	color: var(--vscode-descriptionForeground);
+	transition: transform 120ms ease;
+}
+
+.krt-pr-flat-diff-card.collapsed .krt-pr-flat-diff-caret {
+	transform: rotate(-90deg);
+}
+
+.krt-pr-flat-diff-card.collapsed .krt-pr-flat-diff-head {
+	border-bottom-color: transparent;
+}
+
+.krt-pr-flat-diff-card.collapsed .krt-pr-flat-diff-editor {
+	display: none;
+}
+
+.krt-pr-flat-diff-status {
+	display: inline-block;
+	width: 18px;
+	text-align: center;
+	font-family: var(--monaco-monospace-font, monospace);
+	font-weight: 700;
+	font-size: 11px;
+}
+
+.krt-pr-flat-diff-status.added { color: var(--vscode-gitDecoration-addedResourceForeground, #587c0c); }
+.krt-pr-flat-diff-status.removed { color: var(--vscode-gitDecoration-deletedResourceForeground, #ad0707); }
+.krt-pr-flat-diff-status.modified, .krt-pr-flat-diff-status.changed { color: var(--vscode-gitDecoration-modifiedResourceForeground, #b35a00); }
+.krt-pr-flat-diff-status.renamed, .krt-pr-flat-diff-status.copied { color: #2563eb; }
+
+.krt-pr-flat-diff-path {
+	flex: 1;
+	font-family: var(--monaco-monospace-font, monospace);
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.krt-pr-flat-diff-renamed {
+	font-size: 11px;
+	color: var(--vscode-descriptionForeground);
+	font-style: italic;
+}
+
+.krt-pr-flat-diff-counts {
+	display: inline-flex;
+	gap: 6px;
+	font-family: var(--monaco-monospace-font, monospace);
+	font-size: 11px;
+}
+
+.krt-pr-flat-diff-counts .add { color: var(--vscode-gitDecoration-addedResourceForeground, #587c0c); }
+.krt-pr-flat-diff-counts .del { color: var(--vscode-gitDecoration-deletedResourceForeground, #ad0707); }
+
+.krt-pr-flat-diff-editor {
+	width: 100%;
+	/* height is set inline by KrtPrFlatDiff via getContentHeight() */
+}
+
+/* CTA shown when the diff is gated (no workspace registered, or the
+ * working tree isn't on the PR head). Mirrors the Search overlay's
+ * empty-state look. */
+.krt-pr-diff-cta {
+	display: flex;
+	flex-direction: column;
+	gap: 10px;
+	align-items: flex-start;
+	padding: 24px;
+	border: 1px solid var(--vscode-widget-border, rgba(127, 127, 127, 0.3));
+	border-radius: 6px;
+	background: var(--vscode-editor-background);
+}
+
+.krt-pr-diff-cta-heading {
+	font-size: 14px;
+	font-weight: 600;
+}
+
+.krt-pr-diff-cta-body {
+	font-size: 12.5px;
+	color: var(--vscode-descriptionForeground);
+	max-width: 60ch;
+	line-height: 1.55;
+}
+
+.krt-pr-diff-cta-btn {
+	font: inherit;
+	font-size: 12px;
+	font-weight: 500;
+	background: var(--krt-accent, var(--vscode-button-background));
+	color: var(--vscode-button-foreground, white);
+	border: none;
+	border-radius: 4px;
+	padding: 6px 14px;
+	cursor: pointer;
+}
+
+.krt-pr-diff-cta-btn:hover {
+	background: var(--krt-accent-2, var(--vscode-button-hoverBackground));
+}
+
+.krt-pr-diff-tree {
+	display: flex;
+	flex-direction: column;
+	border: 1px solid var(--vscode-widget-border, rgba(127, 127, 127, 0.3));
+	border-radius: 6px;
+	overflow: hidden;
+	font-size: 12px;
+	position: sticky;
+	top: 0;
+	align-self: start;
+	max-height: calc(100vh - 220px);
+}
+
+.krt-pr-diff-tree-head {
+	display: flex;
+	justify-content: space-between;
+	align-items: center;
+	padding: 8px 10px;
+	border-bottom: 1px solid var(--vscode-widget-border, rgba(127, 127, 127, 0.3));
+	font-weight: 600;
+}
+
+.krt-pr-diff-tree-count {
+	font-family: 'JetBrains Mono', monospace;
+	font-weight: 400;
+	color: var(--vscode-descriptionForeground);
+	font-size: 11px;
+}
+
+.krt-pr-diff-tree-list {
+	overflow-y: auto;
+	padding: 4px 0;
+}
+
+.krt-pr-diff-tree-folder-row {
+	display: grid;
+	grid-template-columns: 14px 16px 1fr auto;
+	align-items: center;
+	gap: 4px;
+	padding: 3px 10px;
+	cursor: pointer;
+	color: var(--vscode-foreground);
+}
+
+.krt-pr-diff-tree-folder-row:hover {
+	background: var(--vscode-list-hoverBackground, rgba(127, 127, 127, 0.08));
+}
+
+.krt-pr-diff-tree-folder-row .codicon-chevron-right,
+.krt-pr-diff-tree-folder-row .codicon-chevron-down {
+	font-size: 14px;
+	opacity: 0.85;
+}
+
+.krt-pr-diff-tree-folder-icon {
+	font-size: 14px;
+	opacity: 0.85;
+	color: var(--vscode-descriptionForeground);
+}
+
+.krt-pr-diff-tree-folder-name {
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.krt-pr-diff-tree-folder-counts {
+	font-family: 'JetBrains Mono', monospace;
+	font-size: 10.5px;
+	color: var(--vscode-descriptionForeground);
+}
+
+.krt-pr-diff-tree-children {
+	display: block;
+}
+
+.krt-pr-diff-tree-row {
+	display: grid;
+	grid-template-columns: 14px 16px 1fr auto 16px;
+	align-items: center;
+	gap: 6px;
+	padding: 3px 10px;
+}
+
+.krt-pr-diff-tree-row:hover {
+	background: var(--vscode-list-hoverBackground, rgba(127, 127, 127, 0.08));
+}
+
+.krt-pr-diff-tree-row.active {
+	background: var(--vscode-list-activeSelectionBackground, rgba(80, 110, 230, 0.2));
+}
+
+.krt-pr-diff-tree-row.reviewed {
+	opacity: 0.55;
+}
+
+.krt-pr-diff-tree-row .krt-pr-diff-tree-reviewed {
+	margin: 0;
+	cursor: pointer;
+}
+
+.krt-pr-diff-tree-name {
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	cursor: pointer;
+}
+
+.krt-pr-diff-tree-name:hover {
+	text-decoration: underline;
+}
+
+.krt-pr-diff-tree-scroll {
+	all: unset;
+	width: 16px;
+	height: 16px;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	border-radius: 3px;
+	color: var(--vscode-descriptionForeground);
+	cursor: pointer;
+	font-size: 12px;
+	opacity: 0.6;
+}
+
+.krt-pr-diff-tree-scroll:hover {
+	background: var(--vscode-toolbar-hoverBackground, rgba(127, 127, 127, 0.15));
+	opacity: 1;
+}
+
+.krt-pr-diff-tree-counts {
+	display: flex;
+	gap: 4px;
+	font-family: 'JetBrains Mono', monospace;
+	font-size: 10.5px;
+}
+
+.krt-pr-diff-tree-counts .add {
+	color: rgba(46, 160, 67, 1);
+}
+
+.krt-pr-diff-tree-counts .del {
+	color: rgba(207, 34, 46, 1);
+}
+
+.krt-pr-diff-status-dot {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	width: 16px;
+	height: 16px;
+	font-size: 10px;
+	font-weight: 700;
+	font-family: 'JetBrains Mono', monospace;
+	border-radius: 3px;
+	color: white;
+	background: rgba(110, 118, 129, 0.7);
+}
+
+.krt-pr-diff-status-dot.added {
+	background: rgba(46, 160, 67, 0.85);
+}
+
+.krt-pr-diff-status-dot.removed {
+	background: rgba(207, 34, 46, 0.85);
+}
+
+.krt-pr-diff-status-dot.modified,
+.krt-pr-diff-status-dot.changed {
+	background: rgba(190, 130, 0, 0.85);
+}
+
+.krt-pr-diff-status-dot.renamed {
+	background: rgba(80, 110, 230, 0.85);
+}
+
+/* ---------- Diff stack ---------- */
+
+.krt-pr-diff-stack {
+	display: flex;
+	flex-direction: column;
+	gap: 14px;
+	min-width: 0;
+}
+
+/* ---------- Tour sub-mode ---------- */
+
+.krt-pr-editor-body.tour {
+	display: flex;
+	flex-direction: column;
+	gap: 12px;
+	padding: 16px 24px 32px;
+}
+
+.krt-pr-tour-header {
+	display: flex;
+	align-items: center;
+	gap: 12px;
+	flex-wrap: wrap;
+	padding-bottom: 8px;
+	border-bottom: 1px solid var(--vscode-widget-border, rgba(127, 127, 127, 0.2));
+}
+
+.krt-pr-tour-heading {
+	font-size: 15px;
+	font-weight: 600;
+	color: var(--vscode-foreground);
+}
+
+.krt-pr-tour-subheading {
+	font-size: 12px;
+	color: var(--vscode-descriptionForeground);
+	flex: 1;
+}
+
+.krt-pr-tour-variant {
+	display: inline-flex;
+	border: 1px solid var(--vscode-widget-border, rgba(127, 127, 127, 0.3));
+	border-radius: 4px;
+	overflow: hidden;
+}
+
+.krt-pr-tour-variant-btn {
+	background: transparent;
+	color: var(--vscode-foreground);
+	border: none;
+	padding: 4px 10px;
+	font-size: 12px;
+	cursor: pointer;
+}
+
+.krt-pr-tour-variant-btn:hover:not(.active) {
+	background: var(--vscode-toolbar-hoverBackground, rgba(127, 127, 127, 0.1));
+}
+
+.krt-pr-tour-variant-btn.active {
+	background: var(--vscode-button-background);
+	color: var(--vscode-button-foreground);
+}
+
+.krt-pr-tour-body {
+	display: flex;
+	flex-direction: column;
+	gap: 12px;
+}
+
+.krt-pr-tour-empty {
+	display: flex;
+	flex-direction: column;
+	gap: 12px;
+	padding: 32px;
+	border: 1px dashed var(--vscode-widget-border, rgba(127, 127, 127, 0.3));
+	border-radius: 8px;
+	max-width: 540px;
+	margin: 32px auto 0;
+	text-align: center;
+}
+
+.krt-pr-tour-empty-heading {
+	margin: 0;
+	font-size: 18px;
+	font-weight: 600;
+	color: var(--vscode-foreground);
+}
+
+.krt-pr-tour-empty-body {
+	margin: 0;
+	font-size: 13px;
+	color: var(--vscode-descriptionForeground);
+	line-height: 1.5;
+}
+
+.krt-pr-tour-cta {
+	background: var(--vscode-button-background);
+	color: var(--vscode-button-foreground);
+	border: none;
+	padding: 8px 16px;
+	border-radius: 4px;
+	cursor: pointer;
+	font-size: 13px;
+	font-weight: 500;
+	align-self: center;
+}
+
+.krt-pr-tour-cta:hover {
+	background: var(--vscode-button-hoverBackground);
+}
+
+.krt-pr-tour-cta-secondary {
+	background: transparent;
+	color: var(--vscode-foreground);
+	border: 1px solid var(--vscode-widget-border, rgba(127, 127, 127, 0.3));
+	padding: 6px 12px;
+	border-radius: 4px;
+	cursor: pointer;
+	font-size: 12px;
+	align-self: center;
+}
+
+.krt-pr-tour-cta-secondary:hover {
+	background: var(--vscode-toolbar-hoverBackground, rgba(127, 127, 127, 0.1));
+}
+
+.krt-pr-tour-retry {
+	align-self: flex-start;
+	background: transparent;
+	color: var(--vscode-foreground);
+	border: 1px solid var(--vscode-widget-border, rgba(127, 127, 127, 0.3));
+	padding: 4px 10px;
+	border-radius: 4px;
+	cursor: pointer;
+	font-size: 12px;
+}
+
+.krt-pr-tour-layout {
+	display: grid;
+	grid-template-columns: 320px 1fr;
+	gap: 20px;
+	align-items: flex-start;
+}
+
+.krt-pr-tour-rail {
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+	position: sticky;
+	top: 0;
+}
+
+.krt-pr-tour-card {
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+	padding: 10px 12px;
+	border: 1px solid var(--vscode-widget-border, rgba(127, 127, 127, 0.25));
+	border-radius: 6px;
+	background: var(--vscode-editor-background, transparent);
+	cursor: pointer;
+}
+
+.krt-pr-tour-card:hover {
+	background: var(--vscode-toolbar-hoverBackground, rgba(127, 127, 127, 0.08));
+}
+
+.krt-pr-tour-card.selected {
+	border-color: var(--vscode-focusBorder, var(--vscode-button-background));
+	box-shadow: 0 0 0 1px var(--vscode-focusBorder, var(--vscode-button-background));
+}
+
+.krt-pr-tour-card.reviewed {
+	opacity: 0.65;
+}
+
+.krt-pr-tour-card.sensitive {
+	border-left: 3px solid var(--vscode-editorWarning-foreground, #c2c200);
+}
+
+.krt-pr-tour-card-head {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+}
+
+.krt-pr-tour-card-title {
+	font-size: 13px;
+	font-weight: 600;
+	color: var(--vscode-foreground);
+	flex: 1;
+}
+
+.krt-pr-tour-sensitive-badge {
+	font-size: 10.5px;
+	font-weight: 600;
+	letter-spacing: 0.04em;
+	color: var(--vscode-editorWarning-foreground, #c2c200);
+	text-transform: uppercase;
+	border: 1px solid currentColor;
+	border-radius: 3px;
+	padding: 1px 5px;
+}
+
+.krt-pr-tour-card-summary {
+	margin: 0;
+	font-size: 12px;
+	line-height: 1.4;
+	color: var(--vscode-descriptionForeground);
+}
+
+.krt-pr-tour-card-meta {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	font-size: 11px;
+	color: var(--vscode-descriptionForeground);
+}
+
+.krt-pr-tour-card-files {
+	flex: 1;
+}
+
+.krt-pr-tour-card-counts {
+	display: inline-flex;
+	gap: 6px;
+	font-family: var(--monaco-monospace-font, monospace);
+}
+
+.krt-pr-tour-card-counts .add {
+	color: var(--vscode-gitDecoration-addedResourceForeground, #587c0c);
+}
+
+.krt-pr-tour-card-counts .del {
+	color: var(--vscode-gitDecoration-deletedResourceForeground, #ad0707);
+}
+
+.krt-pr-tour-reviewed {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	font-size: 11.5px;
+	color: var(--vscode-descriptionForeground);
+	cursor: pointer;
+}
+
+.krt-pr-tour-detail {
+	display: flex;
+	flex-direction: column;
+	gap: 12px;
+	min-width: 0;
+}
+
+.krt-pr-tour-detail-head {
+	display: flex;
+	align-items: center;
+}
+
+.krt-pr-tour-detail-title {
+	margin: 0;
+	font-size: 18px;
+	font-weight: 600;
+	color: var(--vscode-foreground);
+}
+
+.krt-pr-tour-detail-summary {
+	margin: 0;
+	font-size: 13px;
+	line-height: 1.5;
+	color: var(--vscode-foreground);
+}
+
+.krt-pr-tour-detail-bullets,
+.krt-pr-tour-chapter-bullets {
+	margin: 0;
+	padding-left: 20px;
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+	font-size: 13px;
+	color: var(--vscode-foreground);
+	line-height: 1.4;
+}
+
+.krt-pr-tour-callout {
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+	border-left: 3px solid var(--vscode-editorWarning-foreground, #c2c200);
+	background: var(--vscode-inputValidation-warningBackground, rgba(194, 194, 0, 0.1));
+	padding: 8px 12px;
+	border-radius: 0 4px 4px 0;
+}
+
+.krt-pr-tour-callout-heading {
+	font-size: 11px;
+	font-weight: 600;
+	letter-spacing: 0.04em;
+	text-transform: uppercase;
+	color: var(--vscode-editorWarning-foreground, #c2c200);
+}
+
+.krt-pr-tour-callout-body {
+	font-size: 12.5px;
+	color: var(--vscode-foreground);
+	line-height: 1.4;
+}
+
+.krt-pr-tour-mini-diffs {
+	display: flex;
+	flex-direction: column;
+	gap: 12px;
+}
+
+.krt-pr-tour-mini-empty {
+	padding: 12px;
+	font-size: 12px;
+	color: var(--vscode-descriptionForeground);
+	font-style: italic;
+}
+
+/* Phase 10/D — host for the chapter-scoped flat diff. Same idiom
+ * as the main host: the cards inside size to their own content,
+ * and the outer pane scrolls. */
+.krt-pr-tour-mini-host {
+	display: flex;
+	flex-direction: column;
+	gap: 12px;
+}
+
+.krt-pr-tour-mini-cta {
+	padding: 14px 16px;
+	border: 1px dashed var(--vscode-widget-border, rgba(127, 127, 127, 0.3));
+	border-radius: 6px;
+	color: var(--vscode-descriptionForeground);
+	font-size: 12.5px;
+	line-height: 1.5;
+}
+
+.krt-pr-tour-reading {
+	display: flex;
+	flex-direction: column;
+	gap: 28px;
+	width: 100%;
+}
+
+.krt-pr-tour-chapter {
+	display: flex;
+	flex-direction: column;
+	gap: 10px;
+	padding: 16px 20px;
+	border: 1px solid var(--vscode-widget-border, rgba(127, 127, 127, 0.2));
+	border-radius: 8px;
+	background: var(--vscode-editor-background, transparent);
+}
+
+.krt-pr-tour-chapter.reviewed {
+	opacity: 0.7;
+}
+
+.krt-pr-tour-chapter.sensitive {
+	border-left: 3px solid var(--vscode-editorWarning-foreground, #c2c200);
+}
+
+.krt-pr-tour-chapter-head {
+	display: flex;
+	align-items: center;
+	gap: 12px;
+}
+
+.krt-pr-tour-chapter-title {
+	margin: 0;
+	font-size: 16px;
+	font-weight: 600;
+	color: var(--vscode-foreground);
+	flex: 1;
+}
+
+.krt-pr-tour-chapter-summary {
+	margin: 0;
+	font-size: 13px;
+	line-height: 1.5;
+	color: var(--vscode-foreground);
+}
+
+/* ---------- Markdown rendering for chapter content ---------- */
+
+/*
+ * The workbench's renderMarkdown wraps output in a <div> with a
+ * <p> child. For inline contexts (titles, list items, connection
+ * rows) we collapse that wrapper so the markdown content lays out
+ * inline with its parent's text. Block contexts keep the default
+ * paragraph spacing.
+ */
+.krt-pr-md-inline {
+	display: inline;
+}
+
+.krt-pr-md-inline > p {
+	display: inline;
+	margin: 0;
+}
+
+.krt-pr-md-block > p {
+	margin: 0 0 6px;
+}
+
+.krt-pr-md-block > p:last-child {
+	margin-bottom: 0;
+}
+
+.krt-pr-md-inline code,
+.krt-pr-md-block code {
+	font-family: var(--monaco-monospace-font, monospace);
+	font-size: 0.92em;
+	padding: 1px 5px;
+	border-radius: 3px;
+	background: var(--vscode-textCodeBlock-background, rgba(127, 127, 127, 0.15));
+	color: var(--vscode-textPreformat-foreground, var(--vscode-foreground));
+	border: 1px solid var(--vscode-widget-border, rgba(127, 127, 127, 0.15));
+}
+
+/*
+ * Chapter cards have cursor: pointer and a click handler that
+ * selects the chapter. We still want the user to be able to drag-
+ * select text inside the card, so let text selection win and
+ * suppress the click-handler when a selection exists (handled in
+ * TS via hasActiveSelection()).
+ */
+.krt-pr-tour-card,
+.krt-pr-storyboard-node {
+	user-select: text;
+	-webkit-user-select: text;
+}
+
+/* ---------- Loading spinner (Tour + Storyboard) ---------- */
+
+.krt-pr-tour-loading {
+	display: flex;
+	align-items: center;
+	gap: 12px;
+	padding: 16px 20px;
+	color: var(--vscode-descriptionForeground);
+	font-size: 13px;
+}
+
+.krt-pr-streaming-badge {
+	display: none;
+	align-items: center;
+	gap: 6px;
+	padding: 2px 8px;
+	font-size: 10.5px;
+	font-family: var(--monaco-monospace-font, monospace);
+	color: var(--krt-accent, var(--vscode-focusBorder, #007acc));
+	background: var(--krt-accent-soft, rgba(91, 91, 255, 0.12));
+	border: 1px solid var(--krt-accent-line, transparent);
+	border-radius: 3px;
+	letter-spacing: 0.04em;
+	text-transform: uppercase;
+}
+
+.krt-pr-streaming-badge.visible {
+	display: inline-flex;
+}
+
+.krt-pr-streaming-badge .krt-pr-spinner {
+	width: 12px;
+	height: 12px;
+}
+
+.krt-pr-tour-loading-text {
+	color: var(--vscode-foreground);
+}
+
+.krt-pr-spinner {
+	flex-shrink: 0;
+	display: inline-block;
+}
+
+.krt-pr-spinner-track {
+	fill: none;
+	stroke: var(--vscode-widget-border, rgba(127, 127, 127, 0.25));
+	stroke-width: 2.5;
+}
+
+.krt-pr-spinner-arc {
+	fill: none;
+	stroke: var(--krt-accent, var(--vscode-focusBorder, #007acc));
+	stroke-width: 2.5;
+	stroke-linecap: round;
+	stroke-dasharray: 14 60;
+	transform-origin: 12px 12px;
+	animation: krt-pr-spinner-rotate 0.9s linear infinite;
+}
+
+@keyframes krt-pr-spinner-rotate {
+	from { transform: rotate(0deg); }
+	to   { transform: rotate(360deg); }
+}
+
+/* ---------- Storyboard sub-mode ---------- */
+
+.krt-pr-editor-body.storyboard {
+	display: flex;
+	flex-direction: column;
+	gap: 0;
+	padding: 0;
+	/* No overflow:hidden — the editor root handles vertical
+	 * scrolling so the storyboard graph + diff section stack
+	 * vertically as one long scrollable page. */
+}
+
+.krt-pr-storyboard-header {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	flex-wrap: wrap;
+	padding: 12px 18px;
+	border-bottom: 1px solid var(--vscode-widget-border, rgba(127, 127, 127, 0.2));
+	background: var(--vscode-editor-background, transparent);
+	flex-shrink: 0;
+}
+
+.krt-pr-storyboard-heading {
+	font-size: 12.5px;
+	font-weight: 600;
+	color: var(--vscode-foreground);
+}
+
+.krt-pr-storyboard-subheading {
+	font-size: 11.5px;
+	color: var(--vscode-descriptionForeground);
+}
+
+.krt-pr-storyboard-chip {
+	height: 18px;
+	display: inline-flex;
+	align-items: center;
+	padding: 0 8px;
+	margin-left: 4px;
+	font-size: 10px;
+	border-radius: 3px;
+	background: var(--krt-accent-soft, var(--vscode-badge-background, rgba(127, 127, 127, 0.2)));
+	color: var(--krt-accent, var(--vscode-badge-foreground, var(--vscode-foreground)));
+	border: 1px solid var(--krt-accent-line, transparent);
+}
+
+.krt-pr-storyboard-spacer {
+	flex: 1;
+}
+
+.krt-pr-storyboard-legend {
+	display: flex;
+	align-items: center;
+	gap: 14px;
+}
+
+.krt-pr-storyboard-legend-item {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	font-size: 11px;
+	color: var(--vscode-descriptionForeground);
+}
+
+.krt-pr-storyboard-legend-swatch line {
+	stroke: var(--vscode-editorLineNumber-foreground, rgba(127, 127, 127, 0.7));
+}
+
+.krt-pr-storyboard-body {
+	display: flex;
+	/* No flex / overflow constraints — body sizes to the canvas's
+	 * natural height; vertical overflow falls through to the root. */
+}
+
+/*
+ * Storyboard diff section. Sits below the storyboard graph and
+ * uses the same file-tree-on-the-side layout as the Diff sub-mode
+ * (.krt-pr-diff and friends), reusing those styles. We just give
+ * the section a top border so it visually separates from the
+ * graph and a min-height so it occupies a useful slice of viewport
+ * even before the user scrolls.
+ */
+.krt-pr-storyboard-diff {
+	border-top: 1px solid var(--vscode-widget-border, rgba(127, 127, 127, 0.25));
+	background: var(--vscode-editor-background, transparent);
+	min-height: 60vh;
+}
+
+.krt-pr-storyboard-diff:empty {
+	display: none;
+}
+
+.krt-pr-storyboard-diff-head {
+	display: flex;
+	align-items: baseline;
+	gap: 12px;
+	padding: 10px 18px;
+	border-bottom: 1px solid var(--vscode-widget-border, rgba(127, 127, 127, 0.18));
+	background: var(--vscode-editorWidget-background, transparent);
+}
+
+.krt-pr-storyboard-diff-heading {
+	font-size: 10px;
+	font-weight: 600;
+	text-transform: uppercase;
+	letter-spacing: 0.05em;
+	color: var(--vscode-descriptionForeground);
+	flex-shrink: 0;
+}
+
+.krt-pr-storyboard-diff-title {
+	font-size: 12.5px;
+	font-weight: 600;
+	color: var(--vscode-foreground);
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.krt-pr-storyboard-layout {
+	display: flex;
+	flex: 1;
+	min-height: 0;
+	min-width: 0;
+}
+
+.krt-pr-storyboard-scroller {
+	flex: 1;
+	min-width: 0;
+	/* Only the horizontal axis scrolls inside the scroller; the
+	 * editor root handles vertical scrolling so the diff section
+	 * below the graph flows on the same scroll surface. */
+	overflow-x: auto;
+	overflow-y: visible;
+	background:
+		radial-gradient(circle, var(--vscode-widget-border, rgba(127, 127, 127, 0.2)) 1px, transparent 1px) -1px -1px / 18px 18px,
+		var(--vscode-editor-background, transparent);
+	cursor: grab;
+}
+
+.krt-pr-storyboard-scroller.dragging {
+	cursor: grabbing;
+	user-select: none;
+}
+
+.krt-pr-storyboard-canvas {
+	position: relative;
+}
+
+.krt-pr-storyboard-edges {
+	position: absolute;
+	left: 0;
+	top: 0;
+	pointer-events: none;
+	overflow: visible;
+}
+
+.krt-pr-storyboard-edge {
+	fill: none;
+	stroke: var(--vscode-editorLineNumber-foreground, rgba(127, 127, 127, 0.65));
+	stroke-width: 1.5;
+	stroke-linecap: round;
+	stroke-linejoin: round;
+	opacity: 0.7;
+	transition: stroke 120ms ease, opacity 120ms ease, stroke-width 120ms ease;
+}
+
+.krt-pr-storyboard-edge.depends {
+	stroke: var(--vscode-editorLineNumber-foreground, rgba(127, 127, 127, 0.7));
+}
+
+.krt-pr-storyboard-edge.extends {
+	stroke: var(--vscode-charts-green, #89d185);
+}
+
+.krt-pr-storyboard-edge.gates {
+	stroke: var(--vscode-charts-yellow, #ffcb6b);
+}
+
+.krt-pr-storyboard-edge.verifies {
+	stroke: var(--vscode-charts-purple, #b180d7);
+}
+
+.krt-pr-storyboard-arrowhead {
+	fill: var(--vscode-editorLineNumber-foreground, rgba(127, 127, 127, 0.7));
+}
+
+.krt-pr-storyboard-arrowhead.depends { fill: var(--vscode-editorLineNumber-foreground, rgba(127, 127, 127, 0.7)); }
+.krt-pr-storyboard-arrowhead.extends { fill: var(--vscode-charts-green, #89d185); }
+.krt-pr-storyboard-arrowhead.gates { fill: var(--vscode-charts-yellow, #ffcb6b); }
+.krt-pr-storyboard-arrowhead.verifies { fill: var(--vscode-charts-purple, #b180d7); }
+
+.krt-pr-storyboard-arrowhead.hot {
+	fill: var(--krt-accent, var(--vscode-focusBorder, #007acc));
+}
+
+.krt-pr-storyboard-canvas.hovering .krt-pr-storyboard-edge.dimmed {
+	opacity: 0.18;
+}
+
+.krt-pr-storyboard-canvas.hovering .krt-pr-storyboard-edge.highlight {
+	stroke: var(--krt-accent, var(--vscode-focusBorder, #007acc));
+	stroke-width: 2;
+	opacity: 1;
+}
+
+.krt-pr-storyboard-edge-label {
+	transition: opacity 120ms ease;
+}
+
+.krt-pr-storyboard-edge-label-rect {
+	fill: var(--vscode-editor-background, #fff);
+	stroke: var(--vscode-editorLineNumber-foreground, rgba(127, 127, 127, 0.6));
+	stroke-width: 1;
+	stroke-opacity: 0.55;
+}
+
+.krt-pr-storyboard-edge-label-text {
+	font-size: 9.5px;
+	font-family: var(--monaco-monospace-font, monospace);
+	fill: var(--vscode-editorLineNumber-foreground, rgba(127, 127, 127, 0.85));
+	letter-spacing: 0.01em;
+}
+
+.krt-pr-storyboard-edge-label.extends .krt-pr-storyboard-edge-label-rect {
+	stroke: var(--vscode-charts-green, #89d185);
+}
+.krt-pr-storyboard-edge-label.extends .krt-pr-storyboard-edge-label-text {
+	fill: var(--vscode-charts-green, #89d185);
+}
+
+.krt-pr-storyboard-edge-label.gates .krt-pr-storyboard-edge-label-rect {
+	stroke: var(--vscode-charts-yellow, #ffcb6b);
+}
+.krt-pr-storyboard-edge-label.gates .krt-pr-storyboard-edge-label-text {
+	fill: var(--vscode-charts-yellow, #ffcb6b);
+}
+
+.krt-pr-storyboard-edge-label.verifies .krt-pr-storyboard-edge-label-rect {
+	stroke: var(--vscode-charts-purple, #b180d7);
+}
+.krt-pr-storyboard-edge-label.verifies .krt-pr-storyboard-edge-label-text {
+	fill: var(--vscode-charts-purple, #b180d7);
+}
+
+.krt-pr-storyboard-canvas.hovering .krt-pr-storyboard-edge-label.dimmed {
+	opacity: 0.18;
+}
+
+.krt-pr-storyboard-canvas.hovering .krt-pr-storyboard-edge-label.highlight .krt-pr-storyboard-edge-label-rect {
+	fill: var(--krt-accent-soft, var(--vscode-editor-selectionBackground, rgba(0, 122, 204, 0.15)));
+	stroke: var(--krt-accent-line, var(--vscode-focusBorder, #007acc));
+	stroke-opacity: 1;
+}
+
+.krt-pr-storyboard-canvas.hovering .krt-pr-storyboard-edge-label.highlight .krt-pr-storyboard-edge-label-text {
+	fill: var(--krt-accent, var(--vscode-focusBorder, #007acc));
+	font-weight: 600;
+}
+
+.krt-pr-storyboard-node {
+	position: absolute;
+	display: flex;
+	flex-direction: column;
+	box-sizing: border-box;
+	border: 1.5px solid var(--vscode-widget-border, rgba(127, 127, 127, 0.25));
+	border-radius: 10px;
+	background: var(--vscode-editorWidget-background, var(--vscode-editor-background));
+	color: var(--vscode-foreground);
+	cursor: pointer;
+	transition: opacity 120ms ease, box-shadow 120ms ease, border-color 120ms ease;
+	overflow: hidden;
+	box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
+}
+
+.krt-pr-storyboard-node-stripe {
+	height: 4px;
+	flex-shrink: 0;
+	background: var(--vscode-descriptionForeground);
+}
+
+/*
+ * Card top-stripe colour reflects the chapter's semantic kind.
+ * Same six-kind palette the demo uses: foundation = blue (the
+ * primitive everything builds on), replace = red (rewrites
+ * existing behaviour), extend = green (builds on a foundation),
+ * glue = neutral (plumbing), gate = orange (config / flag),
+ * verify = purple (tests / observability).
+ */
+.krt-pr-storyboard-node[data-kind="foundation"] .krt-pr-storyboard-node-stripe { background: var(--vscode-charts-blue, #4fc1ff); }
+.krt-pr-storyboard-node[data-kind="replace"]    .krt-pr-storyboard-node-stripe { background: var(--vscode-charts-red, #f44747); }
+.krt-pr-storyboard-node[data-kind="extend"]     .krt-pr-storyboard-node-stripe { background: var(--vscode-charts-green, #89d185); }
+.krt-pr-storyboard-node[data-kind="glue"]       .krt-pr-storyboard-node-stripe { background: var(--vscode-descriptionForeground); }
+.krt-pr-storyboard-node[data-kind="gate"]       .krt-pr-storyboard-node-stripe { background: var(--vscode-charts-yellow, #ffcb6b); }
+.krt-pr-storyboard-node[data-kind="verify"]     .krt-pr-storyboard-node-stripe { background: var(--vscode-charts-purple, #b180d7); }
+
+.krt-pr-storyboard-node-kind {
+	font-size: 9.5px;
+	font-family: var(--monaco-monospace-font, monospace);
+	font-weight: 600;
+	letter-spacing: 0.04em;
+	text-transform: uppercase;
+	padding: 1px 5px;
+	border-radius: 3px;
+	background: rgba(127, 127, 127, 0.12);
+	color: var(--vscode-descriptionForeground);
+}
+
+.krt-pr-storyboard-node-kind[data-kind="foundation"] { color: var(--vscode-charts-blue, #4fc1ff); }
+.krt-pr-storyboard-node-kind[data-kind="replace"]    { color: var(--vscode-charts-red, #f44747); }
+.krt-pr-storyboard-node-kind[data-kind="extend"]     { color: var(--vscode-charts-green, #89d185); }
+.krt-pr-storyboard-node-kind[data-kind="glue"]       { color: var(--vscode-descriptionForeground); }
+.krt-pr-storyboard-node-kind[data-kind="gate"]       { color: var(--vscode-charts-yellow, #ffcb6b); }
+.krt-pr-storyboard-node-kind[data-kind="verify"]     { color: var(--vscode-charts-purple, #b180d7); }
+
+.krt-pr-storyboard-node.sensitive {
+	border-color: var(--vscode-editorWarning-foreground, #c2c200);
+}
+
+.krt-pr-storyboard-node.reviewed {
+	opacity: 0.78;
+}
+
+.krt-pr-storyboard-node.reviewed .krt-pr-storyboard-node-title {
+	text-decoration: line-through;
+	text-decoration-color: var(--vscode-descriptionForeground);
+}
+
+.krt-pr-storyboard-node.selected {
+	border-color: var(--krt-accent, var(--vscode-focusBorder, #007acc));
+	box-shadow: 0 0 0 3px var(--krt-accent-soft, rgba(0, 122, 204, 0.2)), 0 4px 16px rgba(0, 0, 0, 0.06);
+}
+
+.krt-pr-storyboard-canvas.hovering .krt-pr-storyboard-node.dimmed {
+	opacity: 0.3;
+}
+
+.krt-pr-storyboard-canvas.hovering .krt-pr-storyboard-node.highlight {
+	border-color: var(--krt-accent, var(--vscode-focusBorder, #007acc));
+}
+
+.krt-pr-storyboard-node-head {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	padding: 10px 12px 4px;
+}
+
+.krt-pr-storyboard-node-ch {
+	font-size: 9.5px;
+	font-family: var(--monaco-monospace-font, monospace);
+	font-weight: 600;
+	letter-spacing: 0.04em;
+	text-transform: uppercase;
+	color: var(--vscode-descriptionForeground);
+}
+
+.krt-pr-storyboard-node-caution {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	width: 14px;
+	height: 14px;
+	border-radius: 50%;
+	font-size: 10px;
+	font-weight: 700;
+	background: var(--vscode-editorWarning-foreground, #c2c200);
+	color: var(--vscode-editor-background, #fff);
+}
+
+.krt-pr-storyboard-node-head-spacer {
+	flex: 1;
+}
+
+.krt-pr-storyboard-node-reviewed {
+	display: inline-flex;
+	align-items: center;
+	cursor: pointer;
+}
+
+.krt-pr-storyboard-node-reviewed input {
+	margin: 0;
+	cursor: pointer;
+}
+
+.krt-pr-storyboard-node-title {
+	padding: 8px 12px;
+	flex: 1;
+	min-height: 0;
+	font-size: 13.5px;
+	font-weight: 600;
+	letter-spacing: -0.01em;
+	line-height: 1.3;
+	color: var(--vscode-foreground);
+	overflow-wrap: anywhere;
+	word-break: break-word;
+}
+
+.krt-pr-storyboard-node-footer {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	padding: 8px 12px;
+	margin-top: 8px;
+	border-top: 1px solid var(--vscode-widget-border, rgba(127, 127, 127, 0.2));
+	background: var(--vscode-editor-background, transparent);
+	font-size: 10px;
+	font-family: var(--monaco-monospace-font, monospace);
+}
+
+.krt-pr-storyboard-node-files {
+	color: var(--vscode-descriptionForeground);
+}
+
+.krt-pr-storyboard-node-add {
+	color: var(--vscode-gitDecoration-addedResourceForeground, #587c0c);
+}
+
+.krt-pr-storyboard-node-del {
+	color: var(--vscode-gitDecoration-deletedResourceForeground, #ad0707);
+}
+
+.krt-pr-storyboard-detail {
+	width: 360px;
+	flex-shrink: 0;
+	display: flex;
+	flex-direction: column;
+	border-left: 1px solid var(--vscode-widget-border, rgba(127, 127, 127, 0.2));
+	background: var(--vscode-editor-background, transparent);
+	min-height: 0;
+	/* Stick to the top of the editor's scroll viewport while the
+	 * storyboard graph is in view, so the user can read the
+	 * details of the selected chapter without losing their place
+	 * when scrolling vertically. */
+	position: sticky;
+	top: 0;
+	align-self: flex-start;
+	max-height: 100vh;
+	overflow: auto;
+}
+
+.krt-pr-storyboard-detail-empty {
+	padding: 16px;
+	font-size: 12px;
+	color: var(--vscode-descriptionForeground);
+	font-style: italic;
+}
+
+.krt-pr-storyboard-detail-head {
+	padding: 14px 16px;
+	border-bottom: 1px solid var(--vscode-widget-border, rgba(127, 127, 127, 0.2));
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+	flex-shrink: 0;
+}
+
+.krt-pr-storyboard-detail-head-top {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+}
+
+.krt-pr-storyboard-detail-ch {
+	font-size: 9.5px;
+	font-family: var(--monaco-monospace-font, monospace);
+	font-weight: 600;
+	letter-spacing: 0.04em;
+	text-transform: uppercase;
+	color: var(--vscode-descriptionForeground);
+}
+
+.krt-pr-storyboard-detail-caution {
+	font-size: 10px;
+	padding: 1px 6px;
+	border-radius: 3px;
+	background: var(--vscode-editorWarning-foreground, #c2c200);
+	color: var(--vscode-editor-background, #fff);
+	font-weight: 600;
+}
+
+.krt-pr-storyboard-detail-title {
+	margin: 0;
+	font-size: 16px;
+	font-weight: 600;
+	letter-spacing: -0.01em;
+	color: var(--vscode-foreground);
+	line-height: 1.3;
+}
+
+.krt-pr-storyboard-detail-files {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 6px;
+}
+
+.krt-pr-storyboard-detail-file-chip {
+	display: inline-flex;
+	align-items: center;
+	height: 20px;
+	padding: 0 8px;
+	font-size: 10.5px;
+	font-family: var(--monaco-monospace-font, monospace);
+	background: var(--vscode-editorWidget-background, rgba(127, 127, 127, 0.08));
+	border: 1px solid var(--vscode-widget-border, rgba(127, 127, 127, 0.2));
+	border-radius: 3px;
+	color: var(--vscode-descriptionForeground);
+	max-width: 100%;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.krt-pr-storyboard-detail-scroll {
+	flex: 1;
+	min-height: 0;
+	overflow: auto;
+	padding: 12px 16px;
+	display: flex;
+	flex-direction: column;
+	gap: 14px;
+}
+
+.krt-pr-storyboard-detail-summary {
+	margin: 0;
+	font-size: 12.5px;
+	line-height: 1.6;
+	color: var(--vscode-foreground);
+}
+
+.krt-pr-storyboard-detail-bullets {
+	margin: 0;
+	padding-left: 16px;
+	font-size: 12px;
+	line-height: 1.55;
+	color: var(--vscode-foreground);
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+}
+
+.krt-pr-storyboard-connections {
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+}
+
+.krt-pr-storyboard-connections-heading {
+	font-size: 10px;
+	font-weight: 600;
+	text-transform: uppercase;
+	letter-spacing: 0.05em;
+	color: var(--vscode-descriptionForeground);
+	margin-bottom: 4px;
+}
+
+.krt-pr-storyboard-connection-row {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	padding: 4px 6px;
+	border-radius: 4px;
+	font-size: 11px;
+	cursor: pointer;
+	color: var(--vscode-foreground);
+}
+
+.krt-pr-storyboard-connection-row:hover {
+	background: var(--krt-accent-soft, var(--vscode-list-hoverBackground, rgba(127, 127, 127, 0.1)));
+	box-shadow: inset 0 0 0 1px var(--krt-accent-line, transparent);
+}
+
+.krt-pr-storyboard-connection-arrow {
+	font-family: var(--monaco-monospace-font, monospace);
+	font-size: 10px;
+	color: var(--vscode-descriptionForeground);
+	flex-shrink: 0;
+}
+
+.krt-pr-storyboard-connection-row:hover .krt-pr-storyboard-connection-arrow {
+	color: var(--krt-accent, var(--vscode-foreground));
+	font-weight: 600;
+}
+
+.krt-pr-storyboard-connection-title {
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.krt-pr-storyboard-detail-callout {
+	padding: 8px 10px;
+	border-radius: 6px;
+	background: var(--vscode-inputValidation-warningBackground, rgba(194, 194, 0, 0.12));
+	border: 1px solid var(--vscode-inputValidation-warningBorder, rgba(194, 194, 0, 0.5));
+	color: var(--vscode-inputValidation-warningForeground, var(--vscode-foreground));
+	font-size: 11px;
+	line-height: 1.45;
+}
+
+.krt-pr-storyboard-detail-footer {
+	padding: 10px;
+	border-top: 1px solid var(--vscode-widget-border, rgba(127, 127, 127, 0.2));
+	display: flex;
+	gap: 6px;
+	flex-shrink: 0;
+}
+
+.krt-pr-storyboard-mark-btn {
+	flex: 1;
+	height: 28px;
+	font-size: 11.5px;
+	border-radius: 4px;
+	border: 1px solid var(--krt-accent, var(--vscode-button-background, var(--vscode-focusBorder)));
+	background: var(--krt-accent, var(--vscode-button-background, var(--vscode-focusBorder)));
+	color: var(--vscode-button-foreground, #fff);
+	cursor: pointer;
+	font-weight: 600;
+}
+
+.krt-pr-storyboard-mark-btn:hover {
+	background: var(--krt-accent-2, var(--vscode-button-hoverBackground, var(--vscode-focusBorder)));
+}
+
+/* ---------- Phase 11 — AI inline chips ---------- */
+
+/*
+ * Chips render as Monaco "after" injected text. The selectors target
+ * the inline class we set on the decoration (`krt-tour-chip` plus a
+ * severity modifier). Text is intentionally a tiny pill — hover
+ * exposes the full body via Monaco's standard hover system.
+ */
+.krt-tour-chip {
+	font-size: 11px;
+	padding: 0 6px;
+	margin-left: 8px;
+	border-radius: 999px;
+	border: 1px solid transparent;
+	letter-spacing: 0.01em;
+	font-style: normal;
+	white-space: nowrap;
+}
+
+.krt-tour-chip-info {
+	color: var(--vscode-descriptionForeground, #888);
+	background: rgba(110, 118, 129, 0.18);
+	border-color: rgba(110, 118, 129, 0.35);
+}
+
+.krt-tour-chip-note {
+	color: var(--vscode-textLink-foreground, #4493f8);
+	background: rgba(80, 110, 230, 0.16);
+	border-color: rgba(80, 110, 230, 0.35);
+}
+
+.krt-tour-chip-warn {
+	color: var(--vscode-editorWarning-foreground, #c2c200);
+	background: rgba(194, 194, 0, 0.16);
+	border-color: rgba(194, 194, 0, 0.45);
+}

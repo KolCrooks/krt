@@ -4,35 +4,31 @@
 # Claude Code session state
 .claude/
 
-# OS
+# OS — anywhere in the tree
 .DS_Store
 Thumbs.db
 
-# Editors
-.vscode/
-.idea/
+# Editor swap files — anywhere
 *.swp
 *.swo
 *~
 
-# Logs
+# Logs — anywhere
 *.log
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 
-# Dependencies
+# Dependencies — anywhere (covers vscode/ and per-extension node_modules)
 node_modules/
 
-# Local env
-.env
-.env.local
-
-# Build output
-out/
-dist/
+# Packaged extensions — anywhere
 *.vsix
 
-# Upstream vscode/ is cloned by build/prepare_vscode.sh, not vendored.
-# See docs/upstream-vscode.md.
-vscode/
+# Root-only — anchored so we don't clobber vscode/'s tracked .vscode/, dist/, out/
+/.vscode/
+/.idea/
+/.env
+/.env.local
+/out/
+/dist/
