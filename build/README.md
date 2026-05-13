@@ -1,52 +1,53 @@
 # build/
 
-VSCodium-style build pipeline for KRT. Manages a local `vscode/` clone
-(gitignored — see `docs/upstream-vscode.md`): resets it to the pinned
-tag and applies KRT's patches, then runs the upstream build.
+Build pipeline for KRT.
+
+`vscode/` is vendored source, not a clone-on-build. Edit it directly and
+commit — there are no patches to regenerate.
 
 ## Files
 
-- `upstream-pin` — single line, the upstream `microsoft/vscode` tag we
-  vendor. Read by `prepare_vscode.sh` and `clean.sh`. See
-  `docs/upstream-vscode.md` for the bump workflow.
-- `product.json` — KRT branding + open-vsx gallery URLs. Phase 1 patches
-  this onto `vscode/product.json` (currently sits unused; patching the
-  branding lands as a Phase 1 patch).
-- `prepare_vscode.sh` — resets `vscode/` to the pinned tag, applies all
-  patches in `patches/krt/` in lexical order. Idempotent.
-- `build.sh` — runs `prepare_vscode.sh`, then `npm install` and
-  `npm run compile` inside `vscode/`. One-shot full build.
-- `clean.sh` — destructively resets `vscode/` to the pinned tag and runs
-  `git clean -xdf` inside the submodule.
-- `patches/krt/` — the patch series. See the README inside.
+- `build.sh` — runs `npm install` + `npm run compile` inside `vscode/`,
+  rebuilds native modules against the bundled Electron. One-shot full
+  build.
+- `clean.sh` — wipes build artifacts under `vscode/` (node_modules, out,
+  .build, etc.). Does **not** touch source — every other file in `vscode/`
+  is committed work.
+- `check-no-ms-endpoints.sh` — greps the shipping source for Microsoft
+  telemetry / marketplace endpoints. Run as part of `build.sh` before
+  compile.
+- `icons/` — KRT placeholder icons (`.icns`, `.png`). These are committed
+  in place at `vscode/resources/{darwin,linux}/`. The originals here are
+  kept for regeneration via `build-icns.sh`.
 
 ## Usage
 
 Prerequisites (one-time):
 
 ```sh
-brew install node@22   # upstream VSCode pins to Node 22 (see .nvmrc); nodenv users get this automatically via .node-version
+brew install node@22   # upstream pins Node 22; nodenv users get it via .node-version
 ```
 
-First time:
+Full build:
 
 ```sh
-bash build/build.sh        # clones vscode/ if missing, then npm install + compile
-./vscode/scripts/code.sh
+bash build/build.sh
+./vscode/scripts/code.sh    # launch the dev binary
 ```
 
 Iterate:
 
 ```sh
-# edit code inside vscode/, regenerate the patch from a vscode/ commit:
+# edit vscode/ source as usual, then either run the full build or
+# the incremental compile inside vscode/:
 cd vscode
-git format-patch HEAD~1..HEAD --output-directory ../build/patches/krt/
-
-# rebuild from clean state:
-cd ..
-bash build/clean.sh
-bash build/build.sh
+npm run watch     # or: npm run compile
 ```
 
-See `docs/phases/phase-00-scaffold.md` for the Phase 0 checklist and
-`docs/upstream-vscode.md` for the upstream pin workflow.
+Reset build artifacts without losing source changes:
+
+```sh
+bash build/clean.sh
+```
+
+See `docs/upstream-vscode.md` for the upstream-bump workflow.

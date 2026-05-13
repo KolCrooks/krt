@@ -1,0 +1,83 @@
+/*---------------------------------------------------------------------------------------------
+ *  Copyright (c) Microsoft Corporation. All rights reserved.
+ *  Licensed under the MIT License. See License.txt in the project root for license information.
+ *--------------------------------------------------------------------------------------------*/
+
+/* KRT 4-button left rail. Replaces upstream activity bar contents. */
+
+.monaco-workbench .activitybar > .content > .krt-rail {
+	display: flex;
+	flex-direction: column;
+	align-items: stretch;
+	width: 100%;
+	height: 100%;
+	padding: 8px 0;
+	box-sizing: border-box;
+}
+
+.monaco-workbench .activitybar > .content > .krt-rail .krt-rail-btn {
+	position: relative;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	width: 100%;
+	height: 44px;
+	padding: 0;
+	margin: 0;
+	background: transparent;
+	border: none;
+	color: var(--vscode-activityBar-inactiveForeground, currentColor);
+	cursor: pointer;
+	outline: none;
+}
+
+.monaco-workbench .activitybar > .content > .krt-rail .krt-rail-btn:hover {
+	color: var(--vscode-activityBar-foreground, currentColor);
+}
+
+.monaco-workbench .activitybar > .content > .krt-rail .krt-rail-btn.active {
+	color: var(--krt-accent, var(--vscode-activityBar-foreground, currentColor));
+}
+
+.monaco-workbench .activitybar > .content > .krt-rail .krt-rail-btn.active::before {
+	content: '';
+	position: absolute;
+	left: 0;
+	top: 8px;
+	bottom: 8px;
+	width: 2px;
+	background: var(--krt-accent, currentColor);
+	border-radius: 0 2px 2px 0;
+}
+
+.monaco-workbench .activitybar > .content > .krt-rail .krt-rail-btn svg {
+	width: 18px;
+	height: 18px;
+}
+
+.monaco-workbench .activitybar > .content > .krt-rail .krt-rail-spacer {
+	flex: 1 1 auto;
+}
+
+.monaco-workbench .activitybar > .content > .krt-rail .krt-rail-tooltip {
+	position: absolute;
+	left: calc(100% + 6px);
+	top: 50%;
+	transform: translateY(-50%);
+	padding: 4px 8px;
+	background: var(--vscode-editorHoverWidget-background, #1e1e1e);
+	color: var(--vscode-editorHoverWidget-foreground, #ccc);
+	border: 1px solid var(--vscode-editorHoverWidget-border, transparent);
+	border-radius: 4px;
+	white-space: nowrap;
+	font-size: 12px;
+	pointer-events: none;
+	opacity: 0;
+	transition: opacity 80ms ease;
+	z-index: 100;
+}
+
+.monaco-workbench .activitybar > .content > .krt-rail .krt-rail-btn:hover .krt-rail-tooltip {
+	opacity: 1;
+	transition-delay: 200ms;
+}
