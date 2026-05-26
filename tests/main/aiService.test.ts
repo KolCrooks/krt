@@ -66,6 +66,82 @@ describe("AiService", () => {
     expect(service.getCachedTour(pullRequest.repository, pullRequest.number, pullRequest.headSha)?.id).toBe(tour.id);
   });
 
+  it("regenerates a tour when forced even if a cached tour exists", async () => {
+    const service = new AiService(openDatabase(":memory:"), new Keychain("test"), () => defaultAppSettings);
+    const input = {
+      pullRequest,
+      changedFiles: [
+        {
+          path: "src/App.tsx",
+          status: "modified" as const,
+          additions: 10,
+          deletions: 2,
+          changes: 12,
+          isLarge: false,
+          isGenerated: false,
+          reviewStatus: "unreviewed" as const,
+          annotations: 0,
+          diagnostics: 0
+        }
+      ],
+      timeline: [],
+      reviewThreads: [],
+      checks: []
+    };
+
+    const firstTour = await service.generateTour(input);
+    const forcedTour = await service.generateTour({ ...input, force: true });
+
+    expect(forcedTour.id).not.toBe(firstTour.id);
+    expect(service.getCachedTour(pullRequest.repository, pullRequest.number, pullRequest.headSha)?.id).toBe(forcedTour.id);
+  });
+
+  it("uses review-topic titles for deterministic fallback chapters", async () => {
+    const service = new AiService(openDatabase(":memory:"), new Keychain("test"), () => defaultAppSettings);
+
+    const tour = await service.generateTour({
+      pullRequest,
+      changedFiles: [
+        {
+          path: "src/shared/schemas.ts",
+          status: "modified",
+          additions: 4,
+          deletions: 1,
+          changes: 5,
+          patch: '+ keyProvider: aiKeyProviderSchema.default("keychain")',
+          language: "typescript",
+          isLarge: false,
+          isGenerated: false,
+          reviewStatus: "unreviewed",
+          annotations: 0,
+          diagnostics: 0
+        },
+        {
+          path: "src/renderer/components/SettingsView.tsx",
+          status: "modified",
+          additions: 8,
+          deletions: 2,
+          changes: 10,
+          patch: "+ <select value={settings.github.tokenProvider}>",
+          language: "typescript",
+          isLarge: false,
+          isGenerated: false,
+          reviewStatus: "unreviewed",
+          annotations: 0,
+          diagnostics: 0
+        }
+      ],
+      timeline: [],
+      reviewThreads: [],
+      checks: []
+    });
+
+    expect(tour.chapters).toHaveLength(1);
+    expect(tour.chapters[0]?.title).toBe("Settings and credential provider flow");
+    expect(tour.chapters[0]?.files.sort()).toEqual(["src/renderer/components/SettingsView.tsx", "src/shared/schemas.ts"]);
+    expect(tour.chapters.some((chapter) => chapter.title.endsWith("/ changes"))).toBe(false);
+  });
+
   it("redacts prompt input before calling a configured AI provider", async () => {
     const fetchMock = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => ({ ok: false }) as Response);
     vi.stubGlobal("fetch", fetchMock);
@@ -109,7 +185,8 @@ describe("AiService", () => {
           kind: "comment",
           title: "token=super-secret-value",
           createdAt: "2026-05-22T00:00:00.000Z",
-          severity: "info"
+          severity: "info",
+          reactions: []
         }
       ],
       reviewThreads: [],

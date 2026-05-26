@@ -1,10 +1,10 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Ban, GitBranch, Github, Loader2, Pin, PinOff, Search, X } from "lucide-react";
+import { Ban, GitBranch, Github, Loader2, Pin, PinOff, Search, Trash2, X } from "lucide-react";
 import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { krtClient } from "../api/client.js";
-import { formatCount, formatDate } from "../lib/format.js";
+import { formatBytes, formatCount, formatDate } from "../lib/format.js";
 import { useUiStore } from "../store/uiStore.js";
-import type { AppSettings, PullRequestSummary } from "../../shared/schemas.js";
+import type { AppSettings, ManagedWorktree, PullRequestSummary, RepositoryRef } from "../../shared/schemas.js";
 import type { OperationProgress } from "../../shared/schemas.js";
 
 export function SearchView(): React.JSX.Element {
@@ -59,17 +59,42 @@ export function SearchView(): React.JSX.Element {
         limit: 25
       })
   });
+  const checkedOutBranchesQuery = useQuery({
+    queryKey: ["managed-worktrees"],
+    queryFn: () => krtClient.repos.listManagedWorktrees()
+  });
+  const [deletingWorktreeKeys, setDeletingWorktreeKeys] = useState<ReadonlySet<string>>(() => new Set());
+  const deleteWorktree = (worktree: ManagedWorktree): void => {
+    const key = managedWorktreeKey(worktree);
+    if (deletingWorktreeKeys.has(key)) {
+      return;
+    }
+    setDeletingWorktreeKeys((current) => new Set(current).add(key));
+    void krtClient.repos
+      .deleteWorktree({
+        repository: worktree.repository,
+        number: worktree.number,
+        headSha: worktree.headSha
+      })
+      .then(() => {
+        void queryClient.invalidateQueries({ queryKey: ["managed-worktrees"] });
+        void queryClient.invalidateQueries({ queryKey: ["workspace-tree"] });
+        void queryClient.invalidateQueries({ queryKey: ["lsp-session"] });
+        void queryClient.invalidateQueries({ queryKey: ["lsp-diagnostics"] });
+      })
+      .finally(() => {
+        setDeletingWorktreeKeys((current) => {
+          const next = new Set(current);
+          next.delete(key);
+          return next;
+        });
+      });
+  };
 
   const openMutation = useMutation({
-    mutationFn: (input: { ownerRepo: string; number: number }) =>
+    mutationFn: (input: { repository: RepositoryRef; number: number }) =>
       krtClient.pullRequests.startOpen({
-        repository: {
-          provider: "github",
-          owner: input.ownerRepo.split("/")[0],
-          name: input.ownerRepo.split("/")[1],
-          fullName: input.ownerRepo,
-          url: `https://github.com/${input.ownerRepo}`
-        },
+        repository: input.repository,
         number: input.number,
         preferredMode: "auto"
       }),
@@ -247,7 +272,7 @@ export function SearchView(): React.JSX.Element {
               key={`${pullRequest.repository.fullName}-${pullRequest.number}`}
               onClick={() => {
                 setSelectedSearchResult(pullRequest);
-                openMutation.mutate({ ownerRepo: pullRequest.repository.fullName, number: pullRequest.number });
+                openMutation.mutate({ repository: pullRequest.repository, number: pullRequest.number });
               }}
             >
               <SearchAvatar login={pullRequest.author.login} avatarUrl={pullRequest.author.avatarUrl} />
@@ -259,7 +284,9 @@ export function SearchView(): React.JSX.Element {
                 <div className="result-meta">
                   <span className="mono">{pullRequest.repository.fullName}</span>
                   <span aria-hidden="true">·</span>
-                  <span className="mono result-branch"><GitBranch size={11} aria-hidden="true" /> {pullRequest.headRef}</span>
+                  <span className="mono result-branch">
+                    <GitBranch size={11} aria-hidden="true" /> {pullRequest.headRef || shortSha(pullRequest.headSha)}
+                  </span>
                   <span aria-hidden="true">·</span>
                   <span>by {pullRequest.author.login}</span>
                   <span aria-hidden="true">·</span>
@@ -281,6 +308,17 @@ export function SearchView(): React.JSX.Element {
           ))}
         </section>
 
+        <CheckedOutBranchesPanel
+          error={checkedOutBranchesQuery.error}
+          isLoading={checkedOutBranchesQuery.isLoading}
+          onOpen={(worktree) => {
+            openMutation.mutate({ repository: worktree.repository, number: worktree.number });
+          }}
+          onDelete={deleteWorktree}
+          deletingKeys={deletingWorktreeKeys}
+          worktrees={checkedOutBranchesQuery.data ?? []}
+        />
+
       </div>
       {showOpenBanner ? (
         <aside className={openTerminalError ? "operation-banner is-fixed is-terminal" : "operation-banner is-fixed"}>
@@ -295,6 +333,94 @@ export function SearchView(): React.JSX.Element {
         </aside>
       ) : null}
     </main>
+  );
+}
+
+interface CheckedOutBranchesPanelProps {
+  worktrees: ManagedWorktree[];
+  isLoading: boolean;
+  error: unknown;
+  deletingKeys: ReadonlySet<string>;
+  onOpen: (worktree: ManagedWorktree) => void;
+  onDelete: (worktree: ManagedWorktree) => void;
+}
+
+function CheckedOutBranchesPanel({
+  worktrees,
+  isLoading,
+  error,
+  deletingKeys,
+  onOpen,
+  onDelete
+}: CheckedOutBranchesPanelProps): React.JSX.Element {
+  return (
+    <section className="checked-out-branches" aria-label="Checked out branches">
+      <div className="checked-out-branches-header">
+        <div>
+          <h2>Checked out branches</h2>
+        </div>
+        <span className="checked-out-count">{worktrees.length}</span>
+      </div>
+      {isLoading ? <div className="checked-out-empty">Loading checked out branches...</div> : null}
+      {!isLoading && error ? <div className="checked-out-empty">{errorMessage(error)}</div> : null}
+      {!isLoading && !error && worktrees.length === 0 ? (
+        <div className="checked-out-empty">No checked out branches.</div>
+      ) : null}
+      {!isLoading && !error && worktrees.length > 0 ? (
+        <div className="checked-out-list">
+          {worktrees.map((worktree) => {
+            const key = managedWorktreeKey(worktree);
+            const deleting = deletingKeys.has(key);
+            return (
+              <div className="checked-out-row" key={key}>
+                <button
+                  type="button"
+                  className="checked-out-open"
+                  onClick={() => onOpen(worktree)}
+                  title={`Open ${worktree.repository.fullName}#${worktree.number}`}
+                >
+                  <GitBranch size={15} aria-hidden="true" />
+                  <div className="checked-out-main">
+                    <div className="checked-out-title-row">
+                      <strong className="mono">{worktree.headRef ?? shortSha(worktree.headSha)}</strong>
+                      {worktree.active ? <span className="chip add">Active</span> : null}
+                    </div>
+                    <div className="checked-out-meta">
+                      <span className="mono">{worktree.repository.fullName}</span>
+                      <span aria-hidden="true">·</span>
+                      <span>PR #{worktree.number}</span>
+                      {worktree.baseRef ? (
+                        <>
+                          <span aria-hidden="true">·</span>
+                          <span className="mono">{worktree.baseRef}</span>
+                        </>
+                      ) : null}
+                      <span aria-hidden="true">·</span>
+                      <span>{shortSha(worktree.headSha)}</span>
+                      <span aria-hidden="true">·</span>
+                      <span>{formatBytes(worktree.sizeBytes)}</span>
+                      <span aria-hidden="true">·</span>
+                      <span>{formatDate(worktree.lastUsedAt)}</span>
+                    </div>
+                    {worktree.title ? <div className="checked-out-title">{worktree.title}</div> : null}
+                  </div>
+                </button>
+                <button
+                  type="button"
+                  className="checked-out-delete"
+                  disabled={deleting}
+                  onClick={() => onDelete(worktree)}
+                  title={`Delete ${worktree.repository.fullName}#${worktree.number}`}
+                >
+                  {deleting ? <Loader2 className="spin" size={13} aria-hidden="true" /> : <Trash2 size={13} aria-hidden="true" />}
+                  {deleting ? "Deleting" : "Delete"}
+                </button>
+              </div>
+            );
+          })}
+        </div>
+      ) : null}
+    </section>
   );
 }
 
@@ -512,6 +638,14 @@ function errorMessage(error: unknown): string {
     }
   }
   return "Request failed";
+}
+
+function managedWorktreeKey(worktree: ManagedWorktree): string {
+  return `${worktree.repository.provider}:${worktree.repository.fullName}:${worktree.number}:${worktree.headSha}`;
+}
+
+function shortSha(value: string): string {
+  return value.slice(0, 12);
 }
 
 function initials(login: string): string {

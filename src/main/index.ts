@@ -1,4 +1,4 @@
-import { app, autoUpdater, BrowserWindow } from "electron";
+import { app, autoUpdater, BrowserWindow, screen } from "electron";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createAppPaths } from "./appPaths.js";
@@ -36,13 +36,16 @@ async function createMainWindow(): Promise<void> {
   const operations = new OperationService();
   const repos = new RepoService(appPaths, db, operations, { getSettings: () => settings.get() });
   const ai = new AiService(db, keychain, () => settings.get());
-  const extensions = new ExtensionService(() => settings.get(), (update) => settings.update(update));
+  const extensions = new ExtensionService(() => settings.get(), (update) => settings.update(update), {
+    localExtensionDir: appPaths.extensions
+  });
   const lsp = new LspService(repos, extensions);
   const perf = new PerfService(db);
   const prCache = new PrCacheService(db);
   const updates = new UpdateService(() => settings.get(), app.getVersion(), autoUpdater);
   const maintenance = new MaintenanceService(db);
   const diagnostics = new DiagnosticsService(appPaths, app.getVersion(), settings, maintenance, repos, perf, operations, updates);
+  app.once("before-quit", () => lsp.dispose());
 
   registerIpcHandlers({
     providers,
@@ -61,13 +64,16 @@ async function createMainWindow(): Promise<void> {
     diagnostics
   });
 
+  const workArea = screen.getPrimaryDisplay().workArea;
   mainWindow = new BrowserWindow({
-    width: 1440,
-    height: 960,
+    x: workArea.x,
+    y: workArea.y,
+    width: workArea.width,
+    height: workArea.height,
     minWidth: 1120,
     minHeight: 720,
     titleBarStyle: "hiddenInset",
-    trafficLightPosition: { x: 16, y: 16 },
+    trafficLightPosition: { x: 12, y: 9 },
     backgroundColor: "#fbfaf8",
     webPreferences: {
       preload: join(__dirname, "../preload/index.js"),
@@ -88,6 +94,10 @@ async function createMainWindow(): Promise<void> {
       event.preventDefault();
       void openExternalUrl(url);
     }
+  });
+  mainWindow.on("closed", () => {
+    lsp.dispose();
+    mainWindow = null;
   });
 
   if (isDev && process.env.VITE_DEV_SERVER_URL) {

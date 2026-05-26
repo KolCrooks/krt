@@ -25,14 +25,20 @@ import { AppError } from "../errors.js";
 const execFileAsync = promisify(execFile);
 const SEARCH_IGNORED_DIRECTORIES = new Set([
   ".git",
+  ".jj",
   ".next",
   ".turbo",
+  ".venv",
+  "__pycache__",
   "build",
   "coverage",
   "dist",
   "node_modules",
-  "out"
+  "out",
+  "target",
+  "venv"
 ]);
+const DEFAULT_WORKSPACE_TREE_MAX_FILES = 50_000;
 const DEFAULT_TEXT_SEARCH_MAX_RESULTS = 25;
 const DEFAULT_TEXT_SEARCH_MAX_FILES = 2_000;
 const DEFAULT_TEXT_SEARCH_MAX_FILE_BYTES = 200_000;
@@ -71,14 +77,43 @@ export class RepoService {
     window.on("closed", () => this.windows.delete(window));
   }
 
-  selectMode(repository: RepositoryRef, preferredMode: PreferredDataMode): { mode: "light" | "managed"; reason: string } {
+  selectMode(
+    repository: RepositoryRef,
+    preferredMode: PreferredDataMode,
+    headSha?: string
+  ): { mode: "light" | "managed"; reason: string } {
     const mirrorPath = this.mirrorPath(repository);
     const mirrorExists = existsSync(mirrorPath);
-    return selectDataMode({
+    const selection = selectDataMode({
       preferredMode,
       mirrorExists,
-      mirrorFresh: mirrorExists
+      mirrorFresh: mirrorExists,
+      worktreeExists: this.hasManagedWorktree(repository, headSha)
     });
+    if (selection.mode === "managed" && headSha) {
+      this.activateWorktree(repository, headSha);
+    }
+    return selection;
+  }
+
+  hasManagedWorktree(repository: RepositoryRef, headSha: string | undefined): boolean {
+    return headSha ? this.getWorktreePath(repository, headSha) !== null : false;
+  }
+
+  activateWorktree(repository: RepositoryRef, headSha: string): boolean {
+    const worktreePath = this.getWorktreePath(repository, headSha);
+    if (!worktreePath) {
+      return false;
+    }
+
+    this.db
+      .prepare(
+        `UPDATE worktrees SET active = 1, last_used_at = ?
+         WHERE provider = ? AND owner = ? AND repo = ? AND head_sha = ?`
+      )
+      .run(new Date().toISOString(), repository.provider, repository.owner, repository.name, headSha);
+    this.watchWorktree(repository, headSha);
+    return true;
   }
 
   checkoutPullRequest(input: {
@@ -164,10 +199,10 @@ export class RepoService {
       this.operations.assertNotCancelled(operationId);
       this.db
         .prepare(
-          `INSERT INTO worktrees (provider, owner, repo, number, head_sha, worktree_path, last_used_at, active)
-           VALUES (?, ?, ?, ?, ?, ?, ?, 1)
+          `INSERT INTO worktrees (provider, owner, repo, number, head_sha, head_ref, base_ref, worktree_path, last_used_at, active)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
            ON CONFLICT(provider, owner, repo, number, head_sha)
-           DO UPDATE SET worktree_path = excluded.worktree_path, last_used_at = excluded.last_used_at, active = 1`
+           DO UPDATE SET head_ref = excluded.head_ref, base_ref = excluded.base_ref, worktree_path = excluded.worktree_path, last_used_at = excluded.last_used_at, active = 1`
         )
         .run(
           input.repository.provider,
@@ -175,6 +210,8 @@ export class RepoService {
           input.repository.name,
           input.number,
           input.headSha,
+          input.headRef,
+          input.baseRef,
           worktreePath,
           new Date().toISOString()
         );
@@ -205,7 +242,7 @@ export class RepoService {
       return null;
     }
 
-    const filePath = this.safeWorktreePath(worktreePath, path);
+    const filePath = isAbsolute(path) ? resolve(path) : this.safeWorktreePath(worktreePath, path);
     const fileStat = await stat(filePath);
     if (!fileStat.isFile()) {
       throw new AppError("local_file_not_file", `${path} is not a file in the managed worktree.`);
@@ -265,18 +302,13 @@ export class RepoService {
       throw new AppError("worktree_not_found", "No managed worktree exists for this head SHA.");
     }
 
-    const output = await this.runGitForOutput(["-C", worktreePath, "ls-files", "-co", "--exclude-standard", "-z"]);
-    const paths = output
-      .split("\0")
-      .map((path) => path.trim())
-      .filter(Boolean)
-      .sort((left, right) => left.localeCompare(right));
+    const workspaceFiles = await this.listWorkspaceFilesForSearch(worktreePath, DEFAULT_WORKSPACE_TREE_MAX_FILES);
 
     return {
       repository,
       headSha,
       worktreePath,
-      paths
+      paths: workspaceFiles.paths
     };
   }
 
@@ -393,6 +425,40 @@ export class RepoService {
     return { released: result.changes > 0 };
   }
 
+  async deleteWorktree(input: {
+    repository: RepositoryRef;
+    number: number;
+    headSha: string;
+  }): Promise<{ deleted: boolean; worktree: ManagedWorktree | null }> {
+    const worktrees = await this.listManagedWorktrees(input.repository);
+    const worktree = worktrees.find(
+      (candidate) => candidate.number === input.number && candidate.headSha === input.headSha
+    );
+    if (!worktree) {
+      return { deleted: false, worktree: null };
+    }
+
+    if (this.isInsideWorktreeRoot(worktree.worktreePath)) {
+      await rm(worktree.worktreePath, { recursive: true, force: true });
+    }
+
+    const result = this.db
+      .prepare(
+        `DELETE FROM worktrees
+         WHERE provider = ? AND owner = ? AND repo = ? AND number = ? AND head_sha = ?`
+      )
+      .run(
+        input.repository.provider,
+        input.repository.owner,
+        input.repository.name,
+        input.number,
+        input.headSha
+      );
+    this.stopWatchingWorktree(input.repository, input.headSha);
+
+    return { deleted: result.changes > 0, worktree };
+  }
+
   watchWorktree(repository: RepositoryRef, headSha: string): boolean {
     const key = worktreeWatchKey(repository, headSha);
     if (this.watchers.has(key)) {
@@ -420,7 +486,7 @@ export class RepoService {
     const rows = repository
       ? (this.db
           .prepare(
-            `SELECT provider, owner, repo, number, head_sha, worktree_path, last_used_at, active
+            `SELECT provider, owner, repo, number, head_sha, head_ref, base_ref, worktree_path, last_used_at, active
              FROM worktrees
              WHERE provider = ? AND owner = ? AND repo = ?
              ORDER BY last_used_at DESC`
@@ -428,7 +494,7 @@ export class RepoService {
           .all(repository.provider, repository.owner, repository.name) as WorktreeRow[])
       : (this.db
           .prepare(
-            `SELECT provider, owner, repo, number, head_sha, worktree_path, last_used_at, active
+            `SELECT provider, owner, repo, number, head_sha, head_ref, base_ref, worktree_path, last_used_at, active
              FROM worktrees
              ORDER BY last_used_at DESC`
           )
@@ -582,6 +648,7 @@ export class RepoService {
   }
 
   private async mapWorktreeRow(row: WorktreeRow): Promise<ManagedWorktree> {
+    const cachedMetadata = this.cachedWorktreeMetadata(row);
     return {
       repository: {
         provider: row.provider,
@@ -594,8 +661,35 @@ export class RepoService {
       worktreePath: row.worktree_path,
       lastUsedAt: row.last_used_at,
       active: row.active === 1,
-      sizeBytes: await this.directorySize(row.worktree_path)
+      sizeBytes: await this.directorySize(row.worktree_path),
+      title: cachedMetadata.title,
+      headRef: stringValue(row.head_ref) ?? cachedMetadata.headRef,
+      baseRef: stringValue(row.base_ref) ?? cachedMetadata.baseRef
     };
+  }
+
+  private cachedWorktreeMetadata(row: WorktreeRow): Pick<ManagedWorktree, "title" | "headRef" | "baseRef"> {
+    const cacheRow = this.db
+      .prepare(
+        `SELECT payload FROM pr_cache
+         WHERE provider = ? AND owner = ? AND repo = ? AND number = ? AND head_sha = ?
+         LIMIT 1`
+      )
+      .get(row.provider, row.owner, row.repo, row.number, row.head_sha) as { payload: string } | undefined;
+    if (!cacheRow) {
+      return {};
+    }
+
+    try {
+      const detail = (JSON.parse(cacheRow.payload) as { detail?: Record<string, unknown> }).detail;
+      return {
+        title: stringValue(detail?.title),
+        headRef: stringValue(detail?.headRef),
+        baseRef: stringValue(detail?.baseRef)
+      };
+    } catch {
+      return {};
+    }
   }
 
   private async directorySize(path: string): Promise<number> {
@@ -747,12 +841,18 @@ function truncateSearchSnippet(value: string): string {
   return `${value.slice(0, TEXT_SEARCH_MAX_SNIPPET_LENGTH - 3)}...`;
 }
 
+function stringValue(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim().length > 0 ? value : undefined;
+}
+
 type WorktreeRow = {
   provider: "github";
   owner: string;
   repo: string;
   number: number;
   head_sha: string;
+  head_ref: string | null;
+  base_ref: string | null;
   worktree_path: string;
   last_used_at: string;
   active: number;

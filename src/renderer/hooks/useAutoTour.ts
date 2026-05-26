@@ -25,18 +25,22 @@ export function useAutoTour(tab: PrTab): UseAutoTourResult {
   const [progress, setProgress] = useState<OperationProgress | null>(null);
   const triggeredHeadSha = useRef<string | null>(null);
 
-  const generateMutation = useMutation({
-    mutationFn: () =>
+  const generateMutation = useMutation<Awaited<ReturnType<typeof krtClient.ai.startTourGeneration>>, unknown, boolean>({
+    mutationFn: (force) =>
       krtClient.ai.startTourGeneration({
         pullRequest: tab.bundle.detail,
         changedFiles: tab.bundle.changedFiles,
         timeline: tab.bundle.timeline,
         reviewThreads: tab.bundle.reviewThreads,
-        checks: tab.bundle.checks
+        checks: tab.bundle.checks,
+        force
       }),
-    onMutate: () => {
+    onMutate: (force) => {
       setOperationId(null);
       setProgress(null);
+      if (force) {
+        setTour(tab.key, null);
+      }
     },
     onSuccess: (result) => {
       setOperationId(result.operationId);
@@ -72,7 +76,7 @@ export function useAutoTour(tab: PrTab): UseAutoTourResult {
       return;
     }
     triggeredHeadSha.current = tab.bundle.detail.headSha;
-    generateMutation.mutate();
+    generateMutation.mutate(false);
     // eslint-disable-next-line react-hooks/exhaustive-deps -- intentionally fires only on identity / mount changes below
   }, [tab.bundle.detail.headSha, tab.tour]);
 
@@ -115,7 +119,7 @@ export function useAutoTour(tab: PrTab): UseAutoTourResult {
     operationId,
     regenerate: () => {
       triggeredHeadSha.current = tab.bundle.detail.headSha;
-      generateMutation.mutate();
+      generateMutation.mutate(true);
     },
     cancel: () => {
       if (operationId) {

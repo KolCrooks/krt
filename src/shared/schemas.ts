@@ -125,6 +125,30 @@ export const fileContentSchema = z.object({
 });
 export type FileContent = z.infer<typeof fileContentSchema>;
 
+export const reactionContentSchema = z.enum([
+  "+1",
+  "-1",
+  "laugh",
+  "hooray",
+  "confused",
+  "heart",
+  "rocket",
+  "eyes"
+]);
+export type ReactionContent = z.infer<typeof reactionContentSchema>;
+
+export const reactionGroupSchema = z.object({
+  content: reactionContentSchema,
+  count: z.number().int().nonnegative(),
+  viewerHasReacted: z.boolean().default(false)
+});
+export type ReactionGroup = z.infer<typeof reactionGroupSchema>;
+
+export const reactionSubjectSchema = z.object({
+  nodeId: z.string().min(1)
+});
+export type ReactionSubject = z.infer<typeof reactionSubjectSchema>;
+
 export const reviewCommentSchema = z.object({
   id: z.string(),
   threadId: z.string().optional(),
@@ -134,9 +158,17 @@ export const reviewCommentSchema = z.object({
   path: z.string().optional(),
   line: z.number().int().positive().optional(),
   side: z.enum(["left", "right"]).optional(),
+  startLine: z.number().int().positive().optional(),
+  startSide: z.enum(["left", "right"]).optional(),
+  originalLine: z.number().int().positive().optional(),
+  originalStartLine: z.number().int().positive().optional(),
+  originalCommitId: z.string().optional(),
+  diffHunk: z.string().optional(),
+  outdated: z.boolean().optional(),
   createdAt: z.string(),
   updatedAt: z.string().optional(),
-  isBot: z.boolean().default(false)
+  isBot: z.boolean().default(false),
+  reactions: z.array(reactionGroupSchema).default([])
 });
 export type ReviewComment = z.infer<typeof reviewCommentSchema>;
 
@@ -147,6 +179,11 @@ export const reviewThreadSchema = z.object({
   pullNumber: z.number().int().positive(),
   path: z.string().optional(),
   line: z.number().int().positive().optional(),
+  side: z.enum(["left", "right"]).optional(),
+  startLine: z.number().int().positive().optional(),
+  startSide: z.enum(["left", "right"]).optional(),
+  originalLine: z.number().int().positive().optional(),
+  originalStartLine: z.number().int().positive().optional(),
   resolved: z.boolean(),
   outdated: z.boolean().default(false),
   comments: z.array(reviewCommentSchema)
@@ -212,7 +249,18 @@ export const activityEventSchema = z.object({
   createdAt: z.string(),
   url: z.string().url().optional(),
   path: z.string().optional(),
-  severity: z.enum(["info", "success", "warning", "failure"]).default("info")
+  line: z.number().int().positive().optional(),
+  side: z.enum(["left", "right"]).optional(),
+  startLine: z.number().int().positive().optional(),
+  startSide: z.enum(["left", "right"]).optional(),
+  originalLine: z.number().int().positive().optional(),
+  originalStartLine: z.number().int().positive().optional(),
+  originalCommitId: z.string().optional(),
+  diffHunk: z.string().optional(),
+  outdated: z.boolean().optional(),
+  severity: z.enum(["info", "success", "warning", "failure"]).default("info"),
+  reactionSubject: reactionSubjectSchema.optional(),
+  reactions: z.array(reactionGroupSchema).default([])
 });
 export type ActivityEvent = z.infer<typeof activityEventSchema>;
 
@@ -301,6 +349,97 @@ export const reviewTourSchema = z.object({
   )
 });
 export type ReviewTour = z.infer<typeof reviewTourSchema>;
+
+export const extensionKindSchema = z.enum(["language", "linter", "review", "ai", "diff", "command", "other"]);
+export type ExtensionKind = z.infer<typeof extensionKindSchema>;
+
+export const extensionCommandSchema = z.object({
+  program: z.string().min(1),
+  args: z.array(z.string()).default([])
+});
+export type ExtensionCommand = z.infer<typeof extensionCommandSchema>;
+
+export const extensionLspFeatureSchema = z.enum(["diagnostics", "hover", "definition", "symbols"]);
+export type ExtensionLspFeature = z.infer<typeof extensionLspFeatureSchema>;
+
+export const extensionLspContributionSchema = z.object({
+  command: extensionCommandSchema,
+  transport: z.enum(["stdio"]).default("stdio"),
+  languages: z.array(z.string()).default([]),
+  features: z.array(extensionLspFeatureSchema).default(["diagnostics", "hover", "definition", "symbols"]),
+  initializationOptions: z.unknown().optional(),
+  settings: z.unknown().optional()
+});
+export type ExtensionLspContribution = z.infer<typeof extensionLspContributionSchema>;
+
+export const extensionManifestSchema = z.object({
+  schemaVersion: z.literal(1).default(1),
+  id: z.string().min(1),
+  name: z.string().min(1),
+  version: z.string().min(1),
+  publisher: z.string().optional(),
+  description: z.string().default(""),
+  kind: z.array(extensionKindSchema).default(["other"]),
+  activation: z
+    .object({
+      globs: z.array(z.string()).default([]),
+      languages: z.array(z.string()).default([])
+    })
+    .default({ globs: [], languages: [] }),
+  contributes: z
+    .object({
+      lsp: extensionLspContributionSchema.optional(),
+      diagnostics: z
+        .array(
+          z.object({
+            command: extensionCommandSchema,
+            globs: z.array(z.string()).default([])
+          })
+        )
+        .default([]),
+      review: z
+        .object({
+          capabilities: z.array(z.string()).default([])
+        })
+        .optional(),
+      commands: z
+        .array(
+          z.object({
+            id: z.string().min(1),
+            title: z.string().min(1)
+          })
+        )
+        .default([])
+    })
+    .default({ diagnostics: [], commands: [] })
+});
+export type ExtensionManifest = z.infer<typeof extensionManifestSchema>;
+
+export const extensionDescriptorSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  enabled: z.boolean(),
+  description: z.string(),
+  activationGlobs: z.array(z.string()),
+  capabilities: z.array(z.string()),
+  command: extensionCommandSchema.optional(),
+  version: z.string().optional(),
+  publisher: z.string().optional(),
+  source: z.enum(["builtin", "local"]).optional(),
+  kind: z.array(extensionKindSchema).optional(),
+  contributes: extensionManifestSchema.shape.contributes.optional(),
+  manifestPath: z.string().optional()
+});
+export type ExtensionDescriptor = z.infer<typeof extensionDescriptorSchema>;
+
+export const extensionLogSchema = z.object({
+  id: z.string(),
+  extensionId: z.string(),
+  level: z.enum(["debug", "info", "warning", "error"]),
+  message: z.string(),
+  createdAt: z.string()
+});
+export type ExtensionLog = z.infer<typeof extensionLogSchema>;
 
 export const aiProviderSchema = z.enum([
   "disabled",
@@ -467,7 +606,10 @@ export const managedWorktreeSchema = z.object({
   worktreePath: z.string(),
   lastUsedAt: z.string(),
   active: z.boolean(),
-  sizeBytes: z.number().int().nonnegative().default(0)
+  sizeBytes: z.number().int().nonnegative().default(0),
+  title: z.string().optional(),
+  headRef: z.string().optional(),
+  baseRef: z.string().optional()
 });
 export type ManagedWorktree = z.infer<typeof managedWorktreeSchema>;
 
@@ -615,6 +757,24 @@ export const lspDocumentSymbolSchema = z.object({
 });
 export type LspDocumentSymbol = z.infer<typeof lspDocumentSymbolSchema>;
 
+export const lspServerActivitySchema = z.object({
+  extensionId: z.string(),
+  title: z.string(),
+  message: z.string().optional(),
+  percentage: z.number().min(0).max(100).optional(),
+  updatedAt: z.string()
+});
+export type LspServerActivity = z.infer<typeof lspServerActivitySchema>;
+
+export const lspServerStatusSchema = z.object({
+  extensionId: z.string(),
+  health: z.enum(["ok", "warning", "error"]),
+  quiescent: z.boolean(),
+  message: z.string().optional(),
+  updatedAt: z.string()
+});
+export type LspServerStatus = z.infer<typeof lspServerStatusSchema>;
+
 export const lspSessionSchema = z.object({
   id: z.string(),
   repository: repositoryRefSchema,
@@ -630,6 +790,10 @@ export const lspSessionSchema = z.object({
   ),
   capabilities: z.array(z.enum(["diagnostics", "hover", "definition", "symbols"])),
   startedAt: z.string(),
+  activities: z.array(lspServerActivitySchema).optional(),
+  activity: lspServerActivitySchema.optional(),
+  serverStatuses: z.array(lspServerStatusSchema).optional(),
+  serverStatus: lspServerStatusSchema.optional(),
   error: z.string().optional()
 });
 export type LspSession = z.infer<typeof lspSessionSchema>;

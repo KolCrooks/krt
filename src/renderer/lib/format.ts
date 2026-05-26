@@ -15,6 +15,20 @@ export function formatDate(value: string): string {
   }).format(date);
 }
 
+export function formatBytes(value: number): string {
+  if (value < 1024) {
+    return `${value} B`;
+  }
+  const units = ["KB", "MB", "GB", "TB"];
+  let size = value / 1024;
+  let unitIndex = 0;
+  while (size >= 1024 && unitIndex < units.length - 1) {
+    size /= 1024;
+    unitIndex += 1;
+  }
+  return `${new Intl.NumberFormat("en-US", { maximumFractionDigits: size >= 10 ? 0 : 1 }).format(size)} ${units[unitIndex]}`;
+}
+
 export function relativeRiskClass(risk: "low" | "medium" | "high"): string {
   return `risk risk-${risk}`;
 }

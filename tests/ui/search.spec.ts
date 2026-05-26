@@ -154,6 +154,7 @@ test.beforeEach(async ({ page }) => {
         selectMode: async () => ({ mode: "light", reason: "test" }),
         checkoutPullRequest: async () => ({ operationId: "op", mode: "managed", worktreePath: "/tmp/worktree" }),
         releaseWorktree: async () => ({ released: true }),
+        deleteWorktree: async () => ({ deleted: true, worktree: null }),
         listManagedWorktrees: async () => [],
         cleanupWorktrees: async (input: any) => ({ deleted: [], retained: [], deletedCount: 0, retainedCount: 0, freedBytes: 0, dryRun: input.dryRun ?? false }),
         onWorkspaceFileChange: () => () => undefined

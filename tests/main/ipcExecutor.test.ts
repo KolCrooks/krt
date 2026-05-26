@@ -112,6 +112,71 @@ describe("createIpcExecutor", () => {
     }
   });
 
+  it("restarts active language server sessions when an LSP extension enablement changes", async () => {
+    const restartActiveSessionsForExtension = vi.fn(async () => []);
+    const setEnabled = vi.fn((extensionId: string, enabled: boolean) => ({
+      id: extensionId,
+      name: "Rust Analyzer",
+      enabled,
+      description: "Rust language server.",
+      activationGlobs: ["**/*.rs"],
+      capabilities: ["diagnostics", "hover", "definition", "symbols"],
+      contributes: {
+        lsp: {
+          command: { program: "rust-analyzer", args: [] },
+          transport: "stdio" as const,
+          languages: ["rust"],
+          features: ["diagnostics" as const, "hover" as const, "definition" as const, "symbols" as const]
+        }
+      }
+    }));
+    const executor = createIpcExecutor(
+      createContext({
+        extensions: { setEnabled } as unknown as IpcHandlerContext["extensions"],
+        lsp: { restartActiveSessionsForExtension } as unknown as IpcHandlerContext["lsp"]
+      })
+    );
+
+    const result = await executor("extensions:setEnabled", undefined, {
+      extensionId: "rust-analyzer",
+      enabled: false
+    });
+
+    expect(result.ok).toBe(true);
+    expect(setEnabled).toHaveBeenCalledWith("rust-analyzer", false);
+    expect(restartActiveSessionsForExtension).toHaveBeenCalledWith("rust-analyzer");
+  });
+
+  it("stops the language server before deleting a managed worktree", async () => {
+    const repository = repositoryFixture();
+    const stopForWorktree = vi.fn(async () => null);
+    const deleteWorktree = vi.fn(async () => ({
+      deleted: true,
+      worktree: {
+        repository,
+        number: 12,
+        headSha: "abc123",
+        worktreePath: "/tmp/krt-worktree",
+        lastUsedAt: "2026-05-22T00:00:00.000Z",
+        active: true,
+        sizeBytes: 12
+      }
+    }));
+    const executor = createIpcExecutor(
+      createContext({
+        repos: { deleteWorktree } as unknown as IpcHandlerContext["repos"],
+        lsp: { stopForWorktree } as unknown as IpcHandlerContext["lsp"]
+      })
+    );
+
+    const result = await executor("repos:deleteWorktree", undefined, { repository, number: 12, headSha: "abc123" });
+
+    expect(result.ok).toBe(true);
+    expect(stopForWorktree).toHaveBeenCalledWith(repository, "abc123");
+    expect(deleteWorktree).toHaveBeenCalledWith({ repository, number: 12, headSha: "abc123" });
+    expect(stopForWorktree.mock.invocationCallOrder[0]).toBeLessThan(deleteWorktree.mock.invocationCallOrder[0]);
+  });
+
   it("strips changed-file patches from renderer-facing changed file responses", async () => {
     const repository = repositoryFixture();
     const executor = createIpcExecutor(
@@ -264,6 +329,60 @@ describe("createIpcExecutor", () => {
     });
   });
 
+  it("forces AI tour generation instead of returning a cached tour", async () => {
+    const pullRequest = pullRequestFixture();
+    const cachedTour = tourFixture(pullRequest);
+    const generatedTour = { ...cachedTour, id: "generated-tour" };
+    const operations = new OperationService();
+    const generateTour = vi.fn(async () => generatedTour);
+    const getCachedTour = vi.fn(() => cachedTour);
+    const executor = createIpcExecutor(
+      createContext({
+        operations,
+        prCache: {
+          hydrateChangedFilePatches: vi.fn(
+            (_repository: unknown, _number: unknown, _headSha: unknown, files: ChangedFile[]) => files
+          )
+        } as unknown as IpcHandlerContext["prCache"],
+        ai: {
+          getCachedTour,
+          generateTour
+        } as unknown as IpcHandlerContext["ai"]
+      })
+    );
+
+    const result = await executor("ai:startTourGeneration", undefined, {
+      pullRequest,
+      changedFiles: [],
+      timeline: [],
+      reviewThreads: [],
+      checks: [],
+      force: true
+    });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) {
+      return;
+    }
+    expect(result.data.cachedTour).toBeNull();
+    expect(getCachedTour).not.toHaveBeenCalled();
+
+    await waitForOperationDone(operations, result.data.operationId);
+
+    expect(generateTour).toHaveBeenCalledWith(
+      expect.objectContaining({ force: true }),
+      expect.objectContaining({
+        signal: expect.any(AbortSignal),
+        onProgress: expect.any(Function)
+      })
+    );
+    expect(operations.get(result.data.operationId)).toMatchObject({
+      phase: "complete",
+      done: true,
+      cancelled: false
+    });
+  });
+
   it("marks AI tour generation operations cancelled when the operation is aborted", async () => {
     const pullRequest = pullRequestFixture();
     const operations = new OperationService();
@@ -316,11 +435,12 @@ describe("createIpcExecutor", () => {
     const pullRequest = pullRequestFixture();
     const bundle = bundleFixture(pullRequest);
     const operations = new OperationService();
+    const selectMode = vi.fn(() => ({ mode: "light" as const, reason: "test" }));
     const executor = createIpcExecutor(
       createContext({
         operations,
         repos: {
-          selectMode: vi.fn(() => ({ mode: "light", reason: "test" }))
+          selectMode
         } as unknown as IpcHandlerContext["repos"],
         providers: {
           get: vi.fn(async () => ({
@@ -354,6 +474,7 @@ describe("createIpcExecutor", () => {
     if (opened.ok) {
       expect(opened.data?.detail.title).toBe("Patch cache PR");
     }
+    expect(selectMode).toHaveBeenCalledWith(pullRequest.repository, "auto", pullRequest.headSha);
   });
 
   it("marks pull request open operations cancelled before storing a result", async () => {
@@ -414,6 +535,9 @@ describe("createIpcExecutor", () => {
     const executor = createIpcExecutor(
       createContext({
         operations,
+        repos: {
+          hasManagedWorktree: vi.fn(() => false)
+        } as unknown as IpcHandlerContext["repos"],
         providers: {
           get: vi.fn(async () => ({
             openPullRequest: vi.fn(async () => bundle)

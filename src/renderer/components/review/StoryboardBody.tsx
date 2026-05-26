@@ -323,12 +323,18 @@ export function StoryboardBody({ tab, layout }: StoryboardBodyProps): React.JSX.
             </span>
           </div>
           <DiffPanel
+            tabKey={tab.key}
             pullRequest={tab.bundle.detail}
             file={selectedAnchorFile}
             layout={layout}
             reviewThreads={tab.bundle.reviewThreads}
             tourChapters={[activeChapter]}
             headerless
+            enableLsp={tab.mode === "managed"}
+            onOpenDefinition={(path, line) => {
+              openFileInTab(tab.key, path, line);
+              setTabViewMode(tab.key, "editor");
+            }}
           />
         </section>
       ) : null}

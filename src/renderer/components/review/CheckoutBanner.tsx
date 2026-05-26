@@ -1,4 +1,4 @@
-import { useMutation } from "@tanstack/react-query";
+import { useMutation, useQuery } from "@tanstack/react-query";
 import { Ban, Code2, GitBranch, RefreshCw, X } from "lucide-react";
 import { useEffect } from "react";
 import { krtClient } from "../../api/client.js";
@@ -14,6 +14,16 @@ export function CheckoutBanner({ tab }: CheckoutBannerProps): React.JSX.Element 
   const dismissCheckoutBanner = useUiStore((state) => state.dismissCheckoutBanner);
   const setTabMode = useUiStore((state) => state.setTabMode);
   const detail = tab.bundle.detail;
+  const checkoutStatus = useQuery({
+    queryKey: ["checkout-status", detail.repository.fullName, detail.headSha],
+    enabled: tab.mode !== "managed" && tab.checkout.state !== "checking",
+    queryFn: () =>
+      krtClient.repos.selectMode({
+        repository: detail.repository,
+        preferredMode: "auto",
+        headSha: detail.headSha
+      })
+  });
 
   const checkoutMutation = useMutation({
     mutationFn: () =>
@@ -58,6 +68,14 @@ export function CheckoutBanner({ tab }: CheckoutBannerProps): React.JSX.Element 
       }
     });
   }, [setCheckout, setTabMode, tab.checkout.operationId, tab.key]);
+
+  useEffect(() => {
+    if (checkoutStatus.data?.mode !== "managed") {
+      return;
+    }
+    setTabMode(tab.key, "managed");
+    setCheckout(tab.key, { state: "checked", message: checkoutStatus.data.reason, percent: 100 });
+  }, [checkoutStatus.data?.mode, checkoutStatus.data?.reason, setCheckout, setTabMode, tab.key]);
 
   if (tab.checkout.state === "checked" || tab.checkout.dismissed || tab.mode === "managed") {
     return null;

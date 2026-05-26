@@ -9,6 +9,7 @@ export interface AppPaths {
   database: string;
   logs: string;
   indexes: string;
+  extensions: string;
 }
 
 export function createAppPaths(userDataPath: string): AppPaths {
@@ -19,10 +20,11 @@ export function createAppPaths(userDataPath: string): AppPaths {
     cache: join(userDataPath, "cache"),
     database: join(userDataPath, "cache", "db.sqlite"),
     logs: join(userDataPath, "logs"),
-    indexes: join(userDataPath, "indexes")
+    indexes: join(userDataPath, "indexes"),
+    extensions: join(userDataPath, "extensions")
   };
 
-  for (const directory of [paths.root, paths.repos, paths.worktrees, paths.cache, paths.logs, paths.indexes]) {
+  for (const directory of [paths.root, paths.repos, paths.worktrees, paths.cache, paths.logs, paths.indexes, paths.extensions]) {
     mkdirSync(directory, { recursive: true });
   }
 

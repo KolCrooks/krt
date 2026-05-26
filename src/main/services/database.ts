@@ -138,6 +138,8 @@ function runMigrations(db: SqliteDatabase): void {
       repo TEXT NOT NULL,
       number INTEGER NOT NULL,
       head_sha TEXT NOT NULL,
+      head_ref TEXT,
+      base_ref TEXT,
       worktree_path TEXT NOT NULL,
       last_used_at TEXT NOT NULL,
       active INTEGER NOT NULL DEFAULT 0,
@@ -152,4 +154,14 @@ function runMigrations(db: SqliteDatabase): void {
       created_at TEXT NOT NULL
     );
   `);
+  ensureColumn(db, "worktrees", "head_ref", "TEXT");
+  ensureColumn(db, "worktrees", "base_ref", "TEXT");
+}
+
+function ensureColumn(db: SqliteDatabase, table: string, column: string, definition: string): void {
+  const rows = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
+  if (rows.some((row) => row.name === column)) {
+    return;
+  }
+  db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
 }

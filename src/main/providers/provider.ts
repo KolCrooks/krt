@@ -8,6 +8,8 @@ import type {
   PullRequestBundle,
   PullRequestDetail,
   PullRequestSummary,
+  ReactionContent,
+  ReactionGroup,
   RepositoryCloneInfo,
   RepositoryRef,
   ReviewComment,
@@ -38,6 +40,7 @@ export interface Provider {
   replyToReviewThread(repository: RepositoryRef, threadId: string, body: string): Promise<ReviewComment>;
   resolveReviewThread(repository: RepositoryRef, number: number, threadId: string): Promise<ReviewThread>;
   reopenReviewThread(repository: RepositoryRef, number: number, threadId: string): Promise<ReviewThread>;
+  toggleReaction(subjectId: string, content: ReactionContent, add: boolean): Promise<ReactionGroup[]>;
   submitReview(submission: ReviewSubmission): Promise<ReviewSubmissionResult>;
   getRepository(repository: RepositoryRef): Promise<RepositoryRef>;
   getCloneInfo(repository: RepositoryRef): Promise<RepositoryCloneInfo>;

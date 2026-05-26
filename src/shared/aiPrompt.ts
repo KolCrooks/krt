@@ -38,6 +38,8 @@ export interface PreparedAiFile {
 export interface PreparedAiCluster {
   id: string;
   title: string;
+  topic: string;
+  reviewOrder: number;
   files: PreparedAiFile[];
   additions: number;
   deletions: number;
@@ -89,6 +91,20 @@ export interface PreparedAiReviewContext {
   timeline: Array<Pick<ActivityEvent, "kind" | "title" | "severity">>;
 }
 
+export interface ReviewTopicInput {
+  path: string;
+  language?: string;
+  imports?: readonly string[];
+  patch?: string;
+  patchExcerpt?: string;
+}
+
+export interface ReviewTopicMetadata {
+  key: string;
+  title: string;
+  reviewOrder: number;
+}
+
 const defaultOptions: AiPromptPrepOptions = {
   maxFiles: 120,
   maxClusters: 12,
@@ -108,11 +124,14 @@ const tourTask = {
     "Return exactly one JSON object and no markdown, prose wrapper, code fence, or comments.",
     "Match the ReviewTour shape. The caller will fill provider, repository, pullNumber, headSha, generatedAt, model, and id if omitted.",
     "Use stable ids such as chapter-1 and risk-1. Every dependency and graph edge endpoint must reference an existing chapter id.",
-    "Only cite files present in the supplied clusters. Do not invent files, checks, threads, functions, APIs, or behavior.",
+    "Only cite files present in the supplied topic clusters. Do not invent files, checks, threads, functions, APIs, or behavior.",
     "Prefer concise, reviewer-facing text. Avoid generic summaries like 'review the changes' unless paired with specific evidence."
   ],
   chapterGuidance: [
-    "Create 3-8 chapters unless the PR is trivial. Each chapter should represent a coherent review stop, not just a directory name.",
+    "Create 3-8 chapters unless the PR is trivial. Each chapter must represent a coherent topic, workflow, behavior, or review concern.",
+    "Do not create one chapter per file. Do not name chapters after individual files, directories, or supplied cluster titles unless that is truly the user-facing topic.",
+    "Use the topic clusters as evidence groups, not as a required chapter outline. Combine files from different clusters when they implement the same feature or behavior.",
+    "Chapter titles should describe the review topic, for example 'Credential provider selection' or 'Settings persistence flow', not 'SettingsView.tsx' or 'src/ changes'.",
     "Order chapters in the sequence a reviewer should follow: entry points and contracts first, risky behavior next, tests/config/generated artifacts last.",
     "Chapter summaries should explain what changed and why it matters for review.",
     "Set diffAnchors to the most useful files for that chapter, with side right unless the old side is specifically relevant.",
@@ -310,7 +329,7 @@ function addMatch(signals: string[], match: RegExpMatchArray | null): void {
 function clusterPreparedFiles(files: PreparedAiFile[], maxClusters: number): PreparedAiCluster[] {
   const buckets = new Map<string, PreparedAiFile[]>();
   for (const file of files) {
-    const key = clusterKey(file.path);
+    const key = reviewTopicKey(file);
     const bucket = buckets.get(key) ?? [];
     bucket.push(file);
     buckets.set(key, bucket);
@@ -318,7 +337,7 @@ function clusterPreparedFiles(files: PreparedAiFile[], maxClusters: number): Pre
 
   const clusters = [...buckets.entries()]
     .map(([key, bucketFiles]) => buildCluster(key, bucketFiles))
-    .sort((left, right) => right.changes - left.changes || left.title.localeCompare(right.title));
+    .sort((left, right) => left.reviewOrder - right.reviewOrder || right.changes - left.changes || left.title.localeCompare(right.title));
 
   if (clusters.length <= maxClusters) {
     return clusters.map((cluster, index) => ({ ...cluster, id: `cluster-${index + 1}` }));
@@ -335,14 +354,6 @@ function clusterPreparedFiles(files: PreparedAiFile[], maxClusters: number): Pre
   }));
 }
 
-function clusterKey(path: string): string {
-  const segments = path.split("/").filter(Boolean);
-  if (segments.length <= 1) {
-    return "root";
-  }
-  return segments[0];
-}
-
 function buildCluster(key: string, files: PreparedAiFile[]): Omit<PreparedAiCluster, "id"> {
   const additions = files.reduce((sum, file) => sum + file.additions, 0);
   const deletions = files.reduce((sum, file) => sum + file.deletions, 0);
@@ -350,7 +361,9 @@ function buildCluster(key: string, files: PreparedAiFile[]): Omit<PreparedAiClus
   const dependencies = [...new Set(files.flatMap((file) => file.imports))].slice(0, 20);
 
   return {
-    title: key === "root" ? "Top-level changes" : `${key}/ changes`,
+    title: topicTitle(key),
+    topic: key,
+    reviewOrder: topicReviewOrder(key),
     files,
     additions,
     deletions,
@@ -358,6 +371,122 @@ function buildCluster(key: string, files: PreparedAiFile[]): Omit<PreparedAiClus
     riskHints: riskHintsForFiles(files),
     dependencies
   };
+}
+
+export function inferReviewTopic(input: ReviewTopicInput): ReviewTopicMetadata {
+  const path = input.path.toLowerCase();
+  const evidence = [
+    path,
+    input.language ?? "",
+    input.imports?.join("\n") ?? "",
+    input.patchExcerpt ?? "",
+    input.patch ?? ""
+  ].join("\n").toLowerCase();
+
+  let key = "source-behavior";
+  if (isTestPath(path)) {
+    key = "tests-validation";
+  } else if (isDocsPath(path)) {
+    key = "documentation";
+  } else if (hasAny(evidence, ["settings", "preference", "keychain", "credential", "secret", "token", "auth", "providerregistry", "api_key", "github_token", "ai_api_key", "keyprovider", "tokenprovider"])) {
+    key = "settings-credentials";
+  } else if (hasAny(evidence, ["aiprompt", "aiservice", "redaction", "reviewtour", "ai tour", "tour generation", "prompt", "model"])) {
+    key = "ai-review-generation";
+  } else if (hasAny(evidence, ["schema", "ipc", "preload", "contract", "zod", "channel", "contextbridge", "ipcrenderer", "ipcmain"])) {
+    key = "contracts-ipc";
+  } else if (hasAny(evidence, ["database", "sqlite", "cache", "worktree", "repository", "migration", "storage", "persistence"])) {
+    key = "persistence-workspace-data";
+  } else if (hasAny(evidence, ["component", "renderer", "tsx", "css", "style", "view", "workspace", "diff", "editor", "storyboard", "tab", "rail", "titlebar", "select", "button"])) {
+    key = "review-ui";
+  } else if (hasAny(evidence, ["electron", "browserwindow", "auto-updater", "menu", "appmenu", "main/index"])) {
+    key = "main-process-shell";
+  } else if (isConfigPath(path)) {
+    key = "build-config";
+  }
+
+  return {
+    key,
+    title: topicTitle(key),
+    reviewOrder: topicReviewOrder(key)
+  };
+}
+
+function reviewTopicKey(file: PreparedAiFile): string {
+  return inferReviewTopic({
+    path: file.path,
+    language: file.language,
+    imports: file.imports,
+    patchExcerpt: file.patchExcerpt
+  }).key;
+}
+
+function topicTitle(key: string): string {
+  switch (key) {
+    case "settings-credentials":
+      return "Settings and credential provider flow";
+    case "ai-review-generation":
+      return "AI review tour generation";
+    case "contracts-ipc":
+      return "Shared contracts and IPC boundaries";
+    case "persistence-workspace-data":
+      return "Persistence and workspace data flow";
+    case "review-ui":
+      return "Review UI workflow";
+    case "main-process-shell":
+      return "Electron shell and main process behavior";
+    case "tests-validation":
+      return "Tests and validation";
+    case "documentation":
+      return "Documentation";
+    case "build-config":
+      return "Build and project configuration";
+    case "source-behavior":
+    default:
+      return "Runtime behavior changes";
+  }
+}
+
+function topicReviewOrder(key: string): number {
+  switch (key) {
+    case "contracts-ipc":
+      return 10;
+    case "settings-credentials":
+      return 20;
+    case "ai-review-generation":
+      return 30;
+    case "persistence-workspace-data":
+      return 40;
+    case "main-process-shell":
+      return 50;
+    case "review-ui":
+      return 60;
+    case "source-behavior":
+      return 70;
+    case "tests-validation":
+      return 90;
+    case "build-config":
+      return 95;
+    case "documentation":
+      return 100;
+    default:
+      return 80;
+  }
+}
+
+function isTestPath(path: string): boolean {
+  return /(^|\/)(test|tests|__tests__)(\/|$)/.test(path) || /\.(test|spec)\.[cm]?[jt]sx?$/.test(path);
+}
+
+function isDocsPath(path: string): boolean {
+  return /(^|\/)(docs?|readme)(\/|$)/.test(path) || /(^|\/)readme\./.test(path) || /\.mdx?$/.test(path);
+}
+
+function isConfigPath(path: string): boolean {
+  return /(^|\/)(package(-lock)?\.json|pnpm-lock\.yaml|yarn\.lock|tsconfig[^/]*\.json|vite\.config|vitest\.config|playwright\.config|eslint|prettier|electron-builder|dockerfile|makefile|\.github)(\/|$|\.)/.test(path);
+}
+
+function hasAny(value: string, needles: string[]): boolean {
+  return needles.some((needle) => value.includes(needle));
 }
 
 function riskHintsForFiles(files: PreparedAiFile[]): string[] {

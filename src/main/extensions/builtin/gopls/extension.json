@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "id": "gopls",
+  "name": "gopls",
+  "version": "1.0.0",
+  "publisher": "krt",
+  "description": "Go language server support.",
+  "kind": ["language"],
+  "activation": {
+    "globs": ["**/*.go", "**/go.mod"],
+    "languages": ["go"]
+  },
+  "contributes": {
+    "lsp": {
+      "command": {
+        "program": "gopls",
+        "args": []
+      },
+      "transport": "stdio",
+      "languages": ["go"],
+      "features": ["diagnostics", "hover", "definition", "symbols"]
+    }
+  }
+}

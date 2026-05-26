@@ -59,6 +59,13 @@ describe("RepoService managed worktree reads", () => {
       done: true
     });
     expect(service.getWorktreePath(repository, "abc123")).toBe(worktreePath);
+    expect(await service.listManagedWorktrees(repository)).toEqual([
+      expect.objectContaining({
+        headSha: "abc123",
+        headRef: "feature",
+        baseRef: "main"
+      })
+    ]);
     expect(watchFactory).toHaveBeenCalledWith(worktreePath, expect.any(Function));
   });
 
@@ -84,9 +91,9 @@ describe("RepoService managed worktree reads", () => {
     await mkdir(mirrorPath, { recursive: true });
     await mkdir(worktreePath, { recursive: true });
 
-    expect(service.selectMode(repository, "auto")).toEqual({
-      mode: "managed",
-      reason: "A fresh managed mirror is available."
+    expect(service.selectMode(repository, "auto", "abc123")).toEqual({
+      mode: "light",
+      reason: "A managed mirror exists, but this pull request is not checked out yet."
     });
 
     const result = await service.checkoutPullRequest({
@@ -100,7 +107,28 @@ describe("RepoService managed worktree reads", () => {
 
     expect(result.worktreePath).toBe(worktreePath);
     expect(service.getWorktreePath(repository, "abc123")).toBe(worktreePath);
+    expect(service.selectMode(repository, "auto", "abc123")).toEqual({
+      mode: "managed",
+      reason: "A managed checkout exists for this pull request."
+    });
     expect(watchFactory).toHaveBeenCalledWith(worktreePath, expect.any(Function));
+  });
+
+  it("does not treat a repository mirror as a checked-out pull request worktree", async () => {
+    const root = await mkdtemp(join(tmpdir(), "krt2-repo-service-"));
+    const paths = createAppPaths(root);
+    const db = openDatabase(":memory:");
+    const service = new RepoService(paths, db, new OperationService());
+    await mkdir(join(paths.repos, "github", "kol", "repo", "mirror.git"), { recursive: true });
+
+    expect(service.selectMode(repository, "auto", "abc123")).toEqual({
+      mode: "light",
+      reason: "A managed mirror exists, but this pull request is not checked out yet."
+    });
+    expect(service.selectMode(repository, "managed", "abc123")).toEqual({
+      mode: "light",
+      reason: "Managed mode was requested, but this pull request is not checked out yet."
+    });
   });
 
   it("reads file content from the managed worktree mapped by head SHA", async () => {
@@ -121,6 +149,51 @@ describe("RepoService managed worktree reads", () => {
 
     expect(content?.contents).toBe("export const value = 1;\n");
     expect(content?.isLarge).toBe(false);
+  });
+
+  it("reads absolute local files for managed worktree definition targets", async () => {
+    const root = await mkdtemp(join(tmpdir(), "krt2-repo-service-"));
+    const paths = createAppPaths(root);
+    const db = openDatabase(":memory:");
+    const service = new RepoService(paths, db, new OperationService());
+    const worktreePath = join(root, "worktree");
+    const dependencyPath = join(root, "cargo-registry", "src", "lib.rs");
+    await mkdir(worktreePath, { recursive: true });
+    await mkdir(join(root, "cargo-registry", "src"), { recursive: true });
+    await writeFile(dependencyPath, "pub fn dependency() {}\n");
+
+    db.prepare(
+      `INSERT INTO worktrees (provider, owner, repo, number, head_sha, worktree_path, last_used_at, active)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 1)`
+    ).run("github", "kol", "repo", 12, "abc123", worktreePath, new Date().toISOString());
+
+    const content = await service.getLocalFileContent(repository, dependencyPath, "abc123");
+
+    expect(content?.path).toBe(dependencyPath);
+    expect(content?.contents).toBe("pub fn dependency() {}\n");
+  });
+
+  it("loads the editor workspace tree from the worktree filesystem", async () => {
+    const root = await mkdtemp(join(tmpdir(), "krt2-repo-service-"));
+    const paths = createAppPaths(root);
+    const db = openDatabase(":memory:");
+    const service = new RepoService(paths, db, new OperationService());
+    const worktreePath = join(root, "worktree");
+    await mkdir(join(worktreePath, "src"), { recursive: true });
+    await mkdir(join(worktreePath, "node_modules", "pkg"), { recursive: true });
+    await mkdir(join(worktreePath, "target", "debug"), { recursive: true });
+    await mkdir(join(worktreePath, ".jj", "repo"), { recursive: true });
+    await writeFile(join(worktreePath, "Cargo.toml"), "[package]\nname = \"repo\"\n");
+    await writeFile(join(worktreePath, "src", "lib.rs"), "pub fn lib() {}\n");
+    await writeFile(join(worktreePath, "src", "generated.rs"), "pub fn generated() {}\n");
+    await writeFile(join(worktreePath, "node_modules", "pkg", "index.js"), "ignored\n");
+    await writeFile(join(worktreePath, "target", "debug", "repo"), "ignored\n");
+    await writeFile(join(worktreePath, ".jj", "repo", "store"), "ignored\n");
+    insertWorktree(db, "abc123", worktreePath, new Date().toISOString(), 1);
+
+    const tree = await service.loadWorkspaceTree(repository, "abc123");
+
+    expect(tree.paths).toEqual(["Cargo.toml", "src/generated.rs", "src/lib.rs"]);
   });
 
   it("searches bounded text content in a managed worktree", async () => {
@@ -207,6 +280,61 @@ describe("RepoService managed worktree reads", () => {
     expect(existsSync(oldInactive)).toBe(false);
     expect(existsSync(newInactive)).toBe(false);
     expect(existsSync(active)).toBe(true);
+  });
+
+  it("lists checked out worktrees with cached branch metadata", async () => {
+    const root = await mkdtemp(join(tmpdir(), "krt2-repo-service-"));
+    const paths = createAppPaths(root);
+    const db = openDatabase(":memory:");
+    const service = new RepoService(paths, db, new OperationService());
+    const worktreePath = join(paths.worktrees, "github", "kol", "repo", "12-abc123");
+
+    await mkdir(worktreePath, { recursive: true });
+    insertWorktree(db, "abc123", worktreePath, "2026-05-22T00:00:00.000Z", 1);
+    db.prepare(
+      `INSERT INTO pr_cache (provider, owner, repo, number, head_sha, payload, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`
+    ).run(
+      "github",
+      "kol",
+      "repo",
+      12,
+      "abc123",
+      JSON.stringify({ detail: { title: "Add branch list", headRef: "feature/branch-list", baseRef: "main" } }),
+      "2026-05-22T00:00:00.000Z"
+    );
+
+    const worktrees = await service.listManagedWorktrees(repository);
+
+    expect(worktrees).toHaveLength(1);
+    expect(worktrees[0]).toMatchObject({
+      title: "Add branch list",
+      headRef: "feature/branch-list",
+      baseRef: "main"
+    });
+  });
+
+  it("deletes a checked out worktree and stops watching it", async () => {
+    const root = await mkdtemp(join(tmpdir(), "krt2-repo-service-"));
+    const paths = createAppPaths(root);
+    const db = openDatabase(":memory:");
+    const watcher = createFakeWatcher();
+    const watchFactory = vi.fn(() => watcher);
+    const service = new RepoService(paths, db, new OperationService(), { watchFactory: watchFactory as never });
+    const worktreePath = join(paths.worktrees, "github", "kol", "repo", "12-abc123");
+
+    await mkdir(worktreePath, { recursive: true });
+    await writeFile(join(worktreePath, "local.txt"), "local");
+    insertWorktree(db, "abc123", worktreePath, "2026-05-22T00:00:00.000Z", 1);
+    expect(service.watchWorktree(repository, "abc123")).toBe(true);
+
+    const result = await service.deleteWorktree({ repository, number: 12, headSha: "abc123" });
+
+    expect(result.deleted).toBe(true);
+    expect(result.worktree?.headSha).toBe("abc123");
+    expect(existsSync(worktreePath)).toBe(false);
+    expect(await service.listManagedWorktrees(repository)).toEqual([]);
+    expect(watcher.close).toHaveBeenCalledOnce();
   });
 
   it("emits managed worktree file changes and stops watching on release", async () => {

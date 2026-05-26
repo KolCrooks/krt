@@ -1,5 +1,5 @@
 import { useMutation } from "@tanstack/react-query";
-import { Check, Lightbulb, MessageSquare } from "lucide-react";
+import { Check, Lightbulb, MessageSquare, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { krtClient } from "../api/client.js";
 import type { PrTab } from "../store/uiStore.js";
@@ -14,7 +14,10 @@ type ReviewEvent = "comment" | "approve" | "request_changes";
 
 export function FinishReviewPopover({ tab, onClose }: FinishReviewPopoverProps): React.JSX.Element {
   const setFinishBody = useUiStore((state) => state.setFinishBody);
+  const removeDraftReviewComment = useUiStore((state) => state.removeDraftReviewComment);
+  const clearFinishReview = useUiStore((state) => state.clearFinishReview);
   const body = tab.finish.body;
+  const comments = tab.finish.comments ?? [];
   const [submitted, setSubmitted] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
 
@@ -26,9 +29,12 @@ export function FinishReviewPopover({ tab, onClose }: FinishReviewPopoverProps):
         event,
         body,
         commitSha: tab.bundle.detail.headSha,
-        comments: []
+        comments: comments.map(({ id: _id, ...comment }) => comment)
       }),
-    onSuccess: () => setSubmitted(true)
+    onSuccess: () => {
+      clearFinishReview(tab.key);
+      setSubmitted(true);
+    }
   });
 
   useEffect(() => {
@@ -72,6 +78,32 @@ export function FinishReviewPopover({ tab, onClose }: FinishReviewPopoverProps):
         <span>Summarize your verdict below.</span>
       </header>
       <div className="finish-review-popover-body">
+        {comments.length > 0 ? (
+          <div className="finish-review-comments" aria-label="Pending review comments">
+            <div className="finish-review-comments-head">
+              <MessageSquare size={12} aria-hidden="true" />
+              <span>{comments.length} pending diff comment{comments.length === 1 ? "" : "s"}</span>
+            </div>
+            <div className="finish-review-comments-list">
+              {comments.map((comment) => (
+                <div className="finish-review-comment-row" key={comment.id}>
+                  <div>
+                    <span className="mono">{formatDraftCommentLocation(comment)}</span>
+                    <p>{comment.body}</p>
+                  </div>
+                  <button
+                    type="button"
+                    className="icon-button"
+                    aria-label={`Remove comment on ${formatDraftCommentLocation(comment)}`}
+                    onClick={() => removeDraftReviewComment(tab.key, comment.id)}
+                  >
+                    <X size={12} aria-hidden="true" />
+                  </button>
+                </div>
+              ))}
+            </div>
+          </div>
+        ) : null}
         <textarea
           value={body}
           rows={5}
@@ -115,4 +147,14 @@ export function FinishReviewPopover({ tab, onClose }: FinishReviewPopoverProps):
       </footer>
     </div>
   );
+}
+
+function formatDraftCommentLocation(comment: { path: string; line?: number; startLine?: number }): string {
+  if (!comment.line) {
+    return comment.path;
+  }
+  if (comment.startLine && comment.startLine !== comment.line) {
+    return `${comment.path}:${comment.startLine}-${comment.line}`;
+  }
+  return `${comment.path}:${comment.line}`;
 }

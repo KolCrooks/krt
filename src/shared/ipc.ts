@@ -11,6 +11,8 @@ import {
   checkRunSchema,
   dataModeSchema,
   diagnosticsSnapshotSchema,
+  extensionDescriptorSchema,
+  extensionLogSchema,
   fileContentSchema,
   filePatchSchema,
   lspDefinitionSchema,
@@ -28,6 +30,8 @@ import {
   pullRequestBundleSchema,
   pullRequestDetailSchema,
   pullRequestSummarySchema,
+  reactionContentSchema,
+  reactionGroupSchema,
   repositoryRefSchema,
   reviewCommentSchema,
   reviewSubmissionResultSchema,
@@ -48,7 +52,8 @@ const aiGenerateTourInput = z.object({
   changedFiles: z.array(changedFileSchema),
   timeline: z.array(activityEventSchema).default([]),
   reviewThreads: z.array(reviewThreadSchema).default([]),
-  checks: z.array(checkRunSchema).default([])
+  checks: z.array(checkRunSchema).default([]),
+  force: z.boolean().default(false)
 });
 const pullRequestOpenInput = z.object({
   repository: repositoryRefSchema,
@@ -250,7 +255,8 @@ export const ipcContract = {
   "lsp:startForWorktree": {
     input: z.object({
       repository: repositoryRefSchema,
-      headSha: z.string()
+      headSha: z.string(),
+      paths: z.array(z.string().min(1)).optional()
     }),
     output: lspSessionSchema
   },
@@ -340,6 +346,16 @@ export const ipcContract = {
     }),
     output: reviewCommentSchema
   },
+  "comments:toggleReaction": {
+    input: z.object({
+      repository: repositoryRefSchema,
+      number: z.number().int().positive(),
+      subjectNodeId: z.string().min(1),
+      content: reactionContentSchema,
+      add: z.boolean()
+    }),
+    output: z.array(reactionGroupSchema)
+  },
   "reviews:resolveThread": {
     input: z.object({
       repository: repositoryRefSchema,
@@ -363,7 +379,8 @@ export const ipcContract = {
   "repos:selectMode": {
     input: z.object({
       repository: repositoryRefSchema,
-      preferredMode: z.enum(["auto", "light", "managed"]).default("auto")
+      preferredMode: z.enum(["auto", "light", "managed"]).default("auto"),
+      headSha: z.string().optional()
     }),
     output: z.object({ mode: dataModeSchema, reason: z.string() })
   },
@@ -387,6 +404,17 @@ export const ipcContract = {
       headSha: z.string()
     }),
     output: z.object({ released: z.boolean() })
+  },
+  "repos:deleteWorktree": {
+    input: z.object({
+      repository: repositoryRefSchema,
+      number: z.number().int().positive(),
+      headSha: z.string()
+    }),
+    output: z.object({
+      deleted: z.boolean(),
+      worktree: managedWorktreeSchema.nullable()
+    })
   },
   "repos:listManagedWorktrees": {
     input: z.object({ repository: repositoryRefSchema.optional() }).optional(),
@@ -422,54 +450,18 @@ export const ipcContract = {
   },
   "extensions:list": {
     input: noInput,
-    output: z.array(
-      z.object({
-        id: z.string(),
-        name: z.string(),
-        enabled: z.boolean(),
-        description: z.string(),
-        activationGlobs: z.array(z.string()),
-        capabilities: z.array(z.string()),
-        command: z
-          .object({
-            program: z.string(),
-            args: z.array(z.string())
-          })
-          .optional()
-      })
-    )
+    output: z.array(extensionDescriptorSchema)
   },
   "extensions:logs": {
     input: z.object({ extensionId: z.string().optional() }).optional(),
-    output: z.array(
-      z.object({
-        id: z.string(),
-        extensionId: z.string(),
-        level: z.enum(["debug", "info", "warning", "error"]),
-        message: z.string(),
-        createdAt: z.string()
-      })
-    )
+    output: z.array(extensionLogSchema)
   },
   "extensions:setEnabled": {
     input: z.object({
       extensionId: z.string().min(1),
       enabled: z.boolean()
     }),
-    output: z.object({
-      id: z.string(),
-      name: z.string(),
-      enabled: z.boolean(),
-      description: z.string(),
-      activationGlobs: z.array(z.string()),
-      capabilities: z.array(z.string()),
-      command: z
-        .object({
-          program: z.string(),
-          args: z.array(z.string())
-        })
-        .optional()
-    })
+    output: extensionDescriptorSchema
   },
   "perf:record": {
     input: z.object({
@@ -495,5 +487,6 @@ export type IpcInput<TChannel extends IpcChannel> = z.input<IpcContract[TChannel
 export type IpcParsedInput<TChannel extends IpcChannel> = z.output<IpcContract[TChannel]["input"]>;
 export type IpcOutput<TChannel extends IpcChannel> = z.output<IpcContract[TChannel]["output"]>;
 
+export const closeSubTabEvent = "app:closeSubTab";
 export const operationProgressEvent = "operations:progress";
 export const workspaceFileChangeEvent = "repos:workspaceFileChange";

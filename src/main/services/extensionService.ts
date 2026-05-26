@@ -1,81 +1,38 @@
-import type { AppSettings } from "../../shared/schemas.js";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { join } from "node:path";
+import type { AppSettings, ExtensionDescriptor, ExtensionLog, ExtensionManifest } from "../../shared/schemas.js";
+import { extensionManifestSchema } from "../../shared/schemas.js";
 import type { SettingsUpdate } from "./settingsStore.js";
 import { AppError } from "../errors.js";
+import rustAnalyzerManifest from "../extensions/builtin/rust-analyzer/extension.json" with { type: "json" };
+import typescriptManifest from "../extensions/builtin/typescript-language-server/extension.json" with { type: "json" };
+import goplsManifest from "../extensions/builtin/gopls/extension.json" with { type: "json" };
+import ruffManifest from "../extensions/builtin/ruff/extension.json" with { type: "json" };
+import reviewToolsManifest from "../extensions/builtin/review-tools/extension.json" with { type: "json" };
 
-export interface ExtensionDescriptor {
-  id: string;
-  name: string;
-  enabled: boolean;
-  description: string;
-  activationGlobs: string[];
-  capabilities: string[];
-  command?: {
-    program: string;
-    args: string[];
-  };
+interface ExtensionServiceOptions {
+  builtinManifests?: unknown[];
+  localExtensionDir?: string | null;
 }
 
-export interface ExtensionLog {
-  id: string;
-  extensionId: string;
-  level: "debug" | "info" | "warning" | "error";
-  message: string;
-  createdAt: string;
-}
+type RegisteredExtension = ExtensionDescriptor & {
+  version: string;
+  source: "builtin" | "local";
+  kind: NonNullable<ExtensionDescriptor["kind"]>;
+  contributes: NonNullable<ExtensionDescriptor["contributes"]>;
+  manifest: ExtensionManifest;
+};
+
+const defaultBuiltinManifests: unknown[] = [
+  rustAnalyzerManifest,
+  typescriptManifest,
+  goplsManifest,
+  ruffManifest,
+  reviewToolsManifest
+];
 
 export class ExtensionService {
-  constructor(
-    private readonly getSettings: () => Pick<AppSettings, "extensions"> = () => ({ extensions: {} }),
-    private readonly updateSettings: (update: SettingsUpdate) => void = () => undefined
-  ) {}
-
-  private readonly extensions: ExtensionDescriptor[] = [
-    {
-      id: "rust-analyzer",
-      name: "rust-analyzer",
-      enabled: true,
-      description: "Rust diagnostics, hover, symbols, and definitions in managed worktrees.",
-      activationGlobs: ["**/*.rs", "**/Cargo.toml"],
-      capabilities: ["diagnostics", "hover", "definition", "symbols"],
-      command: { program: "rust-analyzer", args: [] }
-    },
-    {
-      id: "typescript-language-server",
-      name: "TypeScript",
-      enabled: true,
-      description: "TypeScript and JavaScript language context for review-focused editor mode.",
-      activationGlobs: ["**/*.ts", "**/*.tsx", "**/*.js", "**/*.jsx"],
-      capabilities: ["diagnostics", "hover", "definition", "symbols"],
-      command: { program: "typescript-language-server", args: ["--stdio"] }
-    },
-    {
-      id: "gopls",
-      name: "gopls",
-      enabled: true,
-      description: "Go language server support.",
-      activationGlobs: ["**/*.go", "**/go.mod"],
-      capabilities: ["diagnostics", "hover", "definition", "symbols"],
-      command: { program: "gopls", args: [] }
-    },
-    {
-      id: "ruff",
-      name: "Ruff",
-      enabled: true,
-      description: "Python lint diagnostics for managed worktrees.",
-      activationGlobs: ["**/*.py", "**/pyproject.toml"],
-      capabilities: ["diagnostics"],
-      command: { program: "ruff", args: ["server"] }
-    },
-    {
-      id: "review-tools",
-      name: "Review Tools",
-      enabled: true,
-      description: "Built-in review comments, AI anchors, and PR workflow commands.",
-      activationGlobs: ["**/*"],
-      capabilities: ["comments", "ai-anchors", "review-submit"]
-    }
-  ];
-
+  private readonly extensions: RegisteredExtension[];
   private readonly logs: ExtensionLog[] = [
     {
       id: "log-1",
@@ -85,6 +42,14 @@ export class ExtensionService {
       createdAt: new Date().toISOString()
     }
   ];
+
+  constructor(
+    private readonly getSettings: () => Pick<AppSettings, "extensions"> = () => ({ extensions: {} }),
+    private readonly updateSettings: (update: SettingsUpdate) => void = () => undefined,
+    options: ExtensionServiceOptions = {}
+  ) {
+    this.extensions = this.loadExtensions(options);
+  }
 
   list(): ExtensionDescriptor[] {
     const overrides = this.getSettings().extensions;
@@ -125,4 +90,118 @@ export class ExtensionService {
     this.logs.unshift(log);
     return log;
   }
+
+  private loadExtensions(options: ExtensionServiceOptions): RegisteredExtension[] {
+    const manifests = [
+      ...this.parseManifestList(options.builtinManifests ?? defaultBuiltinManifests, "builtin"),
+      ...this.loadLocalManifests(options.localExtensionDir ?? null)
+    ];
+    const byId = new Map<string, RegisteredExtension>();
+
+    for (const extension of manifests) {
+      if (byId.has(extension.id)) {
+        this.appendLog({
+          extensionId: extension.id,
+          level: "warning",
+          message: `Duplicate extension id ignored from ${extension.source} manifest.`
+        });
+        continue;
+      }
+      byId.set(extension.id, extension);
+    }
+
+    return [...byId.values()].sort((left, right) => left.name.localeCompare(right.name));
+  }
+
+  private parseManifestList(inputs: unknown[], source: "builtin" | "local", manifestPath?: string): RegisteredExtension[] {
+    return inputs.flatMap((input) => {
+      try {
+        return [descriptorFromManifest(extensionManifestSchema.parse(input), source, manifestPath)];
+      } catch (error) {
+        this.appendLog({
+          extensionId: "extension-registry",
+          level: "error",
+          message: `Invalid ${source} extension manifest${manifestPath ? ` at ${manifestPath}` : ""}: ${error instanceof Error ? error.message : String(error)}`
+        });
+        return [];
+      }
+    });
+  }
+
+  private loadLocalManifests(localExtensionDir: string | null): RegisteredExtension[] {
+    if (!localExtensionDir || !existsSync(localExtensionDir)) {
+      return [];
+    }
+
+    const manifests: RegisteredExtension[] = [];
+    for (const entry of readdirSync(localExtensionDir)) {
+      const extensionDir = join(localExtensionDir, entry);
+      if (!statSync(extensionDir).isDirectory()) {
+        continue;
+      }
+
+      const manifestPath = join(extensionDir, "extension.json");
+      if (!existsSync(manifestPath)) {
+        continue;
+      }
+
+      try {
+        const raw = JSON.parse(readFileSync(manifestPath, "utf8")) as unknown;
+        manifests.push(...this.parseManifestList([raw], "local", manifestPath));
+      } catch (error) {
+        this.appendLog({
+          extensionId: entry,
+          level: "error",
+          message: `Failed to read local extension manifest: ${error instanceof Error ? error.message : String(error)}`
+        });
+      }
+    }
+
+    return manifests;
+  }
+}
+
+function descriptorFromManifest(
+  manifest: ExtensionManifest,
+  source: "builtin" | "local",
+  manifestPath?: string
+): RegisteredExtension {
+  const command = manifest.contributes.lsp?.command ?? manifest.contributes.diagnostics[0]?.command;
+  const activationGlobs = manifest.activation.globs;
+  const capabilities = capabilitiesFromManifest(manifest);
+  return {
+    id: manifest.id,
+    name: manifest.name,
+    enabled: true,
+    description: manifest.description,
+    activationGlobs,
+    capabilities,
+    command,
+    version: manifest.version,
+    publisher: manifest.publisher,
+    source,
+    kind: manifest.kind,
+    contributes: manifest.contributes,
+    manifestPath,
+    manifest
+  };
+}
+
+function capabilitiesFromManifest(manifest: ExtensionManifest): string[] {
+  const capabilities = new Set<string>();
+  for (const feature of manifest.contributes.lsp?.features ?? []) {
+    capabilities.add(feature);
+  }
+  for (const diagnostic of manifest.contributes.diagnostics) {
+    if (diagnostic.command) {
+      capabilities.add("diagnostics");
+    }
+  }
+  for (const capability of manifest.contributes.review?.capabilities ?? []) {
+    capabilities.add(capability);
+  }
+  if (manifest.contributes.commands.length > 0) {
+    capabilities.add("commands");
+  }
+  return [...capabilities];
 }

@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "id": "typescript-language-server",
+  "name": "TypeScript",
+  "version": "1.0.0",
+  "publisher": "krt",
+  "description": "TypeScript and JavaScript language context for review-focused editor mode.",
+  "kind": ["language"],
+  "activation": {
+    "globs": ["**/*.ts", "**/*.tsx", "**/*.js", "**/*.jsx"],
+    "languages": ["typescript", "tsx", "javascript", "jsx"]
+  },
+  "contributes": {
+    "lsp": {
+      "command": {
+        "program": "typescript-language-server",
+        "args": ["--stdio"]
+      },
+      "transport": "stdio",
+      "languages": ["typescript", "javascript"],
+      "features": ["diagnostics", "hover", "definition", "symbols"]
+    }
+  }
+}

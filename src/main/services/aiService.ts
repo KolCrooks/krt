@@ -15,7 +15,7 @@ import { reviewTourSchema } from "../../shared/schemas.js";
 import type { SqliteDatabase } from "./database.js";
 import type { Keychain } from "./keychain.js";
 import { redactForAi } from "./redactionService.js";
-import { buildAiReviewPrompt } from "../../shared/aiPrompt.js";
+import { buildAiReviewPrompt, inferReviewTopic } from "../../shared/aiPrompt.js";
 import { AppError } from "../errors.js";
 
 const TOUR_SYSTEM_PROMPT =
@@ -57,9 +57,10 @@ export class AiService {
     timeline: ActivityEvent[];
     reviewThreads: ReviewThread[];
     checks: CheckRun[];
+    force?: boolean;
   }, options: AiGenerationOptions = {}): Promise<ReviewTour> {
     assertNotAborted(options.signal);
-    const cached = this.getCachedTour(input.pullRequest.repository, input.pullRequest.number, input.pullRequest.headSha);
+    const cached = input.force ? null : this.getCachedTour(input.pullRequest.repository, input.pullRequest.number, input.pullRequest.headSha);
     if (cached) {
       options.onProgress?.({ phase: "cache", message: "Loaded AI tour from cache", percent: 100 });
       return cached;
@@ -661,22 +662,27 @@ function assertNotAborted(signal?: AbortSignal): void {
   }
 }
 
-function groupChangedFiles(files: ChangedFile[]): Array<{ title: string; files: ChangedFile[] }> {
-  const buckets = new Map<string, ChangedFile[]>();
+function groupChangedFiles(files: ChangedFile[]): Array<{ title: string; reviewOrder: number; files: ChangedFile[] }> {
+  const buckets = new Map<string, { title: string; reviewOrder: number; files: ChangedFile[] }>();
   for (const file of files) {
-    const firstSegment = file.path.includes("/") ? file.path.split("/")[0] : "root";
-    const bucket = buckets.get(firstSegment) ?? [];
-    bucket.push(file);
-    buckets.set(firstSegment, bucket);
+    const topic = inferReviewTopic({
+      path: file.path,
+      language: file.language,
+      patch: file.patch
+    });
+    const bucket = buckets.get(topic.key) ?? { title: topic.title, reviewOrder: topic.reviewOrder, files: [] };
+    bucket.files.push(file);
+    buckets.set(topic.key, bucket);
   }
 
-  return [...buckets.entries()]
-    .sort(([, left], [, right]) => right.reduce((sum, file) => sum + file.changes, 0) - left.reduce((sum, file) => sum + file.changes, 0))
-    .slice(0, 12)
-    .map(([segment, groupFiles]) => ({
-      title: segment === "root" ? "Top-level changes" : `${segment}/ changes`,
-      files: groupFiles
-    }));
+  return [...buckets.values()]
+    .sort(
+      (left, right) =>
+        left.reviewOrder - right.reviewOrder ||
+        right.files.reduce((sum, file) => sum + file.changes, 0) - left.files.reduce((sum, file) => sum + file.changes, 0) ||
+        left.title.localeCompare(right.title)
+    )
+    .slice(0, 12);
 }
 
 function summarizeGroup(files: ChangedFile[]): string {

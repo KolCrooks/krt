@@ -10,9 +10,10 @@ import { useUiStore } from "../store/uiStore.js";
 
 interface ReviewWorkspaceProps {
   tab: PrTab;
+  active?: boolean;
 }
 
-export function ReviewWorkspace({ tab }: ReviewWorkspaceProps): React.JSX.Element {
+export function ReviewWorkspace({ tab, active = true }: ReviewWorkspaceProps): React.JSX.Element {
   const [layout, setLayout] = useState<"inline" | "split">("inline");
   const setFinishOpen = useUiStore((state) => state.setFinishOpen);
 
@@ -22,12 +23,13 @@ export function ReviewWorkspace({ tab }: ReviewWorkspaceProps): React.JSX.Elemen
       <WorkspaceTabBar
         tab={tab}
         mode="review"
+        active={active}
         layout={layout}
         onLayoutChange={setLayout}
         onFinishReview={() => setFinishOpen(tab.key, true)}
       />
       <div className={`review-body review-body-${tab.reviewSubMode}`}>
-        {tab.reviewSubMode === "diff" ? <DiffReviewBody tab={tab} layout={layout} /> : null}
+        {tab.reviewSubMode === "diff" ? <DiffReviewBody tab={tab} layout={layout} active={active} /> : null}
         {tab.reviewSubMode === "tour" ? <TourBody tab={tab} layout={layout} /> : null}
         {tab.reviewSubMode === "storyboard" ? <StoryboardBody tab={tab} layout={layout} /> : null}
       </div>

@@ -1,6 +1,6 @@
-import type { ReviewThread, TourChapter } from "./schemas.js";
+import type { ReviewDraftComment, ReviewThread, TourChapter } from "./schemas.js";
 
-export type DiffAnnotationKind = "review" | "ai";
+export type DiffAnnotationKind = "review" | "ai" | "draft";
 
 export interface DiffAnnotation {
   id: string;
@@ -12,22 +12,26 @@ export interface DiffAnnotation {
   endLine?: number;
   side?: "left" | "right";
   status: string;
+  thread?: ReviewThread;
 }
 
 interface DiffAnnotationInput {
   filePath: string;
   reviewThreads?: readonly ReviewThread[];
   tourChapters?: readonly TourChapter[];
+  draftComments?: readonly (ReviewDraftComment & { id: string })[];
 }
 
 export function buildDiffAnnotations({
   filePath,
   reviewThreads = [],
-  tourChapters = []
+  tourChapters = [],
+  draftComments = []
 }: DiffAnnotationInput): DiffAnnotation[] {
   return [
     ...buildReviewAnnotations(filePath, reviewThreads),
-    ...buildTourAnnotations(filePath, tourChapters)
+    ...buildTourAnnotations(filePath, tourChapters),
+    ...buildDraftAnnotations(filePath, draftComments)
   ].sort(compareDiffAnnotations);
 }
 
@@ -49,7 +53,8 @@ function buildReviewAnnotations(filePath: string, reviewThreads: readonly Review
         path: filePath,
         line: thread.line ?? lastComment?.line,
         side: lastComment?.side,
-        status: thread.outdated ? "outdated" : thread.resolved ? "resolved" : "open"
+        status: thread.outdated ? "outdated" : thread.resolved ? "resolved" : "open",
+        thread
       }
     ];
   });
@@ -75,6 +80,24 @@ function buildTourAnnotations(filePath: string, tourChapters: readonly TourChapt
       status: chapter.riskLevel
     }));
   });
+}
+
+function buildDraftAnnotations(
+  filePath: string,
+  draftComments: readonly (ReviewDraftComment & { id: string })[]
+): DiffAnnotation[] {
+  return draftComments
+    .filter((comment) => comment.path === filePath)
+    .map((comment) => ({
+      id: `draft:${comment.id}`,
+      kind: "draft" as const,
+      title: "Draft review comment",
+      body: comment.body,
+      path: filePath,
+      line: comment.line,
+      side: comment.side,
+      status: "pending"
+    }));
 }
 
 function compareDiffAnnotations(left: DiffAnnotation, right: DiffAnnotation): number {

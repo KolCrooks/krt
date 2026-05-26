@@ -6,6 +6,31 @@ const bundle = createBundle();
 const key = tabKey(bundle.detail.repository.fullName, bundle.detail.number);
 
 describe("uiStore review thread updates", () => {
+  it("tracks line targets when opening files from definitions", () => {
+    useUiStore.setState({
+      activeView: "search",
+      tabs: [],
+      activeTabKey: null,
+      selectedSearchResult: null
+    });
+    useUiStore.getState().openPrTab(bundle);
+
+    useUiStore.getState().openFileInTab(key, "src/main.rs", 42);
+    const openedTab = useUiStore.getState().tabs.find((candidate) => candidate.key === key);
+
+    expect(openedTab).toMatchObject({
+      selectedFilePath: "src/main.rs",
+      openFilePaths: ["src/main.rs"],
+      editorNavigationTarget: {
+        path: "src/main.rs",
+        line: 42
+      }
+    });
+
+    useUiStore.getState().openFileInTab(key, "src/lib.rs");
+    expect(useUiStore.getState().tabs.find((candidate) => candidate.key === key)?.editorNavigationTarget).toBeNull();
+  });
+
   it("updates resolved state and appends replies without replacing the PR tab", () => {
     useUiStore.setState({
       activeView: "search",
@@ -30,7 +55,8 @@ describe("uiStore review thread updates", () => {
       author: { login: "kol" },
       body: "Following up after resolving this.",
       createdAt: "2026-05-22T00:05:00.000Z",
-      isBot: false
+      isBot: false,
+      reactions: []
     });
 
     const tab = useUiStore.getState().tabs.find((candidate) => candidate.key === key);
@@ -123,7 +149,8 @@ function createBundle(): PullRequestBundle {
             path: "src/App.tsx",
             line: 1,
             createdAt: "2026-05-22T00:00:00.000Z",
-            isBot: false
+            isBot: false,
+            reactions: []
           }
         ]
       }

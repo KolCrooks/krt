@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer } from "electron";
-import { operationProgressEvent, workspaceFileChangeEvent, type IpcChannel, type IpcInput, type IpcOutput } from "../shared/ipc.js";
+import { closeSubTabEvent, operationProgressEvent, workspaceFileChangeEvent, type IpcChannel, type IpcInput, type IpcOutput } from "../shared/ipc.js";
 import {
   type OperationProgress,
   type TypedError,
@@ -22,6 +22,15 @@ async function invoke<TChannel extends IpcChannel>(
 }
 
 const api = {
+  app: {
+    onCloseSubTab: (listener: () => void) => {
+      const handler = () => listener();
+      ipcRenderer.on(closeSubTabEvent, handler);
+      return () => {
+        ipcRenderer.off(closeSubTabEvent, handler);
+      };
+    }
+  },
   auth: {
     getStatus: () => invoke("auth:getStatus"),
     saveGitHubToken: (token: string) => invoke("auth:saveGitHubToken", { token }),
@@ -53,6 +62,7 @@ const api = {
     selectMode: (input: IpcInput<"repos:selectMode">) => invoke("repos:selectMode", input),
     checkoutPullRequest: (input: IpcInput<"repos:checkoutPullRequest">) => invoke("repos:checkoutPullRequest", input),
     releaseWorktree: (input: IpcInput<"repos:releaseWorktree">) => invoke("repos:releaseWorktree", input),
+    deleteWorktree: (input: IpcInput<"repos:deleteWorktree">) => invoke("repos:deleteWorktree", input),
     listManagedWorktrees: (input?: IpcInput<"repos:listManagedWorktrees">) => invoke("repos:listManagedWorktrees", input),
     cleanupWorktrees: (input: IpcInput<"repos:cleanupWorktrees">) => invoke("repos:cleanupWorktrees", input),
     onWorkspaceFileChange: (listener: (change: WorkspaceFileChange) => void) => {
@@ -81,7 +91,8 @@ const api = {
   },
   comments: {
     postIssueComment: (input: IpcInput<"comments:postIssueComment">) => invoke("comments:postIssueComment", input),
-    replyToReviewThread: (input: IpcInput<"comments:replyToReviewThread">) => invoke("comments:replyToReviewThread", input)
+    replyToReviewThread: (input: IpcInput<"comments:replyToReviewThread">) => invoke("comments:replyToReviewThread", input),
+    toggleReaction: (input: IpcInput<"comments:toggleReaction">) => invoke("comments:toggleReaction", input)
   },
   reviews: {
     resolveThread: (input: IpcInput<"reviews:resolveThread">) => invoke("reviews:resolveThread", input),

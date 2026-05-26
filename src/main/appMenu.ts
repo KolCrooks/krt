@@ -1,5 +1,6 @@
-import { Menu, app, type MenuItemConstructorOptions } from "electron";
+import { BrowserWindow, Menu, app, type MenuItemConstructorOptions } from "electron";
 import { openExternalUrl } from "./externalLinks.js";
+import { closeSubTabEvent } from "../shared/ipc.js";
 
 export function installApplicationMenu(): void {
   Menu.setApplicationMenu(Menu.buildFromTemplate(createApplicationMenuTemplate()));
@@ -28,7 +29,7 @@ export function createApplicationMenuTemplate(): MenuItemConstructorOptions[] {
   template.push(
     {
       label: "File",
-      submenu: [process.platform === "darwin" ? { role: "close" } : { role: "quit" }]
+      submenu: createFileMenu()
     },
     {
       label: "Edit",
@@ -74,4 +75,33 @@ export function createApplicationMenuTemplate(): MenuItemConstructorOptions[] {
   );
 
   return template;
+}
+
+function createFileMenu(): MenuItemConstructorOptions[] {
+  const submenu: MenuItemConstructorOptions[] = [
+    {
+      label: "Close File Tab",
+      accelerator: "CommandOrControl+W",
+      click: (_item, focusedWindow) => {
+        getCloseTargetWindow(focusedWindow)?.webContents.send(closeSubTabEvent);
+      }
+    }
+  ];
+
+  if (process.platform !== "darwin") {
+    submenu.push({ type: "separator" }, { role: "quit" });
+  }
+
+  return submenu;
+}
+
+function getCloseTargetWindow(focusedWindow: unknown): Pick<BrowserWindow, "webContents"> | null {
+  if (hasWebContents(focusedWindow)) {
+    return focusedWindow;
+  }
+  return BrowserWindow.getFocusedWindow();
+}
+
+function hasWebContents(candidate: unknown): candidate is Pick<BrowserWindow, "webContents"> {
+  return candidate !== null && typeof candidate === "object" && "webContents" in candidate;
 }

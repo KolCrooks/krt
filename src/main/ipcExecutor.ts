@@ -1,3 +1,4 @@
+import { isAbsolute } from "node:path";
 import { ZodError } from "zod";
 import { ipcContract, type IpcChannel, type IpcOutput, type IpcParsedInput } from "../shared/ipc.js";
 import type { ProviderRegistry } from "./providers/providerRegistry.js";
@@ -15,7 +16,7 @@ import type { UpdateService } from "./services/updateService.js";
 import type { MaintenanceService } from "./services/maintenanceService.js";
 import type { DiagnosticsService } from "./services/diagnosticsService.js";
 import { githubPullScope } from "./providers/githubProvider.js";
-import { toErrorPayload } from "./errors.js";
+import { AppError, toErrorPayload } from "./errors.js";
 import { stripChangedFilePatches } from "./services/prCacheService.js";
 
 export interface IpcHandlerContext {
@@ -357,6 +358,9 @@ function createIpcHandlers(context: IpcHandlerContext): HandlerMap {
           if (localContent) {
             return { content: localContent, source: "local" };
           }
+          if (isAbsolute(input.path)) {
+            throw new AppError("local_file_not_found", "The requested local definition file is not available.");
+          }
 
           const provider = await context.providers.get(input.repository.provider);
           return { content: await provider.getFileContent(input.repository, input.path, input.ref), source: "provider" };
@@ -401,7 +405,7 @@ function createIpcHandlers(context: IpcHandlerContext): HandlerMap {
         })
       ),
 
-    "lsp:startForWorktree": (input) => context.lsp.startForWorktree(input.repository, input.headSha),
+    "lsp:startForWorktree": (input) => context.lsp.startForWorktree(input.repository, input.headSha, input.paths),
     "lsp:stopForWorktree": (input) => context.lsp.stopForWorktree(input.repository, input.headSha),
     "lsp:getSession": (input) => context.lsp.getSession(input.repository, input.headSha),
     "lsp:getDiagnostics": (input) => context.lsp.getDiagnostics(input.repository, input.headSha, input.path),
@@ -441,6 +445,14 @@ function createIpcHandlers(context: IpcHandlerContext): HandlerMap {
       return comment;
     },
 
+    "comments:toggleReaction": async (input) => {
+      const provider = await context.providers.get(input.repository.provider);
+      const reactions = await provider.toggleReaction(input.subjectNodeId, input.content, input.add);
+      context.prCache.invalidate(input.repository, input.number);
+      context.providerCache.invalidatePrefix(input.repository.provider, githubPullScope(input.repository, input.number));
+      return reactions;
+    },
+
     "reviews:resolveThread": async (input) => {
       const provider = await context.providers.get(input.repository.provider);
       const thread = await provider.resolveReviewThread(input.repository, input.number, input.threadId);
@@ -465,9 +477,20 @@ function createIpcHandlers(context: IpcHandlerContext): HandlerMap {
       return result;
     },
 
-    "repos:selectMode": (input) => context.repos.selectMode(input.repository, input.preferredMode),
+    "repos:selectMode": (input) => {
+      const selection = context.repos.selectMode(input.repository, input.preferredMode, input.headSha);
+      return selection;
+    },
     "repos:checkoutPullRequest": (input) => context.repos.checkoutPullRequest(input),
     "repos:releaseWorktree": (input) => context.repos.releaseWorktree(input.repository, input.headSha),
+    "repos:deleteWorktree": async (input) => {
+      try {
+        await Promise.resolve(context.lsp.stopForWorktree(input.repository, input.headSha));
+      } catch {
+        // Worktree deletion should proceed even if a degraded language server is already gone.
+      }
+      return context.repos.deleteWorktree(input);
+    },
     "repos:listManagedWorktrees": (input) => context.repos.listManagedWorktrees(input?.repository),
     "repos:cleanupWorktrees": (input) => context.repos.cleanupWorktrees(input),
 
@@ -500,11 +523,13 @@ function createIpcHandlers(context: IpcHandlerContext): HandlerMap {
       ),
     "ai:startTourGeneration": (input) => {
       const operationId = context.operations.create("ai-tour", "Preparing AI tour generation");
-      const cachedTour = context.ai.getCachedTour(
-        input.pullRequest.repository,
-        input.pullRequest.number,
-        input.pullRequest.headSha
-      );
+      const cachedTour = input.force
+        ? null
+        : context.ai.getCachedTour(
+            input.pullRequest.repository,
+            input.pullRequest.number,
+            input.pullRequest.headSha
+          );
 
       if (cachedTour) {
         context.operations.update({
@@ -594,7 +619,13 @@ function createIpcHandlers(context: IpcHandlerContext): HandlerMap {
 
     "extensions:list": () => context.extensions.list(),
     "extensions:logs": (input) => context.extensions.getLogs(input?.extensionId),
-    "extensions:setEnabled": (input) => context.extensions.setEnabled(input.extensionId, input.enabled),
+    "extensions:setEnabled": async (input) => {
+      const extension = context.extensions.setEnabled(input.extensionId, input.enabled);
+      if (extension.contributes?.lsp) {
+        await context.lsp.restartActiveSessionsForExtension(extension.id);
+      }
+      return extension;
+    },
     "perf:record": (input) => context.perf.record(input),
     "operations:progressSnapshot": (input) => context.operations.get(input.operationId),
     "operations:cancel": (input) => context.operations.cancel(input.operationId)
@@ -609,12 +640,12 @@ async function loadPullRequestBundle(
   updateOperationProgress(context, operationId, "prepare", "Preparing pull request open", 5);
   assertOperationNotCancelled(context, operationId);
   const provider = await context.providers.get(input.repository.provider);
-  const selection = context.repos.selectMode(input.repository, input.preferredMode);
 
   updateOperationProgress(context, operationId, "detail", "Loading pull request metadata", 20);
   assertOperationNotCancelled(context, operationId);
   const detail = await provider.getPullRequest(input.repository, input.number);
   assertOperationNotCancelled(context, operationId);
+  const selection = context.repos.selectMode(input.repository, input.preferredMode, detail.headSha);
 
   updateOperationProgress(context, operationId, "cache", "Checking local pull request cache", 40);
   const cached = context.prCache.get(input.repository, input.number, detail.headSha);
@@ -640,9 +671,10 @@ async function refreshPullRequestBundle(
   const provider = await context.providers.get(input.repository.provider);
   const bundle = await provider.openPullRequest(input.repository, input.number, input.mode);
   assertOperationNotCancelled(context, operationId);
+  const mode = context.repos.hasManagedWorktree(input.repository, bundle.detail.headSha) ? "managed" : "light";
 
   updateOperationProgress(context, operationId, "cache", "Persisting refreshed pull request", 85);
-  return context.prCache.put(bundle);
+  return context.prCache.put({ ...bundle, mode });
 }
 
 function assertOperationNotCancelled(context: IpcHandlerContext, operationId: string | undefined): void {

@@ -1,0 +1,69 @@
+{
+  "schemaVersion": 1,
+  "id": "rust-analyzer",
+  "name": "Rust Analyzer",
+  "version": "1.0.0",
+  "publisher": "krt",
+  "description": "Demo extension that activates rust-analyzer for Rust files in managed worktrees.",
+  "kind": ["language"],
+  "activation": {
+    "globs": ["**/*.rs", "**/Cargo.toml"],
+    "languages": ["rust"]
+  },
+  "contributes": {
+    "lsp": {
+      "command": {
+        "program": "rust-analyzer",
+        "args": []
+      },
+      "transport": "stdio",
+      "languages": ["rust"],
+      "features": ["hover", "definition", "symbols"],
+      "settings": {
+        "cachePriming": {
+          "enable": true
+        },
+        "cargo": {
+          "allTargets": true,
+          "autoreload": true,
+          "buildScripts": {
+            "enable": true,
+            "rebuildOnSave": false,
+            "useRustcWrapper": true
+          }
+        },
+        "check": {
+          "allTargets": false,
+          "workspace": false
+        },
+        "checkOnSave": false,
+        "diagnostics": {
+          "enable": false,
+          "experimental": {
+            "enable": false
+          },
+          "styleLints": {
+            "enable": false
+          }
+        },
+        "hover": {
+          "actions": {
+            "enable": false
+          },
+          "memoryLayout": {
+            "enable": true
+          }
+        },
+        "lens": {
+          "enable": true
+        },
+        "procMacro": {
+          "enable": true,
+          "attributes": {
+            "enable": true
+          }
+        }
+      }
+    }
+  }
+}

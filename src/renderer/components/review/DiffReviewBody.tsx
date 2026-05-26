@@ -1,31 +1,47 @@
 import { ChevronDown, ChevronRight, File as FileIcon } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { DiffPanel, DiffChangeCounts, DiffStatusBadge } from "../diffs/DiffPanel.js";
 import { ChangedFileTree } from "../trees/ChangedFileTree.js";
 import type { ChangedFile } from "../../../shared/schemas.js";
+import { orderChangedFilesDepthFirst } from "../../../shared/treeModel.js";
 import type { PrTab } from "../../store/uiStore.js";
 import { useUiStore } from "../../store/uiStore.js";
+
+const EMPTY_TOUR_CHAPTERS: [] = [];
 
 interface DiffReviewBodyProps {
   tab: PrTab;
   layout: "inline" | "split";
+  active?: boolean;
 }
 
-export function DiffReviewBody({ tab, layout }: DiffReviewBodyProps): React.JSX.Element {
+export const DiffReviewBody = memo(function DiffReviewBody({ tab, layout, active = true }: DiffReviewBodyProps): React.JSX.Element {
   const selectFile = useUiStore((state) => state.selectFile);
-  const files = tab.bundle.changedFiles;
+  const openFileInTab = useUiStore((state) => state.openFileInTab);
+  const setTabViewMode = useUiStore((state) => state.setTabViewMode);
+  const files = useMemo(() => orderChangedFilesDepthFirst(tab.bundle.changedFiles), [tab.bundle.changedFiles]);
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const fileEls = useRef<Array<HTMLElement | null>>([]);
   const lastReportedPath = useRef<string | null>(null);
   const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set());
+  const handleOpenDefinition = useCallback(
+    (path: string, line: number) => {
+      openFileInTab(tab.key, path, line);
+      setTabViewMode(tab.key, "editor");
+    },
+    [openFileInTab, setTabViewMode, tab.key]
+  );
 
   const selectedIndex = useMemo(() => {
     const idx = files.findIndex((file) => file.path === tab.selectedFilePath);
-    return idx === -1 ? 0 : idx;
+    return idx === -1 ? null : idx;
   }, [files, tab.selectedFilePath]);
 
   // When the tree selects a file, scroll the stack to it.
   useEffect(() => {
+    if (!active || selectedIndex === null) {
+      return;
+    }
     const sc = scrollRef.current;
     const target = fileEls.current[selectedIndex];
     if (!sc || !target) {
@@ -34,10 +50,16 @@ export function DiffReviewBody({ tab, layout }: DiffReviewBodyProps): React.JSX.
     if (lastReportedPath.current === tab.selectedFilePath) {
       return;
     }
-    sc.scrollTo({ top: Math.max(0, target.offsetTop - 8), behavior: "smooth" });
-  }, [selectedIndex, tab.selectedFilePath]);
+    sc.scrollTo({ top: Math.max(0, target.offsetTop - 8), behavior: "auto" });
+  }, [active, selectedIndex, tab.selectedFilePath]);
 
   const onScroll = (): void => {
+    if (!active) {
+      return;
+    }
+    if (tab.selectedFilePath && selectedIndex === null) {
+      return;
+    }
     const sc = scrollRef.current;
     if (!sc) {
       return;
@@ -75,7 +97,6 @@ export function DiffReviewBody({ tab, layout }: DiffReviewBodyProps): React.JSX.
         <ChangedFileTree
           files={files}
           selectedPath={tab.selectedFilePath}
-          openEditorPaths={tab.openFilePaths}
           onSelectPath={(path) => {
             lastReportedPath.current = null;
             selectFile(tab.key, path);
@@ -102,12 +123,15 @@ export function DiffReviewBody({ tab, layout }: DiffReviewBodyProps): React.JSX.
               />
               {!isCollapsed ? (
                 <DiffPanel
+                  tabKey={tab.key}
                   pullRequest={tab.bundle.detail}
                   file={file}
                   layout={layout}
                   reviewThreads={tab.bundle.reviewThreads}
-                  tourChapters={tab.tour?.chapters ?? []}
+                  tourChapters={tab.tour?.chapters ?? EMPTY_TOUR_CHAPTERS}
                   headerless
+                  enableLsp={active && tab.mode === "managed"}
+                  onOpenDefinition={handleOpenDefinition}
                 />
               ) : null}
             </article>
@@ -116,6 +140,20 @@ export function DiffReviewBody({ tab, layout }: DiffReviewBodyProps): React.JSX.
         <div className="diff-stack-end">End of diff · {files.length} files</div>
       </section>
     </section>
+  );
+}, areDiffReviewBodyPropsEqual);
+
+function areDiffReviewBodyPropsEqual(previous: DiffReviewBodyProps, next: DiffReviewBodyProps): boolean {
+  return (
+    previous.layout === next.layout &&
+    previous.active === next.active &&
+    previous.tab.key === next.tab.key &&
+    previous.tab.mode === next.tab.mode &&
+    previous.tab.selectedFilePath === next.tab.selectedFilePath &&
+    previous.tab.bundle.detail === next.tab.bundle.detail &&
+    previous.tab.bundle.changedFiles === next.tab.bundle.changedFiles &&
+    previous.tab.bundle.reviewThreads === next.tab.bundle.reviewThreads &&
+    (previous.tab.tour?.chapters ?? EMPTY_TOUR_CHAPTERS) === (next.tab.tour?.chapters ?? EMPTY_TOUR_CHAPTERS)
   );
 }
 

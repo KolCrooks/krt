@@ -1,6 +1,6 @@
 // @vitest-environment node
 import { describe, expect, it } from "vitest";
-import { changedFilesToMetadata, changedFilesToTreePaths } from "../../src/shared/treeModel.js";
+import { changedFilesToMetadata, changedFilesToTreePaths, orderChangedFilesDepthFirst } from "../../src/shared/treeModel.js";
 import type { ChangedFile } from "../../src/shared/schemas.js";
 
 const files: ChangedFile[] = [
@@ -46,4 +46,41 @@ describe("tree model helpers", () => {
       isOpenInEditor: true
     });
   });
+
+  it("orders changed files depth-first by tree position", () => {
+    const unorderedFiles = [
+      changedFile("README.md"),
+      changedFile("src/App.tsx"),
+      changedFile("src/utils/date.ts"),
+      changedFile("src/components/index.ts"),
+      changedFile("src/components/forms/Input.tsx"),
+      changedFile("src/components/Button.tsx"),
+      changedFile("src/components/forms/Field.tsx")
+    ];
+
+    expect(orderChangedFilesDepthFirst(unorderedFiles).map((file) => file.path)).toEqual([
+      "src/components/forms/Field.tsx",
+      "src/components/forms/Input.tsx",
+      "src/components/Button.tsx",
+      "src/components/index.ts",
+      "src/utils/date.ts",
+      "src/App.tsx",
+      "README.md"
+    ]);
+  });
 });
+
+function changedFile(path: string): ChangedFile {
+  return {
+    path,
+    status: "modified",
+    additions: 1,
+    deletions: 0,
+    changes: 1,
+    isLarge: false,
+    isGenerated: false,
+    reviewStatus: "unreviewed",
+    annotations: 0,
+    diagnostics: 0
+  };
+}

@@ -10,7 +10,6 @@ marked.use({
 export function renderMarkdown(markdown: string): string {
   const html = marked.parse(markdown || "", { async: false }) as string;
   return DOMPurify.sanitize(html, {
-    USE_PROFILES: { html: true },
     ALLOWED_TAGS: [
       "a",
       "blockquote",

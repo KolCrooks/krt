@@ -5,6 +5,9 @@ const emptyAsync = async () => undefined;
 if (typeof window !== "undefined") {
   Object.defineProperty(window, "krt", {
   value: {
+    app: {
+      onCloseSubTab: () => () => undefined
+    },
     auth: {
       getStatus: async () => ({ github: null, ai: { configured: false } }),
       saveGitHubToken: emptyAsync,
@@ -109,6 +112,7 @@ if (typeof window !== "undefined") {
       selectMode: async () => ({ mode: "light", reason: "test" }),
       checkoutPullRequest: emptyAsync,
       releaseWorktree: async () => ({ released: true }),
+      deleteWorktree: async () => ({ deleted: true, worktree: null }),
       listManagedWorktrees: async () => [],
       cleanupWorktrees: async (input: { dryRun?: boolean }) => ({
         deleted: [],

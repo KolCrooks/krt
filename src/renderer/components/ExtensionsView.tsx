@@ -201,6 +201,14 @@ function ExtensionDetail({ extension, logs, pending, onToggle }: ExtensionDetail
             <span>·</span>
             <span>{describeKind(kindOf(extension))}</span>
             <span>·</span>
+            <span>{extension.source === "local" ? "Local" : "Built-in"}</span>
+            {extension.version ? (
+              <>
+                <span>·</span>
+                <span className="mono">v{extension.version}</span>
+              </>
+            ) : null}
+            <span>·</span>
             <span>{extension.enabled ? "Enabled" : "Disabled"}</span>
           </div>
           <div className="ext-detail-actions">
@@ -304,6 +312,15 @@ function ExtensionIcon({ extension, size }: ExtensionIconProps): React.JSX.Eleme
 }
 
 function kindOf(extension: Extension): ExtensionKind {
+  if (extension.kind?.includes("review")) {
+    return "review";
+  }
+  if (extension.kind?.includes("linter")) {
+    return "linter";
+  }
+  if (extension.kind?.includes("language")) {
+    return "language";
+  }
   const id = extension.id.toLowerCase();
   if (id.includes("lint") || id.includes("prettier") || id.includes("biome") || id.includes("format")) {
     return "linter";

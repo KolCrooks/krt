@@ -13,6 +13,9 @@ import type {
   PullRequestBundle,
   PullRequestDetail,
   PullRequestSummary,
+  ReactionContent,
+  ReactionGroup,
+  ReactionSubject,
   RepositoryCloneInfo,
   RepositoryRef,
   ReviewComment,
@@ -99,9 +102,11 @@ export class GitHubProvider implements Provider {
       per_page: input.limit
     });
 
-    return (data.items as OctokitIssueSearchItem[])
-      .filter((item) => Boolean(item.pull_request))
-      .map((item) => this.mapSearchItem(item));
+    return Promise.all(
+      (data.items as OctokitIssueSearchItem[])
+        .filter((item) => Boolean(item.pull_request))
+        .map((item) => this.hydrateSearchItem(item))
+    );
   }
 
   async getPullRequest(repository: RepositoryRef, number: number): Promise<PullRequestDetail> {
@@ -175,7 +180,9 @@ export class GitHubProvider implements Provider {
           body: comment.body ?? "",
           createdAt: comment.created_at,
           url: comment.html_url,
-          severity: "info" as const
+          severity: "info" as const,
+          reactionSubject: comment.node_id ? { nodeId: comment.node_id } : undefined,
+          reactions: mapRestReactionSummary(githubRestReactionsField(comment))
         })),
         ...reviews.data.map((review) => ({
           id: `review:${review.id}`,
@@ -185,7 +192,9 @@ export class GitHubProvider implements Provider {
           body: review.body ?? "",
           createdAt: review.submitted_at ?? new Date().toISOString(),
           url: review.html_url ?? undefined,
-          severity: review.state === "CHANGES_REQUESTED" ? ("warning" as const) : ("info" as const)
+          severity: review.state === "CHANGES_REQUESTED" ? ("warning" as const) : ("info" as const),
+          reactionSubject: review.node_id ? { nodeId: review.node_id } : undefined,
+          reactions: [] as ReactionGroup[]
         })),
         ...reviewComments.data.map((comment) => ({
           id: `review-comment:${comment.id}`,
@@ -196,7 +205,18 @@ export class GitHubProvider implements Provider {
           createdAt: comment.created_at,
           url: comment.html_url,
           path: comment.path,
-          severity: "info" as const
+          line: comment.line ?? comment.original_line ?? undefined,
+          side: normalizeReviewCommentSide(comment.side),
+          startLine: githubReviewCommentNumber(comment, "start_line") ?? githubReviewCommentNumber(comment, "original_start_line"),
+          startSide: normalizeReviewCommentSide(githubReviewCommentValue(comment, "start_side")),
+          originalLine: githubReviewCommentNumber(comment, "original_line"),
+          originalStartLine: githubReviewCommentNumber(comment, "original_start_line"),
+          originalCommitId: githubReviewCommentString(comment, "original_commit_id"),
+          diffHunk: githubReviewCommentString(comment, "diff_hunk"),
+          outdated: githubReviewCommentBoolean(comment, "outdated"),
+          severity: "info" as const,
+          reactionSubject: comment.node_id ? { nodeId: comment.node_id } : undefined,
+          reactions: mapRestReactionSummary(githubRestReactionsField(comment))
         }))
       ].sort((left, right) => left.createdAt.localeCompare(right.createdAt));
 
@@ -222,25 +242,7 @@ export class GitHubProvider implements Provider {
       repository: {
         pullRequest: {
           reviewThreads: {
-            nodes: Array<{
-              id: string;
-              isResolved: boolean;
-              isOutdated: boolean;
-              path?: string | null;
-              line?: number | null;
-              comments: {
-                nodes: Array<{
-                  id: string;
-                  body: string;
-                  url: string;
-                  path?: string | null;
-                  line?: number | null;
-                  createdAt: string;
-                  updatedAt: string;
-                  author?: { login: string; avatarUrl?: string; url?: string } | null;
-                }>;
-              };
-            }>;
+            nodes: Array<GraphqlThread>;
           };
         };
       };
@@ -255,6 +257,11 @@ export class GitHubProvider implements Provider {
                 isOutdated
                 path
                 line
+                diffSide
+                startLine
+                startDiffSide
+                originalLine
+                originalStartLine
                 comments(first: 100) {
                   nodes {
                     id
@@ -262,12 +269,26 @@ export class GitHubProvider implements Provider {
                     url
                     path
                     line
+                    originalLine
+                    originalStartLine
+                    diffHunk
+                    outdated
+                    originalCommit {
+                      oid
+                    }
                     createdAt
                     updatedAt
                     author {
                       login
                       avatarUrl
                       url
+                    }
+                    reactionGroups {
+                      content
+                      viewerHasReacted
+                      reactors {
+                        totalCount
+                      }
                     }
                   }
                 }
@@ -279,34 +300,7 @@ export class GitHubProvider implements Provider {
       { owner: repository.owner, repo: repository.name, number }
     );
 
-    return response.repository.pullRequest.reviewThreads.nodes.map((thread) => ({
-      id: thread.id,
-      provider: "github",
-      repository,
-      pullNumber: number,
-      path: thread.path ?? undefined,
-      line: thread.line ?? undefined,
-      resolved: thread.isResolved,
-      outdated: thread.isOutdated,
-      comments: thread.comments.nodes.map((comment) => ({
-        id: comment.id,
-        threadId: thread.id,
-        author: comment.author
-          ? {
-              login: comment.author.login,
-              avatarUrl: comment.author.avatarUrl,
-              url: comment.author.url
-            }
-          : { login: "ghost" },
-        body: comment.body,
-        url: comment.url,
-        path: comment.path ?? thread.path ?? undefined,
-        line: comment.line ?? thread.line ?? undefined,
-        createdAt: comment.createdAt,
-        updatedAt: comment.updatedAt,
-        isBot: false
-      }))
-    }));
+    return response.repository.pullRequest.reviewThreads.nodes.map((thread) => mapGraphqlThread(thread, repository, number));
   }
 
   async getChecks(repository: RepositoryRef, ref: string): Promise<CheckRun[]> {
@@ -477,7 +471,8 @@ export class GitHubProvider implements Provider {
       url: data.html_url,
       createdAt: data.created_at,
       updatedAt: data.updated_at,
-      isBot: this.isBot(data.user)
+      isBot: this.isBot(data.user),
+      reactions: []
     };
   }
 
@@ -530,8 +525,48 @@ export class GitHubProvider implements Provider {
       line: comment.line ?? undefined,
       createdAt: comment.createdAt,
       updatedAt: comment.updatedAt,
-      isBot: false
+      isBot: false,
+      reactions: []
     };
+  }
+
+  async toggleReaction(
+    subjectId: string,
+    content: ReactionContent,
+    add: boolean
+  ): Promise<ReactionGroup[]> {
+    this.requireToken("Reacting to a comment requires a token.");
+    const graphqlContent = REACTION_CONTENT_TO_GRAPHQL[content];
+    if (!graphqlContent) {
+      throw new AppError(`Unsupported reaction "${content}".`, "INVALID_INPUT");
+    }
+    const mutationName = add ? "addReaction" : "removeReaction";
+    const response = await this.graphql<{
+      [key: string]: {
+        subject: {
+          reactionGroups?: GraphqlReactionGroup[] | null;
+        };
+      };
+    }>(
+      `mutation Toggle($subjectId: ID!, $content: ReactionContent!) {
+        ${mutationName}(input: { subjectId: $subjectId, content: $content }) {
+          subject {
+            ... on Reactable {
+              reactionGroups {
+                content
+                viewerHasReacted
+                reactors {
+                  totalCount
+                }
+              }
+            }
+          }
+        }
+      }`,
+      { subjectId, content: graphqlContent }
+    );
+    const subject = response[mutationName]?.subject;
+    return mapGraphqlReactionGroups(subject?.reactionGroups ?? null);
   }
 
   async resolveReviewThread(repository: RepositoryRef, number: number, threadId: string): Promise<ReviewThread> {
@@ -545,6 +580,11 @@ export class GitHubProvider implements Provider {
             isOutdated
             path
             line
+            diffSide
+            startLine
+            startDiffSide
+            originalLine
+            originalStartLine
             comments(first: 100) {
               nodes {
                 id
@@ -552,12 +592,26 @@ export class GitHubProvider implements Provider {
                 url
                 path
                 line
+                originalLine
+                originalStartLine
+                diffHunk
+                outdated
+                originalCommit {
+                  oid
+                }
                 createdAt
                 updatedAt
                 author {
                   login
                   avatarUrl
                   url
+                }
+                reactionGroups {
+                  content
+                  viewerHasReacted
+                  reactors {
+                    totalCount
+                  }
                 }
               }
             }
@@ -581,6 +635,11 @@ export class GitHubProvider implements Provider {
             isOutdated
             path
             line
+            diffSide
+            startLine
+            startDiffSide
+            originalLine
+            originalStartLine
             comments(first: 100) {
               nodes {
                 id
@@ -588,12 +647,26 @@ export class GitHubProvider implements Provider {
                 url
                 path
                 line
+                originalLine
+                originalStartLine
+                diffHunk
+                outdated
+                originalCommit {
+                  oid
+                }
                 createdAt
                 updatedAt
                 author {
                   login
                   avatarUrl
                   url
+                }
+                reactionGroups {
+                  content
+                  viewerHasReacted
+                  reactors {
+                    totalCount
+                  }
                 }
               }
             }
@@ -839,6 +912,15 @@ export class GitHubProvider implements Provider {
     };
   }
 
+  private async hydrateSearchItem(item: OctokitIssueSearchItem): Promise<PullRequestSummary> {
+    const fallback = this.mapSearchItem(item);
+    try {
+      return await this.getPullRequest(fallback.repository, fallback.number);
+    } catch {
+      return fallback;
+    }
+  }
+
   private mapActor(user: { login?: string; avatar_url?: string; html_url?: string; type?: string } | null | undefined): Actor {
     return {
       login: user?.login ?? "unknown",
@@ -859,12 +941,23 @@ export class GitHubProvider implements Provider {
   }
 }
 
+type GraphqlReactionGroup = {
+  content: string;
+  viewerHasReacted: boolean;
+  reactors?: { totalCount: number } | null;
+};
+
 type GraphqlThread = {
   id: string;
   isResolved: boolean;
   isOutdated: boolean;
   path?: string | null;
   line?: number | null;
+  diffSide?: string | null;
+  startLine?: number | null;
+  startDiffSide?: string | null;
+  originalLine?: number | null;
+  originalStartLine?: number | null;
   comments: {
     nodes: Array<{
       id: string;
@@ -872,9 +965,15 @@ type GraphqlThread = {
       url: string;
       path?: string | null;
       line?: number | null;
+      originalLine?: number | null;
+      originalStartLine?: number | null;
+      diffHunk?: string | null;
+      outdated?: boolean | null;
+      originalCommit?: { oid?: string | null } | null;
       createdAt: string;
       updatedAt: string;
       author?: { login: string; avatarUrl?: string; url?: string } | null;
+      reactionGroups?: GraphqlReactionGroup[] | null;
     }>;
   };
 };
@@ -892,6 +991,11 @@ function mapGraphqlThread(thread: GraphqlThread, repository: RepositoryRef, pull
     pullNumber,
     path: thread.path ?? undefined,
     line: thread.line ?? undefined,
+    side: normalizeReviewCommentSide(thread.diffSide),
+    startLine: thread.startLine ?? undefined,
+    startSide: normalizeReviewCommentSide(thread.startDiffSide),
+    originalLine: thread.originalLine ?? undefined,
+    originalStartLine: thread.originalStartLine ?? undefined,
     resolved: thread.isResolved,
     outdated: thread.isOutdated,
     comments: thread.comments.nodes.map((comment) => ({
@@ -902,11 +1006,58 @@ function mapGraphqlThread(thread: GraphqlThread, repository: RepositoryRef, pull
       url: comment.url,
       path: comment.path ?? thread.path ?? undefined,
       line: comment.line ?? thread.line ?? undefined,
+      side: normalizeReviewCommentSide(thread.diffSide),
+      startLine: thread.startLine ?? undefined,
+      startSide: normalizeReviewCommentSide(thread.startDiffSide),
+      originalLine: comment.originalLine ?? thread.originalLine ?? undefined,
+      originalStartLine: comment.originalStartLine ?? thread.originalStartLine ?? undefined,
+      originalCommitId: comment.originalCommit?.oid ?? undefined,
+      diffHunk: comment.diffHunk ?? undefined,
+      outdated: comment.outdated ?? thread.isOutdated,
       createdAt: comment.createdAt,
       updatedAt: comment.updatedAt,
-      isBot: false
+      isBot: false,
+      reactions: mapGraphqlReactionGroups(comment.reactionGroups)
     }))
   };
+}
+
+const REACTION_CONTENT_FROM_GRAPHQL: Record<string, ReactionContent> = {
+  THUMBS_UP: "+1",
+  THUMBS_DOWN: "-1",
+  LAUGH: "laugh",
+  HOORAY: "hooray",
+  CONFUSED: "confused",
+  HEART: "heart",
+  ROCKET: "rocket",
+  EYES: "eyes"
+};
+
+const REACTION_CONTENT_TO_GRAPHQL: Record<ReactionContent, string> = {
+  "+1": "THUMBS_UP",
+  "-1": "THUMBS_DOWN",
+  laugh: "LAUGH",
+  hooray: "HOORAY",
+  confused: "CONFUSED",
+  heart: "HEART",
+  rocket: "ROCKET",
+  eyes: "EYES"
+};
+
+function mapGraphqlReactionGroups(groups: GraphqlReactionGroup[] | null | undefined): ReactionGroup[] {
+  if (!groups) {
+    return [];
+  }
+  const mapped: ReactionGroup[] = [];
+  for (const group of groups) {
+    const content = REACTION_CONTENT_FROM_GRAPHQL[group.content];
+    const count = group.reactors?.totalCount ?? 0;
+    if (!content || count === 0) {
+      continue;
+    }
+    mapped.push({ content, count, viewerHasReacted: Boolean(group.viewerHasReacted) });
+  }
+  return mapped;
 }
 
 function mapGraphqlActor(actor: { login: string; avatarUrl?: string; url?: string } | null | undefined) {
@@ -917,6 +1068,67 @@ function mapGraphqlActor(actor: { login: string; avatarUrl?: string; url?: strin
         url: actor.url
       }
     : { login: "ghost" };
+}
+
+function normalizeReviewCommentSide(side: unknown): "left" | "right" | undefined {
+  if (side === "LEFT" || side === "left") {
+    return "left";
+  }
+  if (side === "RIGHT" || side === "right") {
+    return "right";
+  }
+  return undefined;
+}
+
+function githubReviewCommentValue(comment: unknown, key: string): unknown {
+  return typeof comment === "object" && comment !== null ? (comment as Record<string, unknown>)[key] : undefined;
+}
+
+function githubReviewCommentNumber(comment: unknown, key: string): number | undefined {
+  const value = githubReviewCommentValue(comment, key);
+  return typeof value === "number" ? value : undefined;
+}
+
+function githubReviewCommentString(comment: unknown, key: string): string | undefined {
+  const value = githubReviewCommentValue(comment, key);
+  return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+function githubReviewCommentBoolean(comment: unknown, key: string): boolean | undefined {
+  const value = githubReviewCommentValue(comment, key);
+  return typeof value === "boolean" ? value : undefined;
+}
+
+const REST_REACTION_KEYS: ReactionContent[] = [
+  "+1",
+  "-1",
+  "laugh",
+  "hooray",
+  "confused",
+  "heart",
+  "rocket",
+  "eyes"
+];
+
+function githubRestReactionsField(comment: unknown): Record<string, unknown> | undefined {
+  const value = githubReviewCommentValue(comment, "reactions");
+  return typeof value === "object" && value !== null ? (value as Record<string, unknown>) : undefined;
+}
+
+function mapRestReactionSummary(summary: Record<string, unknown> | undefined): ReactionGroup[] {
+  if (!summary) {
+    return [];
+  }
+  const groups: ReactionGroup[] = [];
+  for (const content of REST_REACTION_KEYS) {
+    const value = summary[content];
+    const count = typeof value === "number" ? value : 0;
+    if (count <= 0) {
+      continue;
+    }
+    groups.push({ content, count, viewerHasReacted: false });
+  }
+  return groups;
 }
 
 export function githubPullScope(repository: RepositoryRef, number: number): string {

@@ -173,11 +173,17 @@ export function TourBody({ tab, layout }: TourBodyProps): React.JSX.Element {
         ) : null}
         <section className="tour-diff" aria-label="Selected tour diff">
           <DiffPanel
+            tabKey={tab.key}
             pullRequest={tab.bundle.detail}
             file={selectedAnchorFile}
             layout={layout}
             reviewThreads={tab.bundle.reviewThreads}
             tourChapters={selectedChapter ? [selectedChapter] : []}
+            enableLsp={tab.mode === "managed"}
+            onOpenDefinition={(path, line) => {
+              openFileInTab(tab.key, path, line);
+              setTabViewMode(tab.key, "editor");
+            }}
           />
         </section>
       </section>

@@ -290,18 +290,6 @@ function AppearanceSection({ settings, updateSettings }: SettingsSectionProps): 
           />
         </SettingsRow>
       </SettingsGroup>
-      <SettingsGroup title="Accent">
-        <SettingsRow last label="Accent color" hint="Used for active tabs, focus rings, and primary actions.">
-          <input
-            type="color"
-            className="settings-color"
-            value={settings.appearance.accentColor}
-            onChange={(event) =>
-              updateSettings({ appearance: { ...settings.appearance, accentColor: event.target.value } })
-            }
-          />
-        </SettingsRow>
-      </SettingsGroup>
     </>
   );
 }

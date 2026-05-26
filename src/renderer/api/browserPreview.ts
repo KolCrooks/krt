@@ -104,7 +104,8 @@ const bundle: PullRequestBundle = {
       title: "Initial pass",
       body: "The process split is clear. The next review should focus on checkout failure paths and AI provider configuration.",
       createdAt: "2026-05-22T14:32:00.000Z",
-      severity: "info"
+      severity: "info",
+      reactions: []
     }
   ],
   reviewThreads: [
@@ -124,7 +125,8 @@ const bundle: PullRequestBundle = {
           author: { login: "reviewer" },
           body: "Validate both request and response payloads here.",
           createdAt: "2026-05-22T14:33:00.000Z",
-          isBot: false
+          isBot: false,
+          reactions: []
         }
       ]
     }
@@ -223,6 +225,9 @@ export function createBrowserPreviewApi(): KrtApi {
   });
 
   return {
+    app: {
+      onCloseSubTab: () => () => undefined
+    },
     auth: {
       getStatus: async () => ({
         github: settings.github.configured && settings.github.login ? { provider: "github", id: settings.github.login, login: settings.github.login, configured: true, scopes: [] } : null,
@@ -370,6 +375,7 @@ export function createBrowserPreviewApi(): KrtApi {
       selectMode: async () => ({ mode: "light", reason: "Browser preview uses Light/API mode." }),
       checkoutPullRequest: async () => ({ operationId: "preview-operation", mode: "managed", worktreePath: "/preview/worktree" }),
       releaseWorktree: async () => ({ released: true }),
+      deleteWorktree: async () => ({ deleted: true, worktree: null }),
       listManagedWorktrees: async () => [],
       cleanupWorktrees: async (input) => ({
         deleted: [],
@@ -418,7 +424,8 @@ export function createBrowserPreviewApi(): KrtApi {
         author: { login: "preview" },
         body: input.body,
         createdAt: new Date().toISOString(),
-        isBot: false
+        isBot: false,
+        reactions: []
       }),
       replyToReviewThread: async (input) => ({
         id: "preview-thread-reply",
@@ -426,8 +433,12 @@ export function createBrowserPreviewApi(): KrtApi {
         author: { login: "preview" },
         body: input.body,
         createdAt: new Date().toISOString(),
-        isBot: false
-      })
+        isBot: false,
+        reactions: []
+      }),
+      toggleReaction: async (input) => [
+        { content: input.content, count: input.add ? 1 : 0, viewerHasReacted: input.add }
+      ]
     },
     reviews: {
       resolveThread: async (input) => ({
@@ -490,8 +501,8 @@ export function createBrowserPreviewApi(): KrtApi {
         worktreePath: "/preview/worktree",
         status: "degraded",
         activeExtensions: [],
-        unavailableExtensions: [{ id: "typescript-language-server", reason: "Browser preview uses fallback code intelligence." }],
-        capabilities: ["diagnostics", "hover", "definition", "symbols"],
+        unavailableExtensions: [{ id: "language-server", reason: "Browser preview does not run a language server process." }],
+        capabilities: [],
         startedAt: new Date().toISOString()
       }),
       stopForWorktree: async (input) => ({
@@ -502,45 +513,14 @@ export function createBrowserPreviewApi(): KrtApi {
         status: "stopped",
         activeExtensions: [],
         unavailableExtensions: [],
-        capabilities: ["diagnostics", "hover", "definition", "symbols"],
+        capabilities: [],
         startedAt: new Date().toISOString()
       }),
       getSession: async () => null,
-      getDiagnostics: async (input) =>
-        input.path
-          ? [
-              {
-                id: `${input.path}:0:0:preview`,
-                source: "browser-preview",
-                severity: "info",
-                message: "Preview diagnostic from fallback code intelligence.",
-                path: input.path,
-                range: { start: { line: 0, character: 0 }, end: { line: 0, character: 6 } },
-                code: "preview"
-              }
-            ]
-          : [],
-      getHover: async (input) => ({
-        source: "browser-preview",
-        path: input.path,
-        position: input.position,
-        contents: "Preview hover information.",
-        range: { start: input.position, end: input.position }
-      }),
-      getDocumentSymbols: async (input) => [
-        {
-          name: "preview",
-          kind: "constant",
-          path: input.path,
-          range: { start: { line: 0, character: 13 }, end: { line: 0, character: 20 } },
-          selectionRange: { start: { line: 0, character: 13 }, end: { line: 0, character: 20 } }
-        }
-      ],
-      getDefinition: async (input) => ({
-        source: "browser-preview",
-        path: input.path,
-        range: { start: { line: 0, character: 13 }, end: { line: 0, character: 20 } }
-      })
+      getDiagnostics: async () => [],
+      getHover: async () => null,
+      getDocumentSymbols: async () => [],
+      getDefinition: async () => null
     },
     ai: {
       getCachedTour: async () => tour,

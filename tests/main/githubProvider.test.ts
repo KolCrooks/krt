@@ -121,6 +121,167 @@ describe("GitHubProvider response caching", () => {
     );
   });
 
+  it("hydrates issue-search pull requests with branch metadata", async () => {
+    const cache = new ProviderResponseCache(openDatabase(":memory:"));
+    const issuesAndPullRequests = vi.fn(async () => ({
+      data: {
+        items: [
+          {
+            id: 12,
+            number: 12,
+            title: "Add branch metadata",
+            state: "open",
+            html_url: "https://github.com/kol/repo/pull/12",
+            user: { login: "kol" },
+            labels: [],
+            comments: 0,
+            updated_at: "2026-05-22T00:00:00.000Z",
+            created_at: "2026-05-22T00:00:00.000Z",
+            repository_url: "https://api.github.com/repos/kol/repo",
+            pull_request: { url: "https://api.github.com/repos/kol/repo/pulls/12" }
+          }
+        ]
+      }
+    }));
+    const pullsGet = vi.fn(async () => ({
+      data: {
+        id: 12,
+        number: 12,
+        title: "Add branch metadata",
+        state: "open",
+        draft: false,
+        html_url: "https://github.com/kol/repo/pull/12",
+        user: { login: "kol" },
+        labels: [],
+        requested_reviewers: [],
+        base: {
+          ref: "main",
+          sha: "base-sha",
+          repo: {
+            owner: { login: "kol" },
+            name: "repo",
+            full_name: "kol/repo",
+            default_branch: "main",
+            html_url: "https://github.com/kol/repo"
+          }
+        },
+        head: {
+          ref: "feature/search-branches",
+          sha: "head-sha",
+          repo: {
+            full_name: "kol/repo"
+          }
+        },
+        additions: 4,
+        deletions: 1,
+        changed_files: 2,
+        comments: 0,
+        review_comments: 0,
+        updated_at: "2026-05-22T00:00:00.000Z",
+        created_at: "2026-05-22T00:00:00.000Z",
+        body: "",
+        mergeable: true,
+        maintainer_can_modify: true
+      },
+      headers: {}
+    }));
+    const provider = providerWithOctokit(
+      cache,
+      {
+        search: { issuesAndPullRequests },
+        pulls: { get: pullsGet }
+      },
+      "token"
+    );
+
+    const results = await provider.listPullRequests({ query: "is:open sort:updated-desc", limit: 10 });
+
+    expect(results).toHaveLength(1);
+    expect(results[0]).toMatchObject({
+      number: 12,
+      repository: { fullName: "kol/repo" },
+      baseRef: "main",
+      headRef: "feature/search-branches",
+      headSha: "head-sha"
+    });
+    expect(issuesAndPullRequests).toHaveBeenCalledWith({
+      q: "is:open sort:updated-desc is:pr",
+      per_page: 10
+    });
+    expect(pullsGet).toHaveBeenCalledWith(
+      expect.objectContaining({
+        owner: "kol",
+        repo: "repo",
+        pull_number: 12
+      })
+    );
+  });
+
+  it("maps historical diff hunk metadata from review comments", async () => {
+    const cache = new ProviderResponseCache(openDatabase(":memory:"));
+    const listComments = vi.fn(async () => ({ data: [] }));
+    const listReviews = vi.fn(async () => ({ data: [] }));
+    const listReviewComments = vi.fn(async () => ({
+      data: [
+        {
+          id: 1234,
+          node_id: "PRRC_kwDO123",
+          body: "This was on the previous revision.",
+          html_url: "https://github.com/kol/repo/pull/12#discussion_r1234",
+          path: "src/app.ts",
+          line: null,
+          original_line: 13,
+          side: "RIGHT",
+          start_line: null,
+          original_start_line: 12,
+          start_side: "RIGHT",
+          original_commit_id: "abc123",
+          diff_hunk: "@@ -10,5 +10,6 @@\n context\n+old generated line\n",
+          outdated: true,
+          created_at: "2026-05-22T00:00:00.000Z",
+          user: { login: "alex", type: "User" },
+          reactions: {
+            "+1": 2,
+            "-1": 0,
+            laugh: 0,
+            hooray: 0,
+            confused: 0,
+            heart: 0,
+            rocket: 0,
+            eyes: 1
+          }
+        }
+      ]
+    }));
+    const provider = providerWithOctokit(cache, {
+      issues: { listComments },
+      pulls: {
+        listReviews,
+        listReviewComments
+      }
+    });
+
+    const events = await provider.getPullRequestTimeline(repository, 12);
+
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      id: "review-comment:1234",
+      path: "src/app.ts",
+      line: 13,
+      startLine: 12,
+      originalLine: 13,
+      originalStartLine: 12,
+      originalCommitId: "abc123",
+      diffHunk: "@@ -10,5 +10,6 @@\n context\n+old generated line\n",
+      outdated: true,
+      reactionSubject: { nodeId: "PRRC_kwDO123" },
+      reactions: [
+        { content: "+1", count: 2, viewerHasReacted: false },
+        { content: "eyes", count: 1, viewerHasReacted: false }
+      ]
+    });
+  });
+
   it("maps GitHub issue comments and pull request review submissions", async () => {
     const cache = new ProviderResponseCache(openDatabase(":memory:"));
     const createComment = vi.fn(async () => ({
@@ -260,6 +421,13 @@ describe("GitHubProvider response caching", () => {
     });
     expect(resolved).toMatchObject({ id: "thread-id", resolved: true });
     expect(reopened).toMatchObject({ id: "thread-id", resolved: false });
+    expect(resolved.comments[0]).toMatchObject({
+      originalLine: 13,
+      originalStartLine: 12,
+      originalCommitId: "abc123",
+      diffHunk: "@@ -10,5 +10,6 @@\n context\n+old generated line\n",
+      outdated: true
+    });
     expect(graphql).toHaveBeenCalledTimes(3);
   });
 });
@@ -287,6 +455,11 @@ function graphqlThread({ isResolved }: { isResolved: boolean }) {
     isOutdated: false,
     path: "src/app.ts",
     line: 42,
+    diffSide: "RIGHT",
+    startLine: 40,
+    startDiffSide: "RIGHT",
+    originalLine: 13,
+    originalStartLine: 12,
     comments: {
       nodes: [
         {
@@ -295,6 +468,11 @@ function graphqlThread({ isResolved }: { isResolved: boolean }) {
           url: "https://github.com/kol/repo/pull/12#discussion_r0",
           path: "src/app.ts",
           line: 42,
+          originalLine: 13,
+          originalStartLine: 12,
+          diffHunk: "@@ -10,5 +10,6 @@\n context\n+old generated line\n",
+          outdated: true,
+          originalCommit: { oid: "abc123" },
           createdAt: "2026-05-22T00:00:00.000Z",
           updatedAt: "2026-05-22T00:00:00.000Z",
           author: {

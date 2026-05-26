@@ -128,12 +128,54 @@ describe("AI prompt preparation", () => {
     expect(context.task.outputRequirements).toEqual(
       expect.arrayContaining([
         expect.stringContaining("Return exactly one JSON object"),
+        expect.stringContaining("topic clusters"),
         expect.stringContaining("Do not invent files")
       ])
     );
-    expect(context.task.chapterGuidance).toEqual(expect.arrayContaining([expect.stringContaining("reviewer should follow")]));
+    expect(context.task.chapterGuidance).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining("reviewer should follow"),
+        expect.stringContaining("Do not create one chapter per file"),
+        expect.stringContaining("not 'SettingsView.tsx' or 'src/ changes'")
+      ])
+    );
     expect(context.task.riskGuidance).toEqual(expect.arrayContaining([expect.stringContaining("failing checks")]));
     expect(context.schema).toContain("Required chapter fields");
+  });
+
+  it("groups cross-cutting changes by review topic instead of file directory", () => {
+    const context = prepareAiReviewContext({
+      pullRequest,
+      changedFiles: [
+        changedFile("src/shared/schemas.ts", {
+          patch: '+ keyProvider: aiKeyProviderSchema.default("keychain")'
+        }),
+        changedFile("src/main/services/keychain.ts", {
+          patch: '+ return execFileAsync("gh", ["auth", "token"]);'
+        }),
+        changedFile("src/renderer/components/SettingsView.tsx", {
+          patch: "+ <select value={settings.github.tokenProvider}>"
+        }),
+        changedFile("tests/main/providerRegistry.test.ts", {
+          patch: '+ expect(registry.getGitHubToken()).resolves.toBe("gh-cli-token");'
+        })
+      ],
+      timeline: [],
+      reviewThreads: [],
+      checks: []
+    });
+
+    const settingsCluster = context.clusters.find((cluster) => cluster.topic === "settings-credentials");
+    expect(settingsCluster?.title).toBe("Settings and credential provider flow");
+    expect(settingsCluster?.files.map((file) => file.path).sort()).toEqual([
+      "src/main/services/keychain.ts",
+      "src/renderer/components/SettingsView.tsx",
+      "src/shared/schemas.ts"
+    ]);
+    expect(context.clusters.some((cluster) => cluster.title.endsWith("/ changes"))).toBe(false);
+    expect(context.clusters.find((cluster) => cluster.topic === "tests-validation")?.files.map((file) => file.path)).toEqual([
+      "tests/main/providerRegistry.test.ts"
+    ]);
   });
 });
 
