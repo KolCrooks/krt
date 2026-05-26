@@ -1,0 +1,31 @@
+appId: com.kolcrooks.krt
+productName: Kol's Review Tool
+copyright: Copyright (c) 2026 Kol Crooks
+artifactName: ${productName}-${version}-${arch}.${ext}
+
+directories:
+  output: release
+
+files:
+  - dist/renderer/**/*
+  - dist-electron/**/*
+  - node_modules/**/*
+  - package.json
+
+asar: true
+
+mac:
+  category: public.app-category.developer-tools
+  target:
+    - dmg
+    - zip
+  hardenedRuntime: true
+  gatekeeperAssess: false
+  entitlements: build/entitlements.mac.plist
+  entitlementsInherit: build/entitlements.mac.plist
+  notarize: false
+
+dmg:
+  artifactName: ${productName}-${version}-${arch}.${ext}
+
+afterSign: build/notarize.cjs
