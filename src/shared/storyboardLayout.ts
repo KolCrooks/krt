@@ -42,7 +42,7 @@ export interface StoryboardLayout {
 
 const defaultOptions: StoryboardLayoutOptions = {
   nodeWidth: 180,
-  nodeHeight: 118,
+  nodeHeight: 162,
   columnGap: 74,
   rowGap: 28,
   padding: 28,

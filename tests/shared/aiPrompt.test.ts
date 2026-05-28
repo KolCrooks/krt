@@ -136,11 +136,30 @@ describe("AI prompt preparation", () => {
       expect.arrayContaining([
         expect.stringContaining("reviewer should follow"),
         expect.stringContaining("Do not create one chapter per file"),
-        expect.stringContaining("not 'SettingsView.tsx' or 'src/ changes'")
+        expect.stringContaining("not 'SettingsView.tsx' or 'src/ changes'"),
+        expect.stringContaining("key construct and its role"),
+        expect.stringContaining("narrative")
       ])
     );
-    expect(context.task.riskGuidance).toEqual(expect.arrayContaining([expect.stringContaining("failing checks")]));
+    expect(context.task.graphGuidance).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining("left-to-right build-order flow"),
+        expect.stringContaining("prerequisite/foundation chapter (from)"),
+        expect.stringContaining("dependencies array")
+      ])
+    );
+    expect(context.task.riskGuidance).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining("failing checks"),
+        expect.stringContaining("what to verify"),
+        expect.stringContaining("two distinct things")
+      ])
+    );
+    expect(context.task.outputRequirements).toEqual(
+      expect.arrayContaining([expect.stringContaining("wrap it in backticks")])
+    );
     expect(context.schema).toContain("Required chapter fields");
+    expect(context.schema).toContain("from the prerequisite chapter");
   });
 
   it("groups cross-cutting changes by review topic instead of file directory", () => {

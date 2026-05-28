@@ -3,6 +3,7 @@ import { useEffect, useMemo, useState } from "react";
 import { relativeRiskClass } from "../../lib/format.js";
 import { useAutoTour } from "../../hooks/useAutoTour.js";
 import { DiffPanel } from "../diffs/DiffPanel.js";
+import { resolveChapterFiles } from "./chapterFiles.js";
 import type { PrTab } from "../../store/uiStore.js";
 import { useUiStore } from "../../store/uiStore.js";
 
@@ -33,10 +34,10 @@ export function TourBody({ tab, layout }: TourBodyProps): React.JSX.Element {
     () => tour?.chapters.find((chapter) => chapter.id === selectedChapterId) ?? tour?.chapters[0] ?? null,
     [selectedChapterId, tour]
   );
-  const selectedAnchorFile = useMemo(() => {
-    const anchorPath = selectedChapter?.diffAnchors[0]?.path ?? selectedChapter?.files[0] ?? null;
-    return anchorPath ? tab.bundle.changedFiles.find((file) => file.path === anchorPath) ?? null : null;
-  }, [selectedChapter, tab.bundle.changedFiles]);
+  const chapterFiles = useMemo(
+    () => resolveChapterFiles(selectedChapter, tab.bundle.changedFiles),
+    [selectedChapter, tab.bundle.changedFiles]
+  );
   const reviewedCount = tour ? tour.chapters.filter((chapter) => reviewed[chapter.id]).length : 0;
   const toggleReviewed = (id: string): void => setReviewed((prev) => ({ ...prev, [id]: !prev[id] }));
 
@@ -172,19 +173,22 @@ export function TourBody({ tab, layout }: TourBodyProps): React.JSX.Element {
           </article>
         ) : null}
         <section className="tour-diff" aria-label="Selected tour diff">
-          <DiffPanel
-            tabKey={tab.key}
-            pullRequest={tab.bundle.detail}
-            file={selectedAnchorFile}
-            layout={layout}
-            reviewThreads={tab.bundle.reviewThreads}
-            tourChapters={selectedChapter ? [selectedChapter] : []}
-            enableLsp={tab.mode === "managed"}
-            onOpenDefinition={(path, line) => {
-              openFileInTab(tab.key, path, line);
-              setTabViewMode(tab.key, "editor");
-            }}
-          />
+          {chapterFiles.map((file) => (
+            <DiffPanel
+              key={file.path}
+              tabKey={tab.key}
+              pullRequest={tab.bundle.detail}
+              file={file}
+              layout={layout}
+              reviewThreads={tab.bundle.reviewThreads}
+              tourChapters={selectedChapter ? [selectedChapter] : []}
+              enableLsp={tab.mode === "managed"}
+              onOpenDefinition={(path, line) => {
+                openFileInTab(tab.key, path, line);
+                setTabViewMode(tab.key, "editor");
+              }}
+            />
+          ))}
         </section>
       </section>
     </section>

@@ -119,33 +119,39 @@ const defaultOptions: AiPromptPrepOptions = {
 const tourTask = {
   role: "You are a senior code reviewer creating a guided PR review tour for another reviewer.",
   objective:
-    "Turn the PR context into a review path that helps the reviewer understand intent, inspect the highest-risk changes first, and know what to verify.",
+    "Tell the story of this change as a guided walkthrough: introduce the key idea, then lead the reviewer through the pieces in the order that builds understanding, so they grasp the author's intent, see how the parts connect, and know exactly what to scrutinize before approving. The tour is a narrative, not a file listing.",
   outputRequirements: [
     "Return exactly one JSON object and no markdown, prose wrapper, code fence, or comments.",
     "Match the ReviewTour shape. The caller will fill provider, repository, pullNumber, headSha, generatedAt, model, and id if omitted.",
     "Use stable ids such as chapter-1 and risk-1. Every dependency and graph edge endpoint must reference an existing chapter id.",
     "Only cite files present in the supplied topic clusters. Do not invent files, checks, threads, functions, APIs, or behavior.",
-    "Prefer concise, reviewer-facing text. Avoid generic summaries like 'review the changes' unless paired with specific evidence."
+    "Ground every claim in the supplied patch excerpts. When you name a type, function, field, flag, or constant, write it exactly as it appears in the diff and wrap it in backticks (for example `StreamPermit`, `reserve(n)`, `feature_flags.streaming_cache_v2`).",
+    "Prefer concise, reviewer-facing prose. Avoid generic summaries like 'review the changes' or 'updated logic'; every sentence should carry a specific, verifiable detail drawn from the patch."
   ],
   chapterGuidance: [
-    "Create 3-8 chapters unless the PR is trivial. Each chapter must represent a coherent topic, workflow, behavior, or review concern.",
+    "Create 3-8 chapters unless the PR is trivial. Each chapter must represent one coherent idea: a new primitive or concept, a replacement, a behavior change, a plumbing/wiring step, a configuration gate, or verification.",
     "Do not create one chapter per file. Do not name chapters after individual files, directories, or supplied cluster titles unless that is truly the user-facing topic.",
-    "Use the topic clusters as evidence groups, not as a required chapter outline. Combine files from different clusters when they implement the same feature or behavior.",
-    "Chapter titles should describe the review topic, for example 'Credential provider selection' or 'Settings persistence flow', not 'SettingsView.tsx' or 'src/ changes'.",
-    "Order chapters in the sequence a reviewer should follow: entry points and contracts first, risky behavior next, tests/config/generated artifacts last.",
-    "Chapter summaries should explain what changed and why it matters for review.",
-    "Set diffAnchors to the most useful files for that chapter, with side right unless the old side is specifically relevant.",
-    "Make reviewChecklist items concrete checks the reviewer can perform against the supplied files or patch excerpts."
+    "Use the topic clusters as evidence groups, not as a required chapter outline. Combine files from different clusters when they implement the same feature or behavior, and split one cluster into multiple chapters when it contains distinct ideas.",
+    "Name chapters after the key construct and its role, not the topic in the abstract. Prefer a name plus a short purpose clause, for example 'StreamPermit — the new backpressure primitive', 'RingCache replaces PerRequestBuffer', or 'Tiered eviction — protect long streams' — not 'SettingsView.tsx' or 'src/ changes', and not a bare cluster label.",
+    "Order chapters as a narrative the reviewer should follow in sequence: introduce the foundational new concept the rest builds on first, then what it replaces, then the plumbing that wires it in, then extensions and special cases, then configuration and feature gates, and finally tests and observability. Later chapters should build on the understanding established by earlier ones.",
+    "Write each summary as 2-4 sentences of prose that explain what the change introduces, how the mechanism works, and why it matters for review — the way you would narrate it to a colleague reading along. Reference the real symbols from the patch.",
+    "Set diffAnchors to the single most instructive file for the chapter — the place where the core mechanism lives — and include startLine/endLine when the patch reveals where the key construct is defined. Use side right unless the deleted (old) side is specifically what the reviewer must compare against.",
+    "Make reviewChecklist items concrete, chapter-specific checks the reviewer can perform against the supplied files or patch excerpts (for example 'Confirm `reserve` cannot deadlock if a `pressure` notify is missed'), not generic reminders."
   ],
   graphGuidance: [
-    "Build graph.nodes from chapters and include each chapter's primary files.",
-    "Use edges only when there is a meaningful relationship: dependency, extension, gating, verification, or risk.",
+    "Build graph.nodes from chapters and include each chapter's primary files; keep node.label aligned with the chapter title.",
+    "Connect the chapters into a single left-to-right build-order flow. Every edge points from the prerequisite/foundation chapter (from) to the chapter that builds on it (to), so foundations sit on the left and consumers, gates, and tests fall to the right.",
+    "Set each chapter's dependencies array to the ids of the chapters it directly builds on, consistent with the incoming graph edges, so the storyboard and the tour agree on ordering.",
+    "Choose the relation that best fits each link: dependency when one chapter uses another, extension when one specializes or adds a case to another, gating when a config or feature flag guards a chapter, verification when tests exercise a chapter, risk for a cross-cutting hazard link.",
+    "Prefer a clean graph: connect chapters that have a real relationship (avoid isolated nodes when a relationship exists) but prune redundant transitive edges so the flow stays readable.",
     "Use confidence between 0.35 and 0.95. Mark source as ai."
   ],
   riskGuidance: [
-    "Risk levels should reflect blast radius, broad changes, generated or large files, failing checks, diagnostics, unresolved threads, and sensitive contracts.",
-    "High risk means a reviewer should inspect the chapter before approving. Medium risk means targeted verification is useful.",
-    "riskSignals should summarize the most important cross-cutting risks, not duplicate every chapter."
+    "Risk levels should reflect blast radius, broad changes, generated or large files, failing checks, diagnostics, unresolved threads, and sensitive contracts such as new concurrency primitives, eviction or cache policy, and anything on a hot path.",
+    "High risk means a reviewer should rigorously inspect the chapter before approving; medium risk means targeted verification is useful.",
+    "Write riskReasons as specific 'here is the hazard and here is what to verify' notes, not generic labels — name the exact failure mode and the property to check (for example 'New concurrency primitive on the hot path; verify drop semantics under panic and that `reserve` cannot deadlock when a notify is missed').",
+    "When a chapter does two distinct things at once, call that out as a review concern so the reviewer can scrutinize each part separately.",
+    "riskSignals should surface only the few most important cross-cutting risks, each tied to specific files, and must not simply duplicate every chapter."
   ]
 } as const;
 
@@ -182,7 +188,7 @@ export function prepareAiReviewContext(input: AiPromptInput, options: Partial<Ai
   return {
     task: tourTask,
     schema:
-      "ReviewTour JSON object with chapters, graph, and riskSignals. Required chapter fields: id, title, summary, files, diffAnchors, changeStats, riskLevel, riskReasons, reviewChecklist, dependencies. graph.nodes must correspond to chapters; graph.edges must reference chapter ids.",
+      "ReviewTour JSON object with chapters, graph, and riskSignals. Required chapter fields: id, title, summary, files, diffAnchors, changeStats, riskLevel, riskReasons, reviewChecklist, dependencies. graph.nodes must correspond to chapters; graph.edges must reference chapter ids and point from the prerequisite chapter (from) to the chapter that builds on it (to), with relation one of dependency, extension, gating, verification, or risk.",
     limits,
     pullRequest: {
       title: input.pullRequest.title,

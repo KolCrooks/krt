@@ -1,11 +1,13 @@
 import { AlertTriangle, Ban, Bot, Check, FileIcon, RefreshCw, Sparkles } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useAutoTour } from "../../hooks/useAutoTour.js";
 import { useStoryboardLayout } from "../../hooks/useStoryboardLayout.js";
 import { DiffPanel } from "../diffs/DiffPanel.js";
+import { ChangedFileTree } from "../trees/ChangedFileTree.js";
 import type { PrTab } from "../../store/uiStore.js";
 import { useUiStore } from "../../store/uiStore.js";
 import type { TourChapter, TourGraph } from "../../../shared/schemas.js";
+import { resolveChapterFiles } from "./chapterFiles.js";
 
 type Relation = TourGraph["edges"][number]["relation"];
 
@@ -76,11 +78,21 @@ export function StoryboardBody({ tab, layout }: StoryboardBodyProps): React.JSX.
     () => tour?.chapters.find((chapter) => chapter.id === activeId) ?? null,
     [activeId, tour]
   );
-  const selectedAnchorFile = useMemo(() => {
-    const anchorPath = activeChapter?.diffAnchors[0]?.path ?? activeChapter?.files[0] ?? null;
-    return anchorPath ? tab.bundle.changedFiles.find((file) => file.path === anchorPath) ?? null : null;
-  }, [activeChapter, tab.bundle.changedFiles]);
+  const chapterFiles = useMemo(
+    () => resolveChapterFiles(activeChapter, tab.bundle.changedFiles),
+    [activeChapter, tab.bundle.changedFiles]
+  );
   const kindByNode = useMemo(() => (tour ? assignKinds(tour.graph) : new Map<string, Kind>()), [tour]);
+
+  const diffFileRefs = useRef<Record<string, HTMLElement | null>>({});
+  const [diffSelectedPath, setDiffSelectedPath] = useState<string | null>(null);
+  useEffect(() => {
+    setDiffSelectedPath(chapterFiles[0]?.path ?? null);
+  }, [chapterFiles]);
+  const onSelectDiffFile = useCallback((path: string): void => {
+    setDiffSelectedPath(path);
+    diffFileRefs.current[path]?.scrollIntoView({ block: "start", behavior: "smooth" });
+  }, []);
 
   if (!tour) {
     return (
@@ -267,6 +279,9 @@ export function StoryboardBody({ tab, layout }: StoryboardBodyProps): React.JSX.
                 <div className="storyboard-v2-card-title">
                   <strong style={{ textDecoration: isReviewed ? "line-through" : undefined }}>{node.label}</strong>
                 </div>
+                {!graphLayout.simplified && chapter?.summary ? (
+                  <p className="storyboard-v2-card-desc">{chapter.summary}</p>
+                ) : null}
                 <div className="storyboard-v2-card-foot">
                   <span className="mono storyboard-v2-card-files">{node.files.length}f</span>
                   {chapter ? (
@@ -304,15 +319,14 @@ export function StoryboardBody({ tab, layout }: StoryboardBodyProps): React.JSX.
         </aside>
       </div>
 
-      {selectedAnchorFile && activeChapter ? (
+      {chapterFiles.length > 0 && activeChapter ? (
         <section className="storyboard-v2-diff" aria-label="Selected chapter diff">
           <div className="storyboard-v2-diff-head">
             <span className="storyboard-v2-diff-eyebrow">Diff</span>
             <span className="storyboard-v2-diff-dot">·</span>
-            <span className="mono storyboard-v2-diff-path">{selectedAnchorFile.path}</span>
-            {activeChapter.files.length > 1 ? (
-              <span className="chip storyboard-v2-diff-more">+{activeChapter.files.length - 1} more</span>
-            ) : null}
+            <span className="mono storyboard-v2-diff-path">
+              {chapterFiles.length} {chapterFiles.length === 1 ? "file" : "files"}
+            </span>
             <span className="mono storyboard-v2-diff-counts">
               <span className="diff-counts-add">+{activeChapter.changeStats.additions}</span>{" "}
               <span className="diff-counts-del">−{activeChapter.changeStats.deletions}</span>
@@ -322,20 +336,38 @@ export function StoryboardBody({ tab, layout }: StoryboardBodyProps): React.JSX.
               chapter {tour.chapters.findIndex((entry) => entry.id === activeChapter.id) + 1} · {activeChapter.title}
             </span>
           </div>
-          <DiffPanel
-            tabKey={tab.key}
-            pullRequest={tab.bundle.detail}
-            file={selectedAnchorFile}
-            layout={layout}
-            reviewThreads={tab.bundle.reviewThreads}
-            tourChapters={[activeChapter]}
-            headerless
-            enableLsp={tab.mode === "managed"}
-            onOpenDefinition={(path, line) => {
-              openFileInTab(tab.key, path, line);
-              setTabViewMode(tab.key, "editor");
-            }}
-          />
+          <div className="storyboard-v2-diff-body">
+            {chapterFiles.length > 1 ? (
+              <aside className="storyboard-v2-diff-tree" aria-label="Chapter files">
+                <ChangedFileTree files={chapterFiles} selectedPath={diffSelectedPath} onSelectPath={onSelectDiffFile} />
+              </aside>
+            ) : null}
+            <div className="storyboard-v2-diff-stack">
+              {chapterFiles.map((file) => (
+                <div
+                  key={file.path}
+                  className="storyboard-v2-diff-file"
+                  ref={(el) => {
+                    diffFileRefs.current[file.path] = el;
+                  }}
+                >
+                  <DiffPanel
+                    tabKey={tab.key}
+                    pullRequest={tab.bundle.detail}
+                    file={file}
+                    layout={layout}
+                    reviewThreads={tab.bundle.reviewThreads}
+                    tourChapters={[activeChapter]}
+                    enableLsp={tab.mode === "managed"}
+                    onOpenDefinition={(path, line) => {
+                      openFileInTab(tab.key, path, line);
+                      setTabViewMode(tab.key, "editor");
+                    }}
+                  />
+                </div>
+              ))}
+            </div>
+          </div>
         </section>
       ) : null}
     </section>
@@ -386,9 +418,9 @@ function ChapterDetail({
       {chapter.files.length > 0 ? (
         <div className="storyboard-v2-detail-files">
           {chapter.files.map((path) => (
-            <button type="button" key={path} className="chip storyboard-v2-file-chip" onClick={() => onOpenFile(path)}>
+            <button type="button" key={path} className="chip storyboard-v2-file-chip" onClick={() => onOpenFile(path)} title={path}>
               <FileIcon size={9} aria-hidden="true" />
-              {path.split("/").pop()}
+              {path}
             </button>
           ))}
         </div>

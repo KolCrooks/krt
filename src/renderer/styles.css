@@ -5251,7 +5251,19 @@ button.rev-tab {
   overflow: hidden;
   text-decoration-color: var(--ink-4);
   -webkit-box-orient: vertical;
-  -webkit-line-clamp: 3;
+  -webkit-line-clamp: 2;
+}
+
+.storyboard-v2-card-desc {
+  color: var(--ink-3);
+  display: -webkit-box;
+  font-size: 10.5px;
+  line-height: 1.45;
+  margin: 0;
+  overflow: hidden;
+  padding: 0 10px 8px;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 4;
 }
 
 .storyboard-v2-card-foot {
@@ -5312,9 +5324,11 @@ button.rev-tab {
 
 .storyboard-v2-file-chip {
   cursor: pointer;
+  font-family: var(--font-mono);
   font-size: 10.5px;
   height: 20px;
   padding: 0 6px;
+  text-transform: none;
 }
 
 .storyboard-v2-detail-summary {
@@ -5472,6 +5486,43 @@ button.rev-tab {
 .storyboard-v2-diff-caption {
   color: var(--ink-4);
   font-size: 11px;
+}
+
+.storyboard-v2-diff-body {
+  display: flex;
+  min-height: 0;
+  min-width: 0;
+}
+
+.storyboard-v2-diff-tree {
+  align-self: flex-start;
+  background: var(--bg-soft);
+  border-right: 1px solid var(--line);
+  flex: 0 0 240px;
+  max-height: calc(100vh - 150px);
+  overflow: auto;
+  position: sticky;
+  top: 84px;
+}
+
+.storyboard-v2-diff-tree .file-tree-host {
+  height: auto;
+}
+
+.storyboard-v2-diff-stack {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.storyboard-v2-diff-file {
+  border-bottom: 1px solid var(--line-2);
+  min-width: 0;
+}
+
+.storyboard-v2-diff-file:last-child {
+  border-bottom: 0;
 }
 
 .storyboard-v2-skeleton {
