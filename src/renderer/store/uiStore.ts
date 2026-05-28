@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import type {
   DataMode,
+  OperationProgress,
   PullRequestBundle,
   PullRequestSummary,
   ReactionGroup,
@@ -51,6 +52,10 @@ export interface PrTab {
   selectedFilePath: string | null;
   openFilePaths: string[];
   tour: ReviewTour | null;
+  // In-flight AI tour generation, persisted on the tab so streaming survives
+  // switching tabs or views (the view components mount/unmount freely).
+  tourOperationId: string | null;
+  tourProgress: OperationProgress | null;
   viewMode: TabViewMode;
   reviewSubMode: ReviewSubMode;
   checkout: TabCheckout;
@@ -91,6 +96,8 @@ interface UiState {
   closeFile: (tabKey: string, path: string) => void;
   openFileInTab: (tabKey: string, path: string, line?: number) => void;
   setTour: (tabKey: string, tour: ReviewTour | null) => void;
+  setTourOperation: (tabKey: string, operationId: string | null) => void;
+  setTourProgress: (tabKey: string, progress: OperationProgress | null) => void;
   updateReviewThread: (tabKey: string, thread: ReviewThread) => void;
   appendReviewThreadComment: (tabKey: string, threadId: string, comment: ReviewComment) => void;
   setReviewCommentReactions: (tabKey: string, commentId: string, reactions: ReactionGroup[]) => void;
@@ -129,6 +136,8 @@ export const useUiStore = create<UiState>((set) => ({
         selectedFilePath: initialSelectedFilePath,
         openFilePaths: [],
         tour: null,
+        tourOperationId: null,
+        tourProgress: null,
         viewMode: "overview",
         reviewSubMode: "diff",
         checkout: { ...defaultCheckout },
@@ -140,7 +149,7 @@ export const useUiStore = create<UiState>((set) => ({
         tabs: existing
           ? state.tabs.map((candidate) =>
               candidate.key === key
-                ? { ...candidate, ...tab, tour: candidate.tour, viewMode: candidate.viewMode, reviewSubMode: candidate.reviewSubMode, checkout: candidate.checkout, finish: candidate.finish, editorNavigationTarget: candidate.editorNavigationTarget ?? null }
+                ? { ...candidate, ...tab, tour: candidate.tour, tourOperationId: candidate.tourOperationId, tourProgress: candidate.tourProgress, viewMode: candidate.viewMode, reviewSubMode: candidate.reviewSubMode, checkout: candidate.checkout, finish: candidate.finish, editorNavigationTarget: candidate.editorNavigationTarget ?? null }
                 : candidate
             )
           : [...state.tabs, tab],
@@ -218,6 +227,8 @@ export const useUiStore = create<UiState>((set) => ({
             selectedFilePath,
             openFilePaths: openFilePaths.length > 0 ? openFilePaths : selectedFilePath ? [selectedFilePath] : [],
             tour: headShaChanged ? null : tab.tour,
+            tourOperationId: headShaChanged ? null : tab.tourOperationId,
+            tourProgress: headShaChanged ? null : tab.tourProgress,
             editorNavigationTarget: headShaChanged ? null : tab.editorNavigationTarget
           };
         })
@@ -275,6 +286,14 @@ export const useUiStore = create<UiState>((set) => ({
   setTour: (tabKeyToUpdate, tour) =>
     set((state) => ({
       tabs: state.tabs.map((tab) => (tab.key === tabKeyToUpdate ? { ...tab, tour } : tab))
+    })),
+  setTourOperation: (tabKeyToUpdate, operationId) =>
+    set((state) => ({
+      tabs: state.tabs.map((tab) => (tab.key === tabKeyToUpdate ? { ...tab, tourOperationId: operationId } : tab))
+    })),
+  setTourProgress: (tabKeyToUpdate, progress) =>
+    set((state) => ({
+      tabs: state.tabs.map((tab) => (tab.key === tabKeyToUpdate ? { ...tab, tourProgress: progress } : tab))
     })),
   updateReviewThread: (tabKeyToUpdate, thread) =>
     set((state) => ({

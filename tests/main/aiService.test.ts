@@ -37,109 +37,57 @@ describe("AiService", () => {
     vi.unstubAllGlobals();
   });
 
-  it("generates and caches a deterministic tour when AI is disabled", async () => {
+  it("reports an error instead of falling back when AI is disabled", async () => {
     const db = openDatabase(":memory:");
     const service = new AiService(db, new Keychain("test"), () => defaultAppSettings);
 
-    const tour = await service.generateTour({
-      pullRequest,
-      changedFiles: [
-        {
-          path: "src/App.tsx",
-          status: "modified",
-          additions: 10,
-          deletions: 2,
-          changes: 12,
-          isLarge: false,
-          isGenerated: false,
-          reviewStatus: "unreviewed",
-          annotations: 0,
-          diagnostics: 0
-        }
-      ],
-      timeline: [],
-      reviewThreads: [],
-      checks: []
-    });
-
-    expect(tour.chapters).toHaveLength(1);
-    expect(service.getCachedTour(pullRequest.repository, pullRequest.number, pullRequest.headSha)?.id).toBe(tour.id);
+    await expect(
+      service.generateTour({
+        pullRequest,
+        changedFiles: [
+          {
+            path: "src/App.tsx",
+            status: "modified",
+            additions: 10,
+            deletions: 2,
+            changes: 12,
+            isLarge: false,
+            isGenerated: false,
+            reviewStatus: "unreviewed",
+            annotations: 0,
+            diagnostics: 0
+          }
+        ],
+        timeline: [],
+        reviewThreads: [],
+        checks: []
+      })
+    ).rejects.toMatchObject({ code: "ai_disabled" });
+    expect(service.getCachedTour(pullRequest.repository, pullRequest.number, pullRequest.headSha)).toBeNull();
   });
 
-  it("regenerates a tour when forced even if a cached tour exists", async () => {
-    const service = new AiService(openDatabase(":memory:"), new Keychain("test"), () => defaultAppSettings);
-    const input = {
-      pullRequest,
-      changedFiles: [
-        {
-          path: "src/App.tsx",
-          status: "modified" as const,
-          additions: 10,
-          deletions: 2,
-          changes: 12,
-          isLarge: false,
-          isGenerated: false,
-          reviewStatus: "unreviewed" as const,
-          annotations: 0,
-          diagnostics: 0
-        }
-      ],
-      timeline: [],
-      reviewThreads: [],
-      checks: []
-    };
+  it("reports an error when a configured provider request fails", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => ({ ok: false, status: 503 }) as Response)
+    );
+    const service = configuredAiService("anthropic", "claude-sonnet-4-5");
 
-    const firstTour = await service.generateTour(input);
-    const forcedTour = await service.generateTour({ ...input, force: true });
-
-    expect(forcedTour.id).not.toBe(firstTour.id);
-    expect(service.getCachedTour(pullRequest.repository, pullRequest.number, pullRequest.headSha)?.id).toBe(forcedTour.id);
+    await expect(service.generateTour(aiInput())).rejects.toMatchObject({ code: "ai_provider_error" });
   });
 
-  it("uses review-topic titles for deterministic fallback chapters", async () => {
-    const service = new AiService(openDatabase(":memory:"), new Keychain("test"), () => defaultAppSettings);
+  it("re-requests the provider when forced even if a cached tour exists", async () => {
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({ content: [{ type: "text", text: providerTourJson() }] })
+    }) as Response);
+    vi.stubGlobal("fetch", fetchMock);
+    const service = configuredAiService("anthropic", "claude-sonnet-4-5");
 
-    const tour = await service.generateTour({
-      pullRequest,
-      changedFiles: [
-        {
-          path: "src/shared/schemas.ts",
-          status: "modified",
-          additions: 4,
-          deletions: 1,
-          changes: 5,
-          patch: '+ keyProvider: aiKeyProviderSchema.default("keychain")',
-          language: "typescript",
-          isLarge: false,
-          isGenerated: false,
-          reviewStatus: "unreviewed",
-          annotations: 0,
-          diagnostics: 0
-        },
-        {
-          path: "src/renderer/components/SettingsView.tsx",
-          status: "modified",
-          additions: 8,
-          deletions: 2,
-          changes: 10,
-          patch: "+ <select value={settings.github.tokenProvider}>",
-          language: "typescript",
-          isLarge: false,
-          isGenerated: false,
-          reviewStatus: "unreviewed",
-          annotations: 0,
-          diagnostics: 0
-        }
-      ],
-      timeline: [],
-      reviewThreads: [],
-      checks: []
-    });
+    await service.generateTour(aiInput());
+    await service.generateTour({ ...aiInput(), force: true });
 
-    expect(tour.chapters).toHaveLength(1);
-    expect(tour.chapters[0]?.title).toBe("Settings and credential provider flow");
-    expect(tour.chapters[0]?.files.sort()).toEqual(["src/renderer/components/SettingsView.tsx", "src/shared/schemas.ts"]);
-    expect(tour.chapters.some((chapter) => chapter.title.endsWith("/ changes"))).toBe(false);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
   it("redacts prompt input before calling a configured AI provider", async () => {
@@ -159,39 +107,41 @@ describe("AiService", () => {
       })
     );
 
-    await service.generateTour({
-      pullRequest: {
-        ...pullRequest,
-        body: "Use Authorization: Bearer ghp_abcdefghijklmnopqrstuvwxyz123456"
-      },
-      changedFiles: [
-        {
-          path: "src/secrets.ts",
-          status: "modified",
-          additions: 1,
-          deletions: 0,
-          changes: 1,
-          patch: "+ const apiKey = 'sk-project_abcdefghijklmnopqrstuvwxyz123456';",
-          isLarge: false,
-          isGenerated: false,
-          reviewStatus: "unreviewed",
-          annotations: 0,
-          diagnostics: 0
-        }
-      ],
-      timeline: [
-        {
-          id: "event",
-          kind: "comment",
-          title: "token=super-secret-value",
-          createdAt: "2026-05-22T00:00:00.000Z",
-          severity: "info",
-          reactions: []
-        }
-      ],
-      reviewThreads: [],
-      checks: []
-    });
+    await expect(
+      service.generateTour({
+        pullRequest: {
+          ...pullRequest,
+          body: "Use Authorization: Bearer ghp_abcdefghijklmnopqrstuvwxyz123456"
+        },
+        changedFiles: [
+          {
+            path: "src/secrets.ts",
+            status: "modified",
+            additions: 1,
+            deletions: 0,
+            changes: 1,
+            patch: "+ const apiKey = 'sk-project_abcdefghijklmnopqrstuvwxyz123456';",
+            isLarge: false,
+            isGenerated: false,
+            reviewStatus: "unreviewed",
+            annotations: 0,
+            diagnostics: 0
+          }
+        ],
+        timeline: [
+          {
+            id: "event",
+            kind: "comment",
+            title: "token=super-secret-value",
+            createdAt: "2026-05-22T00:00:00.000Z",
+            severity: "info",
+            reactions: []
+          }
+        ],
+        reviewThreads: [],
+        checks: []
+      })
+    ).rejects.toMatchObject({ code: "ai_provider_error" });
 
     expect(fetchMock).toHaveBeenCalledOnce();
     const [, request] = fetchMock.mock.calls[0] ?? [];
@@ -230,26 +180,28 @@ describe("AiService", () => {
       })
     );
 
-    await service.generateTour({
-      pullRequest,
-      changedFiles: [
-        {
-          path: "src/App.tsx",
-          status: "modified",
-          additions: 1,
-          deletions: 0,
-          changes: 1,
-          isLarge: false,
-          isGenerated: false,
-          reviewStatus: "unreviewed",
-          annotations: 0,
-          diagnostics: 0
-        }
-      ],
-      timeline: [],
-      reviewThreads: [],
-      checks: []
-    });
+    await expect(
+      service.generateTour({
+        pullRequest,
+        changedFiles: [
+          {
+            path: "src/App.tsx",
+            status: "modified",
+            additions: 1,
+            deletions: 0,
+            changes: 1,
+            isLarge: false,
+            isGenerated: false,
+            reviewStatus: "unreviewed",
+            annotations: 0,
+            diagnostics: 0
+          }
+        ],
+        timeline: [],
+        reviewThreads: [],
+        checks: []
+      })
+    ).rejects.toMatchObject({ code: "ai_provider_error" });
 
     expect(getCommandSecret).toHaveBeenCalledWith("security find-generic-password -w");
     expect(fetchMock).toHaveBeenCalledOnce();
@@ -298,6 +250,104 @@ describe("AiService", () => {
       "x-api-key": "test-ai-key",
       "anthropic-version": "2023-06-01"
     });
+  });
+
+  it("streams partial tours as chapters arrive, then returns the full tour", async () => {
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      body: anthropicSseStream(twoChapterTourJson(), 24)
+    }) as unknown as Response);
+    vi.stubGlobal("fetch", fetchMock);
+    const service = configuredAiService("anthropic", "claude-sonnet-4-5");
+
+    const streamedChapterCounts: number[] = [];
+    const tour = await service.generateTour(aiInput(), {
+      onProgress: (progress) => {
+        if (progress.tour) {
+          streamedChapterCounts.push(progress.tour.chapters.length);
+        }
+      }
+    });
+
+    // Final tour is fully parsed with both chapters and the graph edge.
+    expect(tour.chapters).toHaveLength(2);
+    expect(tour.graph.edges).toHaveLength(1);
+    // The UI received the story incrementally: one chapter before two.
+    expect(streamedChapterCounts).toContain(1);
+    expect(Math.max(...streamedChapterCounts)).toBe(2);
+    expect(streamedChapterCounts).toEqual([...streamedChapterCounts].sort((a, b) => a - b));
+  });
+
+  it("salvages chapters when the model's graph deviates from the schema", async () => {
+    const deviantTour = JSON.parse(twoChapterTourJson()) as Record<string, unknown>;
+    // Model emits out-of-enum relation/source and a percentage confidence, plus a
+    // risk signal with an invalid level — strict parsing of the whole tour fails.
+    (deviantTour as { graph: { edges: unknown[] } }).graph.edges = [
+      { id: "edge-1", from: "chapter-1", to: "chapter-2", relation: "depends_on", confidence: 80, source: "model" }
+    ];
+    (deviantTour as { riskSignals: unknown[] }).riskSignals = [
+      { id: "risk-1", level: "critical", title: "bad", files: [], reason: "invalid level" }
+    ];
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({ content: [{ type: "text", text: JSON.stringify(deviantTour) }] })
+    }) as unknown as Response);
+    vi.stubGlobal("fetch", fetchMock);
+    const service = configuredAiService("anthropic", "claude-sonnet-4-5");
+
+    const tour = await service.generateTour(aiInput());
+
+    expect(tour.chapters).toHaveLength(2);
+    // The bad edge is coerced into a valid relation, confidence, and source.
+    expect(tour.graph.edges).toEqual([
+      expect.objectContaining({ from: "chapter-1", to: "chapter-2", relation: "dependency", confidence: 0.8, source: "ai" })
+    ]);
+    // The invalid risk signal is dropped rather than failing the whole tour.
+    expect(tour.riskSignals).toEqual([]);
+  });
+
+  it("salvages complete chapters when the streamed JSON is truncated", async () => {
+    const full = twoChapterTourJson();
+    // Drop everything from the graph onward, as if the response was cut off.
+    const truncated = full.slice(0, full.indexOf('],"graph"') + 1);
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({ content: [{ type: "text", text: truncated }] })
+    }) as unknown as Response);
+    vi.stubGlobal("fetch", fetchMock);
+    const service = configuredAiService("anthropic", "claude-sonnet-4-5");
+
+    const tour = await service.generateTour(aiInput());
+
+    expect(tour.chapters).toHaveLength(2);
+    expect(tour.graph.nodes).toHaveLength(2);
+    expect(tour.graph.edges).toEqual([]);
+  });
+
+  it("asks the model to correct an unparseable response instead of regenerating", async () => {
+    const responses = [
+      // First response is not a tour at all — nothing to salvage.
+      { content: [{ type: "text", text: "Sure! Here is the review tour you asked for." }] },
+      // Correction round returns a valid tour.
+      { content: [{ type: "text", text: twoChapterTourJson() }] }
+    ];
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      json: async () => responses.shift() ?? responses[responses.length - 1]
+    }) as unknown as Response);
+    vi.stubGlobal("fetch", fetchMock);
+    const service = configuredAiService("anthropic", "claude-sonnet-4-5");
+
+    const tour = await service.generateTour(aiInput());
+
+    expect(tour.chapters).toHaveLength(2);
+    // One generation call + one correction call — not a second full generation.
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    // The correction request disables thinking and streaming.
+    const correctionCall = fetchMock.mock.calls[1] as unknown as [unknown, RequestInit];
+    const correctionBody = JSON.parse(String(correctionCall[1]?.body)) as { thinking?: unknown; stream?: unknown };
+    expect(correctionBody.thinking).toBeUndefined();
+    expect(correctionBody.stream).toBeUndefined();
   });
 
   it("generates a tour with Google Gemini generateContent responses", async () => {
@@ -445,6 +495,75 @@ function aiInput() {
     reviewThreads: [],
     checks: []
   };
+}
+
+function anthropicSseStream(fullJson: string, chunkSize: number): ReadableStream<Uint8Array> {
+  const encoder = new TextEncoder();
+  const lines: string[] = [];
+  for (let index = 0; index < fullJson.length; index += chunkSize) {
+    const piece = fullJson.slice(index, index + chunkSize);
+    lines.push(`data: ${JSON.stringify({ type: "content_block_delta", delta: { type: "text_delta", text: piece } })}\n`);
+  }
+  lines.push('data: {"type":"message_stop"}\n');
+
+  let cursor = 0;
+  return new ReadableStream<Uint8Array>({
+    pull(controller) {
+      if (cursor < lines.length) {
+        controller.enqueue(encoder.encode(lines[cursor]));
+        cursor += 1;
+      } else {
+        controller.close();
+      }
+    }
+  });
+}
+
+function twoChapterTourJson(): string {
+  return JSON.stringify({
+    id: "provider-tour",
+    generatedAt: "2026-05-22T00:00:00.000Z",
+    chapters: [
+      {
+        id: "chapter-1",
+        title: "Foundation",
+        summary: "Introduce the primitive.",
+        files: ["src/App.tsx"],
+        diffAnchors: [{ path: "src/App.tsx", side: "right" }],
+        changeStats: { additions: 10, deletions: 2, files: 1 },
+        riskLevel: "low",
+        riskReasons: [],
+        reviewChecklist: ["Check the shell."],
+        dependencies: [],
+        generatedAt: "2026-05-22T00:00:00.000Z",
+        model: "provider-model",
+        headSha: pullRequest.headSha
+      },
+      {
+        id: "chapter-2",
+        title: "Consumer",
+        summary: "Wire the primitive in.",
+        files: ["src/main.tsx"],
+        diffAnchors: [{ path: "src/main.tsx", side: "right" }],
+        changeStats: { additions: 4, deletions: 0, files: 1 },
+        riskLevel: "medium",
+        riskReasons: [],
+        reviewChecklist: ["Trace the call site."],
+        dependencies: ["chapter-1"],
+        generatedAt: "2026-05-22T00:00:00.000Z",
+        model: "provider-model",
+        headSha: pullRequest.headSha
+      }
+    ],
+    graph: {
+      nodes: [
+        { id: "chapter-1", label: "Foundation", riskLevel: "low", files: ["src/App.tsx"] },
+        { id: "chapter-2", label: "Consumer", riskLevel: "medium", files: ["src/main.tsx"] }
+      ],
+      edges: [{ id: "edge-1", from: "chapter-1", to: "chapter-2", relation: "dependency", confidence: 0.8, source: "ai" }]
+    },
+    riskSignals: []
+  });
 }
 
 function providerTourJson(): string {

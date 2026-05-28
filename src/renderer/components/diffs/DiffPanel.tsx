@@ -7,6 +7,7 @@ import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { krtClient } from "../../api/client.js";
 import { useLspCodeInteractions } from "../../hooks/useLspCodeInteractions.js";
 import { renderMarkdown } from "../../lib/markdown.js";
+import { cropPatchToFocusRanges, type FocusRange } from "./cropPatch.js";
 import { buildDiffAnnotations, type DiffAnnotation } from "../../../shared/diffAnnotations.js";
 import type { ChangedFile, ChangedFileStatus, PullRequestDetail, ReviewDraftComment, ReviewThread, TourChapter } from "../../../shared/schemas.js";
 import { ThreadCard, threadItemFromReviewThread } from "../PullRequestOverview.js";
@@ -22,6 +23,8 @@ interface DiffPanelProps {
   enableLsp?: boolean;
   tabKey?: string;
   onOpenDefinition?: (path: string, line: number) => void;
+  /** Crop the diff to only the hunks covered by tourChapters' diffAnchors for this file. */
+  cropToChapters?: boolean;
 }
 
 const EMPTY_DRAFT_COMMENTS: [] = [];
@@ -49,7 +52,8 @@ export const DiffPanel = memo(function DiffPanel({
   headerless = false,
   enableLsp = false,
   tabKey,
-  onOpenDefinition
+  onOpenDefinition,
+  cropToChapters = false
 }: DiffPanelProps): React.JSX.Element {
   const [largeLoadPath, setLargeLoadPath] = useState<string | null>(null);
   const [fullContextRequested, setFullContextRequested] = useState(false);
@@ -106,12 +110,34 @@ export const DiffPanel = memo(function DiffPanel({
     setDraftBody("");
   }, [file?.path, pullRequest.headSha]);
   const patch = patchQuery.data?.patch ?? file?.patch ?? "";
-  const renderablePatch = useMemo(() => (file && patch ? buildRenderablePatch(file, patch) : ""), [file, patch]);
+  const focusRanges = useMemo<FocusRange[]>(() => {
+    if (!cropToChapters || !file) {
+      return [];
+    }
+    const ranges: FocusRange[] = [];
+    for (const chapter of tourChapters) {
+      for (const anchor of chapter.diffAnchors) {
+        if (anchor.path === file.path && anchor.startLine) {
+          ranges.push({ start: anchor.startLine, end: anchor.endLine ?? anchor.startLine, side: anchor.side });
+        }
+      }
+    }
+    return ranges;
+  }, [cropToChapters, file, tourChapters]);
+  const focusKey = useMemo(() => focusRanges.map((range) => `${range.side}${range.start}-${range.end}`).join("|"), [focusRanges]);
+  const renderablePatch = useMemo(() => {
+    if (!file || !patch) {
+      return "";
+    }
+    const base = buildRenderablePatch(file, patch);
+    return focusRanges.length > 0 ? cropPatchToFocusRanges(base, focusRanges) : base;
+  }, [file, patch, focusRanges]);
   const patchDiffCacheKey = useMemo(
-    () => (file && patch ? makePatchDiffCacheKey(pullRequest, file, patch) : ""),
+    () => (file && patch ? `${makePatchDiffCacheKey(pullRequest, file, patch)}:focus:${focusKey}` : ""),
     [
       file,
       patch,
+      focusKey,
       pullRequest.baseRef,
       pullRequest.baseSha,
       pullRequest.headSha,

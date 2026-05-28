@@ -37,7 +37,6 @@ import type {
   PullRequestDetail,
   ReactionContent,
   ReactionGroup,
-  RepositoryRef,
   ReviewComment,
   ReviewThread
 } from "../../shared/schemas.js";
@@ -51,21 +50,18 @@ export function PullRequestOverview({ tab }: PullRequestOverviewProps): React.JS
   const setReviewSubMode = useUiStore((state) => state.setReviewSubMode);
   const updatePrTab = useUiStore((state) => state.updatePrTab);
   const setTour = useUiStore((state) => state.setTour);
+  const setTourOperation = useUiStore((state) => state.setTourOperation);
+  const setTourProgress = useUiStore((state) => state.setTourProgress);
   const detail = tab.bundle.detail;
   const [refreshProgress, setRefreshProgress] = useState<OperationProgress | null>(null);
   const [refreshOperationId, setRefreshOperationId] = useState<string | null>(null);
-  const [tourRefreshProgress, setTourRefreshProgress] = useState<OperationProgress | null>(null);
-  const [tourRefreshOperationId, setTourRefreshOperationId] = useState<string | null>(null);
-  const [tourRefreshTarget, setTourRefreshTarget] = useState<{ repository: RepositoryRef; number: number; headSha: string } | null>(null);
   const [lastSync, setLastSync] = useState<string>("just now");
+  const handledRefreshOp = useRef<string | null>(null);
 
   const refreshMutation = useMutation({
     onMutate: () => {
       setRefreshProgress(null);
       setRefreshOperationId(null);
-      setTourRefreshProgress(null);
-      setTourRefreshOperationId(null);
-      setTourRefreshTarget(null);
     },
     mutationFn: () =>
       krtClient.pullRequests.startRefresh({
@@ -98,114 +94,64 @@ export function PullRequestOverview({ tab }: PullRequestOverviewProps): React.JS
     if (!refreshOperationId || !refreshProgress?.done || refreshProgress.cancelled || refreshProgress.phase !== "complete") {
       return undefined;
     }
+    // Handle each completed refresh exactly once. The refresh-state resets are
+    // deferred to the `finally` below so they cannot flip `active` and cancel
+    // the forced tour regeneration before it has been tracked.
+    if (handledRefreshOp.current === refreshOperationId) {
+      return undefined;
+    }
+    handledRefreshOp.current = refreshOperationId;
     let active = true;
-    void krtClient.pullRequests.refreshResult({ operationId: refreshOperationId }).then((bundle) => {
-      if (!active || !bundle) {
-        return;
-      }
-      updatePrTab(bundle);
-      setTour(tab.key, null);
-      setLastSync("just now");
-      setRefreshOperationId(null);
-      setRefreshProgress(null);
-      setTourRefreshTarget({
-        repository: bundle.detail.repository,
-        number: bundle.detail.number,
-        headSha: bundle.detail.headSha
-      });
-      void krtClient.ai
-        .startTourGeneration({
+    void (async () => {
+      try {
+        const bundle = await krtClient.pullRequests.refreshResult({ operationId: refreshOperationId });
+        if (!active || !bundle) {
+          return;
+        }
+        updatePrTab(bundle);
+        setLastSync("just now");
+        // Force-regenerate the tour for the refreshed bundle. Ownership of the
+        // operation is handed to the store so the always-mounted
+        // TourGenerationManager keeps streaming it even if this overview (or the
+        // whole tab) is unmounted while it runs.
+        setTour(tab.key, null);
+        setTourProgress(tab.key, null);
+        const result = await krtClient.ai.startTourGeneration({
           pullRequest: bundle.detail,
           changedFiles: bundle.changedFiles,
           timeline: bundle.timeline,
           reviewThreads: bundle.reviewThreads,
           checks: bundle.checks,
           force: true
-        })
-        .then((result) => {
-          if (!active) {
-            return;
-          }
-          setTourRefreshOperationId(result.operationId);
-          if (result.cachedTour) {
-            setTour(tab.key, result.cachedTour);
-            setTourRefreshProgress(null);
-            setTourRefreshOperationId(null);
-            setTourRefreshTarget(null);
-            return;
-          }
-          void krtClient.operations.progressSnapshot({ operationId: result.operationId }).then((progress) => {
-            if (active && progress) {
-              setTourRefreshProgress(progress);
-            }
-          });
-        })
-        .catch(() => {
-          if (!active) {
-            return;
-          }
-          setTourRefreshProgress(null);
-          setTourRefreshOperationId(null);
-          setTourRefreshTarget(null);
         });
-    });
-    return () => {
-      active = false;
-    };
-  }, [refreshOperationId, refreshProgress?.cancelled, refreshProgress?.done, refreshProgress?.phase, setTour, tab.key, updatePrTab]);
-
-  useEffect(() => {
-    if (!tourRefreshOperationId) {
-      return undefined;
-    }
-    return krtClient.operations.onProgress((progress) => {
-      if (progress.operationId === tourRefreshOperationId) {
-        setTourRefreshProgress(progress);
+        if (result.cachedTour) {
+          setTour(tab.key, result.cachedTour);
+          setTourOperation(tab.key, null);
+        } else {
+          setTourOperation(tab.key, result.operationId);
+          const progress = await krtClient.operations.progressSnapshot({ operationId: result.operationId });
+          if (progress) {
+            setTourProgress(tab.key, progress);
+          }
+        }
+      } catch {
+        // Leave the tour cleared; the user can retry from the tour view.
+      } finally {
+        if (active) {
+          setRefreshOperationId(null);
+          setRefreshProgress(null);
+        }
       }
-    });
-  }, [tourRefreshOperationId]);
-
-  useEffect(() => {
-    if (!tourRefreshOperationId || !tourRefreshTarget || !tourRefreshProgress?.done) {
-      return undefined;
-    }
-    let active = true;
-    if (tourRefreshProgress.cancelled || tourRefreshProgress.phase !== "complete") {
-      setTourRefreshOperationId(null);
-      setTourRefreshProgress(null);
-      setTourRefreshTarget(null);
-      return undefined;
-    }
-    void krtClient.ai
-      .getCachedTour(tourRefreshTarget)
-      .then((tour) => {
-        if (!active) {
-          return;
-        }
-        if (tour) {
-          setTour(tab.key, tour);
-        }
-        setTourRefreshOperationId(null);
-        setTourRefreshProgress(null);
-        setTourRefreshTarget(null);
-      })
-      .catch(() => {
-        if (!active) {
-          return;
-        }
-        setTourRefreshOperationId(null);
-        setTourRefreshProgress(null);
-        setTourRefreshTarget(null);
-      });
+    })();
     return () => {
       active = false;
     };
-  }, [setTour, tab.key, tourRefreshOperationId, tourRefreshProgress?.cancelled, tourRefreshProgress?.done, tourRefreshProgress?.phase, tourRefreshTarget]);
+  }, [refreshOperationId, refreshProgress?.cancelled, refreshProgress?.done, refreshProgress?.phase, setTour, setTourOperation, setTourProgress, tab.key, updatePrTab]);
 
   const refreshActive =
     refreshMutation.isPending ||
     (Boolean(refreshOperationId) && (!refreshProgress || !refreshProgress.done)) ||
-    Boolean(tourRefreshOperationId);
+    Boolean(tab.tourOperationId);
   const totalFiles = tab.bundle.changedFiles.length || detail.changedFileCount;
   const stateChip = stateBadge(detail.state, detail.draft);
   const reviewerSummary = detail.reviewers.slice(0, 4);

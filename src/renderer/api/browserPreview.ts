@@ -206,7 +206,16 @@ export function createBrowserPreviewApi(): KrtApi {
   const settings: AppSettings = {
     appearance: { accentColor: "#4f46e5", density: "compact" },
     data: { preferredMode: "auto", managedRepoStorage: null, worktreeCacheSizeGb: 20 },
-    ai: { enabled: false, provider: "disabled", model: "", keyProvider: "keychain", keyCommand: "" },
+    ai: {
+      enabled: false,
+      provider: "disabled",
+      model: "",
+      keyProvider: "keychain",
+      keyCommand: "",
+      thinkingEnabled: true,
+      maxOutputTokens: 16_000,
+      thinkingBudgetTokens: 8_000
+    },
     github: { configured: false, login: null, tokenProvider: "keychain" },
     updates: { enabled: false, channel: "stable", feedUrl: null },
     extensions: {},

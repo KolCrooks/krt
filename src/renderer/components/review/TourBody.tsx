@@ -3,6 +3,7 @@ import { useEffect, useMemo, useState } from "react";
 import { relativeRiskClass } from "../../lib/format.js";
 import { useAutoTour } from "../../hooks/useAutoTour.js";
 import { DiffPanel } from "../diffs/DiffPanel.js";
+import { renderMarkdown, renderInlineMarkdown } from "../../lib/markdown.js";
 import { resolveChapterFiles } from "./chapterFiles.js";
 import type { PrTab } from "../../store/uiStore.js";
 import { useUiStore } from "../../store/uiStore.js";
@@ -96,7 +97,10 @@ export function TourBody({ tab, layout }: TourBodyProps): React.JSX.Element {
                   {isReviewed ? "✓" : ""}
                 </span>
                 <div className="tour-chapter-text">
-                  <strong className={isReviewed ? "is-done" : undefined}>{chapter.title}</strong>
+                  <strong
+                    className={isReviewed ? "is-done" : undefined}
+                    dangerouslySetInnerHTML={{ __html: renderInlineMarkdown(chapter.title) }}
+                  />
                   <span>
                     <span className="mono">{String(index + 1).padStart(2, "0")}</span> · {chapter.changeStats.files} files ·{" "}
                     <span className="diff-counts-add">+{chapter.changeStats.additions}</span>{" "}
@@ -106,6 +110,15 @@ export function TourBody({ tab, layout }: TourBodyProps): React.JSX.Element {
               </button>
             );
           })}
+          {auto.isGenerating ? (
+            <div className="tour-chapter is-loading" aria-label="More chapters loading">
+              <span className="tour-chapter-check" aria-hidden="true" />
+              <div className="tour-chapter-text">
+                <span className="skeleton skeleton-line skeleton-line-wide" />
+                <span className="skeleton skeleton-line skeleton-line-narrow" />
+              </div>
+            </div>
+          ) : null}
         </div>
         <div className="tour-rail-footer">
           <button
@@ -151,8 +164,8 @@ export function TourBody({ tab, layout }: TourBodyProps): React.JSX.Element {
               <span>Chapter {tour.chapters.findIndex((chapter) => chapter.id === selectedChapter.id) + 1} of {tour.chapters.length}</span>
               <span className={relativeRiskClass(selectedChapter.riskLevel)}>{selectedChapter.riskLevel}</span>
             </div>
-            <h2>{selectedChapter.title}</h2>
-            <p>{selectedChapter.summary}</p>
+            <h2 dangerouslySetInnerHTML={{ __html: renderInlineMarkdown(selectedChapter.title) }} />
+            <div className="markdown tour-detail-summary" dangerouslySetInnerHTML={{ __html: renderMarkdown(selectedChapter.summary) }} />
             <div className="file-pills">
               {selectedChapter.files.slice(0, 8).map((path) => (
                 <button
@@ -168,7 +181,11 @@ export function TourBody({ tab, layout }: TourBodyProps): React.JSX.Element {
               ))}
             </div>
             <ul className="checklist">
-              {selectedChapter.reviewChecklist.map((item) => <li key={item}>{item}</li>)}
+              {selectedChapter.reviewChecklist.map((item) => (
+                <li key={item}>
+                  <div className="markdown compact" dangerouslySetInnerHTML={{ __html: renderMarkdown(item) }} />
+                </li>
+              ))}
             </ul>
           </article>
         ) : null}
@@ -182,6 +199,7 @@ export function TourBody({ tab, layout }: TourBodyProps): React.JSX.Element {
               layout={layout}
               reviewThreads={tab.bundle.reviewThreads}
               tourChapters={selectedChapter ? [selectedChapter] : []}
+              cropToChapters
               enableLsp={tab.mode === "managed"}
               onOpenDefinition={(path, line) => {
                 openFileInTab(tab.key, path, line);

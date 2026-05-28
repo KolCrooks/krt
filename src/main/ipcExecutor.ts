@@ -565,7 +565,8 @@ function createIpcHandlers(context: IpcHandlerContext): HandlerMap {
                 message: progress.message,
                 percent: progress.percent,
                 done: false,
-                cancelled: context.operations.get(operationId)?.cancelled ?? false
+                cancelled: context.operations.get(operationId)?.cancelled ?? false,
+                tour: progress.tour
               })
           });
           const current = context.operations.get(operationId);
@@ -598,9 +599,15 @@ function createIpcHandlers(context: IpcHandlerContext): HandlerMap {
             riskSignalCount: tour.riskSignals.length
           });
         } catch (error) {
+          const cancelled = context.operations.get(operationId)?.cancelled ?? false;
+          const failureMessage = cancelled
+            ? "AI tour generation was cancelled"
+            : error instanceof AppError
+              ? error.message
+              : "AI tour generation failed";
           context.operations.markFailed(
             operationId,
-            context.operations.get(operationId)?.cancelled ? "AI tour generation was cancelled" : "AI tour generation failed",
+            failureMessage,
             error instanceof Error ? error.message : String(error)
           );
           recordPerformance(context, "ai.generateTour", startedAt, {

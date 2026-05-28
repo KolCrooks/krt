@@ -88,7 +88,10 @@ const settingsUpdateInput = z.object({
       model: z.string(),
       baseUrl: z.string().url().optional(),
       keyProvider: aiKeyProviderSchema,
-      keyCommand: z.string()
+      keyCommand: z.string(),
+      thinkingEnabled: z.boolean(),
+      maxOutputTokens: z.number().int().min(1_024).max(64_000),
+      thinkingBudgetTokens: z.number().int().min(1_024).max(60_000)
     })
     .partial()
     .optional(),

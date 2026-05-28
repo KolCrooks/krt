@@ -87,6 +87,8 @@ function createTab(selectedFilePath: string): PrTab {
     selectedFilePath,
     openFilePaths: ["src/first.rs", selectedFilePath],
     tour: null,
+    tourOperationId: null,
+    tourProgress: null,
     viewMode: "editor",
     reviewSubMode: "diff",
     checkout: { state: "checked", dismissed: false, message: null, percent: null, operationId: null },
