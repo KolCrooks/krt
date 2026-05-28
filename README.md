@@ -12,8 +12,10 @@ A fast, cross-platform desktop app for reviewing pull requests.
 
 ## Getting Started
 
-__NOTE:__ There currently isn't a distribution of KRT. One day it will exist but while it is in development, you will have to build it yourself.
+You can install the latest release from this page: https://github.com/KolCrooks/krt/releases/tag/latest
 
+
+## Running from source:
 
 ```bash
 npm install
