@@ -260,6 +260,8 @@ function createTab(): PrTab {
     selectedFilePath: "src/lib.rs",
     openFilePaths: [],
     tour: null,
+    tourOperationId: null,
+    tourProgress: null,
     viewMode: "review",
     reviewSubMode: "diff",
     checkout: { state: "checked", dismissed: false, message: null, percent: null, operationId: null },

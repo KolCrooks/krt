@@ -1,9 +1,8 @@
 import { useMutation } from "@tanstack/react-query";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef } from "react";
 import { krtClient } from "../api/client.js";
 import type { PrTab } from "../store/uiStore.js";
 import { useUiStore } from "../store/uiStore.js";
-import type { OperationProgress } from "../../shared/schemas.js";
 
 export interface UseAutoTourResult {
   isGenerating: boolean;
@@ -16,14 +15,20 @@ export interface UseAutoTourResult {
 }
 
 /**
- * Drives AI tour generation for a PR tab. Auto-triggers a fetch when the tab
- * has no cached tour, and listens to operation progress until it completes.
+ * Drives AI tour generation for a PR tab. The in-flight operation and its
+ * progress live on the tab in the store (not in this hook), so streaming keeps
+ * running and stays visible while the reviewer switches tabs or views — the
+ * always-mounted TourGenerationManager applies progress regardless of which
+ * view is on screen. This hook only auto-triggers generation and reads state.
  */
 export function useAutoTour(tab: PrTab): UseAutoTourResult {
   const setTour = useUiStore((state) => state.setTour);
-  const [operationId, setOperationId] = useState<string | null>(null);
-  const [progress, setProgress] = useState<OperationProgress | null>(null);
+  const setTourOperation = useUiStore((state) => state.setTourOperation);
+  const setTourProgress = useUiStore((state) => state.setTourProgress);
   const triggeredHeadSha = useRef<string | null>(null);
+
+  const operationId = tab.tourOperationId;
+  const progress = tab.tourProgress;
 
   const generateMutation = useMutation<Awaited<ReturnType<typeof krtClient.ai.startTourGeneration>>, unknown, boolean>({
     mutationFn: (force) =>
@@ -36,17 +41,16 @@ export function useAutoTour(tab: PrTab): UseAutoTourResult {
         force
       }),
     onMutate: (force) => {
-      setOperationId(null);
-      setProgress(null);
       if (force) {
         setTour(tab.key, null);
       }
+      setTourProgress(tab.key, null);
     },
     onSuccess: (result) => {
-      setOperationId(result.operationId);
       if (result.cachedTour) {
         setTour(tab.key, result.cachedTour);
-        setProgress({
+        setTourOperation(tab.key, null);
+        setTourProgress(tab.key, {
           operationId: result.operationId,
           phase: "complete",
           message: "AI tour loaded from cache",
@@ -56,58 +60,32 @@ export function useAutoTour(tab: PrTab): UseAutoTourResult {
         });
         return;
       }
+      setTourOperation(tab.key, result.operationId);
       void krtClient.operations.progressSnapshot({ operationId: result.operationId }).then((snapshot) => {
         if (snapshot) {
-          setProgress(snapshot);
+          setTourProgress(tab.key, snapshot);
         }
       });
     }
   });
 
-  // Auto-trigger once per headSha when no tour is present yet.
+  // Auto-trigger once per headSha when no tour is present and none is generating.
   useEffect(() => {
-    if (tab.tour) {
+    if (tab.tour || tab.tourOperationId) {
       return;
     }
     if (triggeredHeadSha.current === tab.bundle.detail.headSha) {
       return;
     }
-    if (generateMutation.isPending || operationId) {
+    if (generateMutation.isPending) {
       return;
     }
     triggeredHeadSha.current = tab.bundle.detail.headSha;
     generateMutation.mutate(false);
     // eslint-disable-next-line react-hooks/exhaustive-deps -- intentionally fires only on identity / mount changes below
-  }, [tab.bundle.detail.headSha, tab.tour]);
+  }, [tab.bundle.detail.headSha, tab.tour, tab.tourOperationId]);
 
-  // Listen to operation progress; rehydrate from cache on completion.
-  useEffect(() => {
-    if (!operationId) {
-      return undefined;
-    }
-    return krtClient.operations.onProgress((nextProgress) => {
-      if (nextProgress.operationId !== operationId) {
-        return;
-      }
-      setProgress(nextProgress);
-      if (nextProgress.done && !nextProgress.cancelled && nextProgress.phase === "complete") {
-        void krtClient.ai
-          .getCachedTour({
-            repository: tab.bundle.detail.repository,
-            number: tab.bundle.detail.number,
-            headSha: tab.bundle.detail.headSha
-          })
-          .then((cachedTour) => {
-            if (cachedTour) {
-              setTour(tab.key, cachedTour);
-            }
-          });
-      }
-    });
-  }, [operationId, setTour, tab.bundle.detail.headSha, tab.bundle.detail.number, tab.bundle.detail.repository, tab.key]);
-
-  const isGenerating =
-    generateMutation.isPending || Boolean(operationId && (!progress || !progress.done));
+  const isGenerating = generateMutation.isPending || Boolean(operationId && (!progress || !progress.done));
   const hasFailed =
     generateMutation.isError || Boolean(progress?.done && (progress.cancelled || progress.phase === "failed"));
 

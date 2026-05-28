@@ -519,6 +519,61 @@ function AiSection({
       </SettingsGroup>
 
       <SettingsGroup
+        title="Reasoning & limits"
+        hint="Token budgets for tour generation. Thinking applies to reasoning-capable models (e.g. Claude Sonnet 4)."
+      >
+        <SettingsRow
+          label="Extended thinking"
+          hint="Let the model reason before writing the tour, for richer chapters and a better dependency graph."
+        >
+          <Toggle
+            on={settings.ai.thinkingEnabled}
+            onChange={(value) =>
+              updateSettings({ ai: { ...settings.ai, thinkingEnabled: value } })
+            }
+          />
+        </SettingsRow>
+        <SettingsRow
+          label="Max output tokens"
+          hint="Upper bound on the model response, including any thinking."
+        >
+          <input
+            className="settings-input settings-input-narrow"
+            type="number"
+            min={1024}
+            max={64000}
+            step={512}
+            value={settings.ai.maxOutputTokens}
+            onChange={(event) =>
+              updateSettings({
+                ai: { ...settings.ai, maxOutputTokens: Number(event.target.value) },
+              })
+            }
+          />
+        </SettingsRow>
+        <SettingsRow
+          last
+          label="Thinking budget tokens"
+          hint="Tokens reserved for reasoning. Must stay below max output tokens."
+        >
+          <input
+            className="settings-input settings-input-narrow"
+            type="number"
+            min={1024}
+            max={60000}
+            step={512}
+            disabled={!settings.ai.thinkingEnabled}
+            value={settings.ai.thinkingBudgetTokens}
+            onChange={(event) =>
+              updateSettings({
+                ai: { ...settings.ai, thinkingBudgetTokens: Number(event.target.value) },
+              })
+            }
+          />
+        </SettingsRow>
+      </SettingsGroup>
+
+      <SettingsGroup
         title="Authentication"
         hint="Where to read the API key for the selected provider."
       >

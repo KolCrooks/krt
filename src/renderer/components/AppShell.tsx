@@ -10,6 +10,7 @@ import { SearchView } from "./SearchView.js";
 import { SettingsView } from "./SettingsView.js";
 import { TabStrip } from "./TabStrip.js";
 import { TitleBar } from "./TitleBar.js";
+import { TourGenerationManager } from "./TourGenerationManager.js";
 import { krtClient } from "../api/client.js";
 import { useAppAppearance } from "../hooks/useAppAppearance.js";
 import { useEnsureLspSession } from "../hooks/useEnsureLspSession.js";
@@ -193,6 +194,7 @@ function AppFrame(): React.JSX.Element {
     <div className="app-shell">
       <TitleBar />
       <OpenPrLspSessions tabs={tabs} />
+      <TourGenerationManager />
       <Rail />
       <div className="content-shell">
         <TabStrip />

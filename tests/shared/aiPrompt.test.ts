@@ -138,7 +138,11 @@ describe("AI prompt preparation", () => {
         expect.stringContaining("Do not create one chapter per file"),
         expect.stringContaining("not 'SettingsView.tsx' or 'src/ changes'"),
         expect.stringContaining("key construct and its role"),
-        expect.stringContaining("narrative")
+        expect.stringContaining("narrative"),
+        expect.stringContaining("A chapter is a unit of change"),
+        expect.stringContaining("same file may appear in multiple chapters"),
+        expect.stringContaining("Markdown bullet points"),
+        expect.stringContaining("split test changes into their own dedicated chapter")
       ])
     );
     expect(context.task.graphGuidance).toEqual(

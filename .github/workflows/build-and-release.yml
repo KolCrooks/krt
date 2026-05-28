@@ -73,21 +73,73 @@ jobs:
           tag="main-${COMMIT_SHA}"
           title="KRT ${version} (${short_sha})"
           notes="Automated build for commit ${COMMIT_SHA} on main."
+          latest_title="KRT ${version} latest (${short_sha})"
+          latest_notes="Latest automated build for commit ${COMMIT_SHA} on main."
 
           shopt -s nullglob
-          artifacts=(release/*.dmg release/*.zip release/*.yml release/*.blockmap)
+          artifacts=(release/*.dmg release/*.zip)
 
           if [[ "${#artifacts[@]}" -eq 0 ]]; then
             echo "No release artifacts were created in release/."
             exit 1
           fi
 
+          delete_release_assets() {
+            local release_tag="$1"
+
+            gh api \
+              --paginate \
+              "repos/${GITHUB_REPOSITORY}/releases/tags/${release_tag}/assets" \
+              --jq '.[].id' |
+              while read -r asset_id; do
+                [[ -n "$asset_id" ]] || continue
+                gh api \
+                  -X DELETE \
+                  "repos/${GITHUB_REPOSITORY}/releases/assets/${asset_id}" \
+                  >/dev/null
+              done
+          }
+
           if gh release view "$tag" >/dev/null 2>&1; then
-            gh release upload "$tag" "${artifacts[@]}" --clobber
+            delete_release_assets "$tag"
             gh release edit "$tag" --title "$title" --notes "$notes"
+            gh release upload "$tag" "${artifacts[@]}"
           else
             gh release create "$tag" "${artifacts[@]}" \
               --target "$COMMIT_SHA" \
               --title "$title" \
-              --notes "$notes"
+              --notes "$notes" \
+              --latest=false
+          fi
+
+          if gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/latest" >/dev/null 2>&1; then
+            gh api \
+              -X PATCH \
+              "repos/${GITHUB_REPOSITORY}/git/refs/tags/latest" \
+              -f sha="$COMMIT_SHA" \
+              -F force=true \
+              >/dev/null
+          else
+            gh api \
+              -X POST \
+              "repos/${GITHUB_REPOSITORY}/git/refs" \
+              -f ref="refs/tags/latest" \
+              -f sha="$COMMIT_SHA" \
+              >/dev/null
+          fi
+
+          if gh release view latest >/dev/null 2>&1; then
+            delete_release_assets latest
+            gh release edit latest \
+              --target "$COMMIT_SHA" \
+              --title "$latest_title" \
+              --notes "$latest_notes" \
+              --latest
+            gh release upload latest "${artifacts[@]}"
+          else
+            gh release create latest "${artifacts[@]}" \
+              --target "$COMMIT_SHA" \
+              --title "$latest_title" \
+              --notes "$latest_notes" \
+              --latest
           fi

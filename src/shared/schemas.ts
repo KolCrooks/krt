@@ -503,7 +503,10 @@ export const appSettingsSchema = z.object({
     model: z.string().default(""),
     baseUrl: z.string().url().optional(),
     keyProvider: aiKeyProviderSchema.default("keychain"),
-    keyCommand: z.string().default("")
+    keyCommand: z.string().default(""),
+    thinkingEnabled: z.boolean().default(true),
+    maxOutputTokens: z.number().int().min(1_024).max(64_000).default(16_000),
+    thinkingBudgetTokens: z.number().int().min(1_024).max(60_000).default(8_000)
   }),
   github: z.object({
     configured: z.boolean().default(false),
@@ -539,7 +542,11 @@ export const operationProgressSchema = z.object({
   percent: z.number().min(0).max(100).nullable().optional(),
   done: z.boolean().default(false),
   cancelled: z.boolean().default(false),
-  error: z.string().optional()
+  error: z.string().optional(),
+  // Optional in-progress result preview. AI tour generation streams a partial
+  // ReviewTour here (chapters filled in as they arrive) so the UI can render
+  // the story as it is written, before the operation completes.
+  tour: reviewTourSchema.optional()
 });
 export type OperationProgress = z.infer<typeof operationProgressSchema>;
 

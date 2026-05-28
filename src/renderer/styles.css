@@ -5525,6 +5525,33 @@ button.rev-tab {
   border-bottom: 0;
 }
 
+.tour-chapter.is-loading {
+  cursor: default;
+}
+
+.tour-chapter.is-loading .tour-chapter-text {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  width: 100%;
+}
+
+.storyboard-v2-card.is-loading {
+  cursor: default;
+}
+
+.storyboard-v2-card.is-loading .storyboard-v2-card-head,
+.storyboard-v2-card.is-loading .storyboard-v2-card-title,
+.storyboard-v2-card.is-loading .storyboard-v2-card-desc {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.tour-detail-summary.markdown {
+  margin-bottom: 12px;
+}
+
 .storyboard-v2-skeleton {
   display: flex;
   flex-direction: column;

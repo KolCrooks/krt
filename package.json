@@ -24,6 +24,7 @@
     "test:ui": "playwright test"
   },
   "dependencies": {
+    "@dagrejs/dagre": "^3.0.0",
     "@octokit/graphql": "^9.0.1",
     "@octokit/rest": "^22.0.0",
     "@pierre/diffs": "1.2.2",
@@ -40,9 +41,9 @@
   "devDependencies": {
     "@electron/notarize": "^3.1.1",
     "@playwright/test": "^1.57.0",
+    "@testing-library/dom": "^10.4.1",
     "@testing-library/jest-dom": "^6.9.1",
     "@testing-library/react": "^16.3.0",
-    "@types/dompurify": "^3.2.0",
     "@types/node": "^24.10.4",
     "@types/react": "^19.2.7",
     "@types/react-dom": "^19.2.3",
@@ -58,6 +59,10 @@
     "wait-on": "^9.0.3"
   },
   "engines": {
-    "node": ">=22.0.0"
+    "node": ">=22.12.0"
+  },
+  "overrides": {
+    "@electron/asar": "4.2.0",
+    "@electron/get": "5.0.0"
   }
 }

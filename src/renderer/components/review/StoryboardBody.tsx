@@ -4,6 +4,7 @@ import { useAutoTour } from "../../hooks/useAutoTour.js";
 import { useStoryboardLayout } from "../../hooks/useStoryboardLayout.js";
 import { DiffPanel } from "../diffs/DiffPanel.js";
 import { ChangedFileTree } from "../trees/ChangedFileTree.js";
+import { renderMarkdown, renderInlineMarkdown, stripMarkdown } from "../../lib/markdown.js";
 import type { PrTab } from "../../store/uiStore.js";
 import { useUiStore } from "../../store/uiStore.js";
 import type { TourChapter, TourGraph } from "../../../shared/schemas.js";
@@ -162,7 +163,10 @@ export function StoryboardBody({ tab, layout }: StoryboardBodyProps): React.JSX.
       </header>
 
       <div className="storyboard-v2-split">
-        <FlowCanvas width={graphLayout.width} height={graphLayout.height}>
+        <FlowCanvas
+          width={graphLayout.width + (auto.isGenerating ? (graphLayout.nodes[0]?.width ?? 180) + 40 : 0)}
+          height={graphLayout.height}
+        >
           <svg className="story-edges" width={graphLayout.width} height={graphLayout.height} aria-hidden="true">
             <defs>
               {(Object.keys(RELATION_META) as Relation[]).map((relation) => {
@@ -277,10 +281,13 @@ export function StoryboardBody({ tab, layout }: StoryboardBodyProps): React.JSX.
                   </button>
                 </div>
                 <div className="storyboard-v2-card-title">
-                  <strong style={{ textDecoration: isReviewed ? "line-through" : undefined }}>{node.label}</strong>
+                  <strong
+                    style={{ textDecoration: isReviewed ? "line-through" : undefined }}
+                    dangerouslySetInnerHTML={{ __html: renderInlineMarkdown(node.label) }}
+                  />
                 </div>
                 {!graphLayout.simplified && chapter?.summary ? (
-                  <p className="storyboard-v2-card-desc">{chapter.summary}</p>
+                  <p className="storyboard-v2-card-desc">{stripMarkdown(chapter.summary)}</p>
                 ) : null}
                 <div className="storyboard-v2-card-foot">
                   <span className="mono storyboard-v2-card-files">{node.files.length}f</span>
@@ -294,6 +301,30 @@ export function StoryboardBody({ tab, layout }: StoryboardBodyProps): React.JSX.
               </article>
             );
           })}
+          {auto.isGenerating ? (
+            <article
+              className="storyboard-v2-card is-loading"
+              aria-label="More chapters loading"
+              style={{
+                left: graphLayout.width + 8,
+                top: 28,
+                width: graphLayout.nodes[0]?.width ?? 180,
+                height: graphLayout.nodes[0]?.height ?? 162
+              }}
+            >
+              <div className="storyboard-v2-card-band skeleton" aria-hidden="true" />
+              <div className="storyboard-v2-card-head">
+                <span className="skeleton skeleton-line skeleton-line-narrow" />
+              </div>
+              <div className="storyboard-v2-card-title">
+                <span className="skeleton skeleton-line skeleton-line-wide" />
+              </div>
+              <div className="storyboard-v2-card-desc">
+                <span className="skeleton skeleton-line" />
+                <span className="skeleton skeleton-line skeleton-line-narrow" />
+              </div>
+            </article>
+          ) : null}
         </FlowCanvas>
 
         <aside className="storyboard-v2-detail" aria-label="Selected chapter">
@@ -333,7 +364,7 @@ export function StoryboardBody({ tab, layout }: StoryboardBodyProps): React.JSX.
             </span>
             <span className="storyboard-v2-diff-spacer" />
             <span className="storyboard-v2-diff-caption">
-              chapter {tour.chapters.findIndex((entry) => entry.id === activeChapter.id) + 1} · {activeChapter.title}
+              chapter {tour.chapters.findIndex((entry) => entry.id === activeChapter.id) + 1} · {stripMarkdown(activeChapter.title)}
             </span>
           </div>
           <div className="storyboard-v2-diff-body">
@@ -358,6 +389,7 @@ export function StoryboardBody({ tab, layout }: StoryboardBodyProps): React.JSX.
                     layout={layout}
                     reviewThreads={tab.bundle.reviewThreads}
                     tourChapters={[activeChapter]}
+                    cropToChapters
                     enableLsp={tab.mode === "managed"}
                     onOpenDefinition={(path, line) => {
                       openFileInTab(tab.key, path, line);
@@ -414,18 +446,21 @@ function ChapterDetail({
         <span className="mono storyboard-v2-detail-num">chapter {String(idx + 1).padStart(2, "0")}</span>
         {isSensitive ? <AlertTriangle size={12} aria-hidden="true" className="storyboard-v2-detail-warning" /> : null}
       </div>
-      <h3 className="storyboard-v2-detail-title">{chapter.title}</h3>
+      <h3 className="storyboard-v2-detail-title" dangerouslySetInnerHTML={{ __html: renderInlineMarkdown(chapter.title) }} />
       {chapter.files.length > 0 ? (
         <div className="storyboard-v2-detail-files">
           {chapter.files.map((path) => (
             <button type="button" key={path} className="chip storyboard-v2-file-chip" onClick={() => onOpenFile(path)} title={path}>
               <FileIcon size={9} aria-hidden="true" />
-              {path}
+              {path.split("/").pop()}
             </button>
           ))}
         </div>
       ) : null}
-      <p className="storyboard-v2-detail-summary">{chapter.summary}</p>
+      <div
+        className="storyboard-v2-detail-summary markdown"
+        dangerouslySetInnerHTML={{ __html: renderMarkdown(chapter.summary) }}
+      />
 
       {(incoming.length > 0 || outgoing.length > 0) ? (
         <div className="storyboard-v2-detail-block">
@@ -444,7 +479,10 @@ function ChapterDetail({
                 onMouseLeave={() => onHoverEdge(null)}
               >
                 <span className="mono storyboard-v2-conn-tag">← {RELATION_META[edge.relation].label}</span>
-                <span className="storyboard-v2-conn-name">{source?.title ?? edge.from}</span>
+                <span
+                  className="storyboard-v2-conn-name"
+                  dangerouslySetInnerHTML={{ __html: renderInlineMarkdown(source?.title ?? edge.from) }}
+                />
               </button>
             );
           })}
@@ -462,7 +500,10 @@ function ChapterDetail({
                 onMouseLeave={() => onHoverEdge(null)}
               >
                 <span className="mono storyboard-v2-conn-tag">→ {RELATION_META[edge.relation].label}</span>
-                <span className="storyboard-v2-conn-name">{target?.title ?? edge.to}</span>
+                <span
+                  className="storyboard-v2-conn-name"
+                  dangerouslySetInnerHTML={{ __html: renderInlineMarkdown(target?.title ?? edge.to) }}
+                />
               </button>
             );
           })}
@@ -473,7 +514,11 @@ function ChapterDetail({
         <div className="storyboard-v2-detail-block">
           <div className="storyboard-v2-detail-block-title">Key points</div>
           <ul className="storyboard-v2-detail-list">
-            {chapter.reviewChecklist.map((item) => <li key={item}>{item}</li>)}
+            {chapter.reviewChecklist.map((item) => (
+              <li key={item}>
+                <div className="markdown compact" dangerouslySetInnerHTML={{ __html: renderMarkdown(item) }} />
+              </li>
+            ))}
           </ul>
         </div>
       ) : null}
