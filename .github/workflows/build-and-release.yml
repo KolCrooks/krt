@@ -22,10 +22,10 @@ jobs:
         env:
           EVENT_COMMITS: ${{ toJSON(github.event.commits.*.id) }}
         run: |
-          shas="$EVENT_COMMITS"
+          shas="$(jq -c . <<< "$EVENT_COMMITS")"
 
           if [[ "$shas" == "[]" || "$shas" == "null" ]]; then
-            shas="[\"$GITHUB_SHA\"]"
+            shas="$(jq -cn --arg sha "$GITHUB_SHA" '[$sha]')"
           fi
 
           echo "shas=$shas" >> "$GITHUB_OUTPUT"
