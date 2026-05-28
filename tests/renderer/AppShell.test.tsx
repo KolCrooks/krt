@@ -1,8 +1,17 @@
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AppShell } from "../../src/renderer/components/AppShell.js";
 import { useUiStore } from "../../src/renderer/store/uiStore.js";
-import type { ManagedWorktree, PullRequestBundle } from "../../src/shared/schemas.js";
+import type {
+  ManagedWorktree,
+  PullRequestBundle,
+} from "../../src/shared/schemas.js";
 
 const originalListManagedWorktrees = window.krt.repos.listManagedWorktrees;
 const originalOpenPullRequest = window.krt.pullRequests.open;
@@ -20,16 +29,24 @@ afterEach(() => {
   window.krt.lsp.startForWorktree = originalStartLsp;
   window.krt.lsp.stopForWorktree = originalStopLsp;
   HTMLElement.prototype.scrollTo = originalScrollTo;
-  useUiStore.setState({ activeView: "search", modal: null, tabs: [], activeTabKey: null, selectedSearchResult: null });
+  useUiStore.setState({
+    activeView: "search",
+    modal: null,
+    tabs: [],
+    activeTabKey: null,
+    selectedSearchResult: null,
+  });
 });
 
 describe("AppShell", () => {
   it("renders the review workspace shell at the search surface", async () => {
     render(<AppShell />);
 
-    expect(screen.getByLabelText("Current workspace")).toHaveTextContent("Kol's Review");
+    expect(screen.getByLabelText("Current workspace")).toHaveTextContent("KRT");
     expect(screen.getByLabelText("Pull request search")).toBeInTheDocument();
-    expect(await screen.findByLabelText("Pull request results")).toBeInTheDocument();
+    expect(
+      await screen.findByLabelText("Pull request results"),
+    ).toBeInTheDocument();
   });
 
   it("applies persisted appearance settings to the document root", async () => {
@@ -37,17 +54,33 @@ describe("AppShell", () => {
 
     await waitFor(() => {
       expect(document.documentElement).toHaveAttribute("data-theme", "light");
-      expect(document.documentElement).toHaveAttribute("data-density", "compact");
+      expect(document.documentElement).toHaveAttribute(
+        "data-density",
+        "compact",
+      );
     });
-    expect(document.documentElement.style.getPropertyValue("--accent")).toBe("#4f46e5");
+    expect(document.documentElement.style.getPropertyValue("--accent")).toBe(
+      "#4f46e5",
+    );
   });
 
   it("opens tabs for checked out branches on startup", async () => {
-    const first = worktreeFixture({ number: 12, headSha: "abc123def456", title: "Add branch list" });
-    const second = worktreeFixture({ number: 13, headSha: "def456abc123", headRef: "feature/other", title: "Other branch" });
+    const first = worktreeFixture({
+      number: 12,
+      headSha: "abc123def456",
+      title: "Add branch list",
+    });
+    const second = worktreeFixture({
+      number: 13,
+      headSha: "def456abc123",
+      headRef: "feature/other",
+      title: "Other branch",
+    });
     window.krt.repos.listManagedWorktrees = vi.fn(async () => [first, second]);
     window.krt.pullRequests.open = vi.fn(async (input: { number: number }) =>
-      input.number === first.number ? bundleFixture(first) : bundleFixture(second)
+      input.number === first.number
+        ? bundleFixture(first)
+        : bundleFixture(second),
     );
 
     render(<AppShell />);
@@ -58,26 +91,39 @@ describe("AppShell", () => {
     expect(window.krt.pullRequests.open).toHaveBeenCalledWith({
       repository: first.repository,
       number: first.number,
-      preferredMode: "managed"
+      preferredMode: "managed",
     });
     expect(window.krt.pullRequests.open).toHaveBeenCalledWith({
       repository: second.repository,
       number: second.number,
-      preferredMode: "managed"
+      preferredMode: "managed",
     });
 
     await waitFor(() => {
-      expect(useUiStore.getState().tabs.map((tab) => tab.number)).toEqual([12, 13]);
+      expect(useUiStore.getState().tabs.map((tab) => tab.number)).toEqual([
+        12, 13,
+      ]);
     });
-    expect(screen.getByRole("tab", { name: /#12Add branch list/i })).toBeInTheDocument();
-    expect(screen.getByRole("tab", { name: /#13Other branch/i })).toBeInTheDocument();
+    expect(
+      screen.getByRole("tab", { name: /#12Add branch list/i }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("tab", { name: /#13Other branch/i }),
+    ).toBeInTheDocument();
     expect(useUiStore.getState().activeTabKey).toBe("kol/repo#12");
   });
 
   it("closes only the active editor file sub-tab with Cmd+W", () => {
-    const worktree = worktreeFixture({ number: 15, headSha: "close123", title: "Close file tabs" });
+    const worktree = worktreeFixture({
+      number: 15,
+      headSha: "close123",
+      title: "Close file tabs",
+    });
     const bundle = bundleFixture(worktree);
-    bundle.changedFiles = [bundle.changedFiles[0], { ...bundle.changedFiles[0], path: "src/main.rs" }];
+    bundle.changedFiles = [
+      bundle.changedFiles[0],
+      { ...bundle.changedFiles[0], path: "src/main.rs" },
+    ];
     const key = "kol/repo#15";
     useUiStore.getState().openPrTab(bundle);
     useUiStore.getState().openFileInTab(key, "src/lib.rs");
@@ -88,28 +134,38 @@ describe("AppShell", () => {
 
     fireEvent.keyDown(window, { key: "w", metaKey: true });
 
-    expect(useUiStore.getState().tabs.find((tab) => tab.key === key)).toMatchObject({
+    expect(
+      useUiStore.getState().tabs.find((tab) => tab.key === key),
+    ).toMatchObject({
       selectedFilePath: "src/lib.rs",
-      openFilePaths: ["src/lib.rs"]
+      openFilePaths: ["src/lib.rs"],
     });
 
     fireEvent.keyDown(window, { key: "w", metaKey: true });
 
-    expect(useUiStore.getState().tabs.find((tab) => tab.key === key)).toMatchObject({
+    expect(
+      useUiStore.getState().tabs.find((tab) => tab.key === key),
+    ).toMatchObject({
       selectedFilePath: null,
-      openFilePaths: []
+      openFilePaths: [],
     });
 
     fireEvent.keyDown(window, { key: "w", metaKey: true });
 
-    expect(useUiStore.getState().tabs.find((tab) => tab.key === key)).toMatchObject({
+    expect(
+      useUiStore.getState().tabs.find((tab) => tab.key === key),
+    ).toMatchObject({
       selectedFilePath: null,
-      openFilePaths: []
+      openFilePaths: [],
     });
   });
 
   it("ignores Cmd+W when the active PR tab is not in a file sub-tab", () => {
-    const worktree = worktreeFixture({ number: 16, headSha: "review123", title: "Keep review open" });
+    const worktree = worktreeFixture({
+      number: 16,
+      headSha: "review123",
+      title: "Keep review open",
+    });
     const bundle = bundleFixture(worktree);
     const key = "kol/repo#16";
     HTMLElement.prototype.scrollTo = vi.fn();
@@ -120,7 +176,7 @@ describe("AppShell", () => {
       path: "src/lib.rs",
       patch: "@@ -1,1 +1,1 @@\n-old\n+new",
       headSha: worktree.headSha,
-      isLarge: false
+      isLarge: false,
     }));
     useUiStore.getState().openPrTab(bundle);
     useUiStore.getState().openFileInTab(key, "src/lib.rs");
@@ -129,15 +185,21 @@ describe("AppShell", () => {
     render(<AppShell />);
     fireEvent.keyDown(window, { key: "w", metaKey: true });
 
-    expect(useUiStore.getState().tabs.find((tab) => tab.key === key)).toMatchObject({
+    expect(
+      useUiStore.getState().tabs.find((tab) => tab.key === key),
+    ).toMatchObject({
       selectedFilePath: "src/lib.rs",
       openFilePaths: ["src/lib.rs"],
-      viewMode: "review"
+      viewMode: "review",
     });
   });
 
   it("keeps a managed tab language server running across review submodes", async () => {
-    const worktree = worktreeFixture({ number: 14, headSha: "lsp123", title: "Keep LSP warm" });
+    const worktree = worktreeFixture({
+      number: 14,
+      headSha: "lsp123",
+      title: "Keep LSP warm",
+    });
     const bundle = bundleFixture(worktree);
     HTMLElement.prototype.scrollTo = vi.fn();
     window.krt.pullRequests.filePatch = vi.fn(async () => ({
@@ -147,7 +209,7 @@ describe("AppShell", () => {
       path: "src/lib.rs",
       patch: "@@ -1,1 +1,1 @@\n-old\n+new",
       headSha: worktree.headSha,
-      isLarge: false
+      isLarge: false,
     }));
     window.krt.lsp.startForWorktree = vi.fn(async () => ({
       id: "lsp-session",
@@ -158,7 +220,7 @@ describe("AppShell", () => {
       activeExtensions: [],
       unavailableExtensions: [],
       capabilities: ["hover" as const, "definition" as const],
-      startedAt: "2026-05-22T00:00:00.000Z"
+      startedAt: "2026-05-22T00:00:00.000Z",
     }));
     window.krt.lsp.stopForWorktree = vi.fn(async () => null);
     useUiStore.getState().openPrTab(bundle);
@@ -170,7 +232,7 @@ describe("AppShell", () => {
       expect(window.krt.lsp.startForWorktree).toHaveBeenCalledWith({
         repository: worktree.repository,
         headSha: worktree.headSha,
-        paths: ["src/lib.rs"]
+        paths: ["src/lib.rs"],
       });
     });
 
@@ -190,18 +252,20 @@ describe("AppShell", () => {
 
     expect(window.krt.lsp.stopForWorktree).toHaveBeenCalledWith({
       repository: worktree.repository,
-      headSha: worktree.headSha
+      headSha: worktree.headSha,
     });
   });
 });
 
-function worktreeFixture(overrides: Partial<ManagedWorktree> = {}): ManagedWorktree {
+function worktreeFixture(
+  overrides: Partial<ManagedWorktree> = {},
+): ManagedWorktree {
   return {
     repository: {
       provider: "github",
       owner: "kol",
       name: "repo",
-      fullName: "kol/repo"
+      fullName: "kol/repo",
     },
     number: 12,
     headSha: "abc123def456",
@@ -212,7 +276,7 @@ function worktreeFixture(overrides: Partial<ManagedWorktree> = {}): ManagedWorkt
     title: "Add branch list",
     headRef: "feature/branch-list",
     baseRef: "main",
-    ...overrides
+    ...overrides,
   };
 }
 
@@ -242,7 +306,7 @@ function bundleFixture(worktree: ManagedWorktree): PullRequestBundle {
       updatedAt: "2026-05-22T00:00:00.000Z",
       createdAt: "2026-05-22T00:00:00.000Z",
       body: "",
-      isFromFork: false
+      isFromFork: false,
     },
     changedFiles: [
       {
@@ -256,11 +320,11 @@ function bundleFixture(worktree: ManagedWorktree): PullRequestBundle {
         isGenerated: false,
         reviewStatus: "unreviewed",
         annotations: 0,
-        diagnostics: 0
-      }
+        diagnostics: 0,
+      },
     ],
     timeline: [],
     reviewThreads: [],
-    checks: []
+    checks: [],
   };
 }

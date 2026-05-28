@@ -1,4 +1,4 @@
-# Kol's Review Tool: Electron Architecture Plan
+# KRT: Electron Architecture Plan
 
 ## Summary
 

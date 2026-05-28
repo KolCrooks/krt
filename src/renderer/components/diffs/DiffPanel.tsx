@@ -26,6 +26,20 @@ interface DiffPanelProps {
 
 const EMPTY_DRAFT_COMMENTS: [] = [];
 
+interface DraftComposerAnnotation {
+  id: "draft-composer";
+  kind: "draft-composer";
+  title: string;
+  body: string;
+  path: string;
+  line: number;
+  side: "left" | "right";
+  status: "pending";
+  range: SelectedLineRange;
+}
+
+type RenderableDiffAnnotation = DiffAnnotation | DraftComposerAnnotation;
+
 export const DiffPanel = memo(function DiffPanel({
   pullRequest,
   file,
@@ -39,6 +53,7 @@ export const DiffPanel = memo(function DiffPanel({
 }: DiffPanelProps): React.JSX.Element {
   const [largeLoadPath, setLargeLoadPath] = useState<string | null>(null);
   const [fullContextRequested, setFullContextRequested] = useState(false);
+  const [selectionTarget, setSelectionTarget] = useState<SelectedLineRange | null>(null);
   const [draftTarget, setDraftTarget] = useState<SelectedLineRange | null>(null);
   const [draftBody, setDraftBody] = useState("");
   const addDraftReviewComment = useUiStore((state) => state.addDraftReviewComment);
@@ -86,19 +101,10 @@ export const DiffPanel = memo(function DiffPanel({
     setFullContextRequested(false);
   }, [file?.path, pullRequest.headSha]);
   useEffect(() => {
+    setSelectionTarget(null);
     setDraftTarget(null);
     setDraftBody("");
   }, [file?.path, pullRequest.headSha]);
-  const renderAnnotation = useCallback(
-    (annotation: DiffLineAnnotation<DiffAnnotation>) => (
-      <InlineAnnotation
-        annotation={annotation.metadata}
-        tabKey={tabKey}
-        pullRequest={pullRequest}
-      />
-    ),
-    [pullRequest, tabKey]
-  );
   const patch = patchQuery.data?.patch ?? file?.patch ?? "";
   const renderablePatch = useMemo(() => (file && patch ? buildRenderablePatch(file, patch) : ""), [file, patch]);
   const patchDiffCacheKey = useMemo(
@@ -113,7 +119,6 @@ export const DiffPanel = memo(function DiffPanel({
       pullRequest.repository.fullName
     ]
   );
-  const lineAnnotations = useMemo(() => annotations.flatMap(toDiffLineAnnotation), [annotations]);
   const partialFileDiff = useMemo<FileDiffMetadata | null>(() => {
     if (!file || !renderablePatch || !patchDiffCacheKey) {
       return null;
@@ -163,24 +168,94 @@ export const DiffPanel = memo(function DiffPanel({
     },
     [fullContextQuery.isError, fullContextQuery.isLoading, fullContextQuery.refetch, fullContextRequested]
   );
-  const handleDraftRange = useCallback(
-    (range: SelectedLineRange) => {
+  const normalizeDraftRange = useCallback(
+    (range: SelectedLineRange | null): SelectedLineRange | null => {
       if (!activeFileDiff) {
-        return;
+        return null;
       }
-      setDraftTarget(normalizeSelectedLineRange(activeFileDiff, range, layout));
-      setDraftBody("");
+      if (!range) {
+        return null;
+      }
+      return normalizeSelectedLineRange(activeFileDiff, range, layout);
     },
     [activeFileDiff, layout]
+  );
+  const handleDraftRange = useCallback(
+    (range: SelectedLineRange | null, options?: { resetBody?: boolean }) => {
+      const normalizedRange = normalizeDraftRange(range);
+      setSelectionTarget(null);
+      setDraftTarget(normalizedRange);
+      if (options?.resetBody) {
+        setDraftBody("");
+      }
+    },
+    [normalizeDraftRange]
+  );
+  const handleSelectionStart = useCallback(
+    (range: SelectedLineRange | null) => {
+      setDraftTarget(null);
+      setDraftBody("");
+      setSelectionTarget(normalizeDraftRange(range));
+    },
+    [normalizeDraftRange]
+  );
+  const handleSelectionChange = useCallback(
+    (range: SelectedLineRange | null) => {
+      setSelectionTarget(normalizeDraftRange(range));
+    },
+    [normalizeDraftRange]
+  );
+  const handleSelectionEnd = useCallback(
+    (range: SelectedLineRange | null) => {
+      const normalizedRange = normalizeDraftRange(range);
+      setSelectionTarget(null);
+      setDraftTarget(normalizedRange);
+    },
+    [normalizeDraftRange]
   );
   const submitDraftComment = useCallback(() => {
     if (!tabKey || !file || !draftTarget || !draftBody.trim()) {
       return;
     }
     addDraftReviewComment(tabKey, reviewCommentFromSelectedRange(file.path, draftBody.trim(), draftTarget));
+    setSelectionTarget(null);
     setDraftTarget(null);
     setDraftBody("");
   }, [addDraftReviewComment, draftBody, draftTarget, file, tabKey]);
+  const renderAnnotation = useCallback(
+    (annotation: DiffLineAnnotation<RenderableDiffAnnotation>) => {
+      if (annotation.metadata.kind === "draft-composer") {
+        return (
+          <DraftReviewCommentComposer
+            body={draftBody}
+            path={annotation.metadata.path}
+            range={annotation.metadata.range}
+            onBodyChange={setDraftBody}
+            onCancel={() => {
+              setDraftTarget(null);
+              setDraftBody("");
+            }}
+            onSubmit={submitDraftComment}
+          />
+        );
+      }
+      return (
+        <InlineAnnotation
+          annotation={annotation.metadata}
+          tabKey={tabKey}
+          pullRequest={pullRequest}
+        />
+      );
+    },
+    [draftBody, pullRequest, submitDraftComment, tabKey]
+  );
+  const lineAnnotations = useMemo<DiffLineAnnotation<RenderableDiffAnnotation>[]>(() => {
+    const sourceAnnotations = annotations.flatMap((annotation) => toDiffLineAnnotation(annotation, activeFileDiff));
+    const composerAnnotation = file && draftTarget
+      ? toDiffLineAnnotation(makeDraftComposerAnnotation(file.path, draftBody, draftTarget), activeFileDiff)
+      : [];
+    return [...sourceAnnotations, ...composerAnnotation];
+  }, [activeFileDiff, annotations, draftBody, draftTarget, file]);
   const patchView = useMemo(() => {
     if (!file || !patch) {
       return null;
@@ -199,17 +274,20 @@ export const DiffPanel = memo(function DiffPanel({
       enableGutterUtility: Boolean(tabKey),
       enableLineSelection: Boolean(tabKey),
       lineHoverHighlight: "number" as const,
-      onGutterUtilityClick: tabKey ? handleDraftRange : undefined,
+      onGutterUtilityClick: tabKey ? (range: SelectedLineRange) => handleDraftRange(range, { resetBody: true }) : undefined,
+      onLineSelectionStart: tabKey ? handleSelectionStart : undefined,
+      onLineSelectionChange: tabKey ? handleSelectionChange : undefined,
+      onLineSelectionEnd: tabKey ? handleSelectionEnd : undefined,
       ...lspInteractions.options
     };
     if (fullContextFileDiff) {
       return (
-        <DiffFileView<DiffAnnotation>
+        <DiffFileView<RenderableDiffAnnotation>
           key={viewKey}
           fileDiff={fileDiff}
           disableWorkerPool={false}
           lineAnnotations={lineAnnotations}
-          selectedLines={draftTarget}
+          selectedLines={draftTarget ?? selectionTarget}
           renderAnnotation={renderAnnotation}
           renderHeaderPrefix={() => <StatusBadge status={file.status} />}
           renderHeaderMetadata={() => <ChangeCounts additions={file.additions} deletions={file.deletions} />}
@@ -222,12 +300,12 @@ export const DiffPanel = memo(function DiffPanel({
       );
     }
     return (
-      <DiffFileView<DiffAnnotation>
+      <DiffFileView<RenderableDiffAnnotation>
         key={viewKey}
         fileDiff={fileDiff}
         disableWorkerPool={false}
         lineAnnotations={lineAnnotations}
-        selectedLines={draftTarget}
+        selectedLines={draftTarget ?? selectionTarget}
         renderAnnotation={renderAnnotation}
         renderHeaderPrefix={() => <StatusBadge status={file.status} />}
         renderHeaderMetadata={() => <ChangeCounts additions={file.additions} deletions={file.deletions} />}
@@ -248,7 +326,11 @@ export const DiffPanel = memo(function DiffPanel({
     lineAnnotations,
     lspInteractions.options,
     patch,
+    selectionTarget,
     handleDraftRange,
+    handleSelectionChange,
+    handleSelectionEnd,
+    handleSelectionStart,
     renderPartialHunkSeparator,
     renderAnnotation
   ]);
@@ -284,19 +366,6 @@ export const DiffPanel = memo(function DiffPanel({
       {...lspInteractions.surfaceProps}
     >
       {patchView}
-      {draftTarget && file ? (
-        <DraftReviewCommentComposer
-          body={draftBody}
-          path={file.path}
-          range={draftTarget}
-          onBodyChange={setDraftBody}
-          onCancel={() => {
-            setDraftTarget(null);
-            setDraftBody("");
-          }}
-          onSubmit={submitDraftComment}
-        />
-      ) : null}
       {lspInteractions.hoverCard}
     </div>
   );
@@ -768,12 +837,15 @@ function normalizeSelectedLineRange(
   fileDiff: FileDiffMetadata,
   range: SelectedLineRange,
   layout: "inline" | "split"
-): SelectedLineRange {
+): SelectedLineRange | null {
   const startSide = normalizeSelectionSide(range.side);
   const endSide = normalizeSelectionSide(range.endSide ?? range.side);
   const startIndex = lineIndexForSelectionPoint(fileDiff, range.start, startSide, layout);
   const endIndex = lineIndexForSelectionPoint(fileDiff, range.end, endSide, layout);
-  if (startIndex == null || endIndex == null || startIndex <= endIndex) {
+  if (startIndex == null || endIndex == null) {
+    return null;
+  }
+  if (startIndex <= endIndex) {
     return makeSelectedLineRange(range.start, startSide, range.end, endSide);
   }
   return makeSelectedLineRange(range.end, endSide, range.start, startSide);
@@ -825,13 +897,31 @@ function formatSelectedRange(path: string, range: SelectedLineRange): string {
   return `${path}:${range.start}-${range.end}`;
 }
 
+function makeDraftComposerAnnotation(
+  path: string,
+  body: string,
+  range: SelectedLineRange
+): DraftComposerAnnotation {
+  const endSide = selectionSideToReviewSide(normalizeSelectionSide(range.endSide ?? range.side));
+  return {
+    id: "draft-composer",
+    kind: "draft-composer",
+    title: "Draft review comment",
+    body,
+    path,
+    line: range.end,
+    side: endSide,
+    status: "pending",
+    range
+  };
+}
+
 function lineIndexForSelectionPoint(
   fileDiff: FileDiffMetadata,
   lineNumber: number,
   side: "additions" | "deletions",
   layout: "inline" | "split"
 ): number | null {
-  const lastHunk = fileDiff.hunks.at(-1);
   let targetUnifiedIndex: number | undefined;
   let targetSplitIndex: number | undefined;
 
@@ -842,19 +932,10 @@ function lineIndexForSelectionPoint(
     let unifiedIndex = hunk.unifiedLineStart;
 
     if (lineNumber < currentLineNumber) {
-      const difference = currentLineNumber - lineNumber;
-      targetUnifiedIndex = Math.max(unifiedIndex - difference, 0);
-      targetSplitIndex = Math.max(splitIndex - difference, 0);
       break hunkIterator;
     }
 
     if (lineNumber >= currentLineNumber + hunkCount) {
-      if (hunk === lastHunk) {
-        const difference = lineNumber - (currentLineNumber + hunkCount);
-        targetUnifiedIndex = unifiedIndex + hunk.unifiedLineCount + difference;
-        targetSplitIndex = splitIndex + hunk.splitLineCount + difference;
-        break hunkIterator;
-      }
       continue;
     }
 
@@ -892,12 +973,18 @@ function lineIndexForSelectionPoint(
   return layout === "split" ? targetSplitIndex : targetUnifiedIndex;
 }
 
-function toDiffLineAnnotation(annotation: DiffAnnotation): DiffLineAnnotation<DiffAnnotation>[] {
+function toDiffLineAnnotation<TAnnotation extends RenderableDiffAnnotation>(
+  annotation: TAnnotation,
+  fileDiff: FileDiffMetadata | null
+): DiffLineAnnotation<TAnnotation>[] {
   if (!annotation.line) {
     return [];
   }
   const side = annotation.side === "left" ? "deletions" : "additions";
-  return [{ side, lineNumber: annotation.line, metadata: annotation }];
+  if (fileDiff && lineIndexForSelectionPoint(fileDiff, annotation.line, side, "inline") == null) {
+    return [];
+  }
+  return [{ side, lineNumber: annotation.line, metadata: annotation } as unknown as DiffLineAnnotation<TAnnotation>];
 }
 
 interface InlineAnnotationProps {

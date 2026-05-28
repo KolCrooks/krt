@@ -1,8 +1,9 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Ban, GitBranch, Github, Loader2, Pin, PinOff, Search, Trash2, X } from "lucide-react";
-import { useEffect, useId, useMemo, useRef, useState } from "react";
+import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { krtClient } from "../api/client.js";
 import { formatBytes, formatCount, formatDate } from "../lib/format.js";
+import { activeTokenAt, suggestFilters, type FilterSuggestion } from "../lib/githubFilters.js";
 import { useUiStore } from "../store/uiStore.js";
 import type { AppSettings, ManagedWorktree, PullRequestSummary, RepositoryRef } from "../../shared/schemas.js";
 import type { OperationProgress } from "../../shared/schemas.js";
@@ -45,13 +46,14 @@ export function SearchView(): React.JSX.Element {
     updatePinnedRepos.mutate(next);
   };
 
+  const prUrlTarget = useMemo(() => parsePullRequestUrl(query), [query]);
   const composedQuery = useMemo(
     () => composeSearchQuery(query, ownerRepoNormalized, pinnedRepos),
     [query, ownerRepoNormalized, pinnedRepos]
   );
   const searchQuery = useQuery({
     queryKey: ["pull-request-search", composedQuery, githubAuthed],
-    enabled: githubAuthed,
+    enabled: githubAuthed && !prUrlTarget,
     queryFn: () =>
       krtClient.pullRequests.search({
         provider: "github",
@@ -174,24 +176,24 @@ export function SearchView(): React.JSX.Element {
     <main className="view search-view">
       <div className="search-inner">
         <section className="search-heading">
-          <span className="eyebrow">Open a Pull Request</span>
-          <h1>Find anything in seconds.</h1>
+          <h1>Open a Pull Request</h1>
           <p>
-            Type a number, branch fragment, author, or any word from the title. Use <span className="kbd">/</span> to focus,
-            <span className="kbd"> Enter</span> to open.
+            Type a number, branch fragment, author, or any word from the title. Use <span className="kbd">/</span> to add filters.
           </p>
         </section>
 
-        <section className="search-box" aria-label="Pull request search">
-          <Search size={17} aria-hidden="true" />
-          <input
-            ref={inputRef}
-            value={query}
-            onChange={(event) => setQuery(event.target.value)}
-            placeholder="Search PRs by #number, branch, author, or title..."
-          />
-          <span className="kbd">Cmd K</span>
-        </section>
+        <FilterSearchInput
+          inputRef={inputRef}
+          value={query}
+          onChange={setQuery}
+          onSubmit={() => {
+            if (prUrlTarget) {
+              setSelectedSearchResult(null);
+              openMutation.mutate(prUrlTarget);
+            }
+          }}
+        />
+
 
         <div className="pinned-row" aria-label="Pinned repositories">
           <button
@@ -258,9 +260,42 @@ export function SearchView(): React.JSX.Element {
           </section>
         ) : null}
 
-        {githubAuthed && searchQuery.isLoading ? <SearchResultsSkeleton /> : null}
-        {githubAuthed && searchQuery.isError ? <div className="error-panel">{errorMessage(searchQuery.error)}</div> : null}
+        {githubAuthed && prUrlTarget ? (
+          <section className="result-panel" aria-label="Open pull request from link">
+            <button
+              type="button"
+              className="result-row"
+              onClick={() => {
+                setSelectedSearchResult(null);
+                openMutation.mutate(prUrlTarget);
+              }}
+            >
+              <span className="avatar" aria-hidden="true">
+                <span className="avatar-fallback">
+                  <GitBranch size={16} />
+                </span>
+              </span>
+              <div className="result-main">
+                <div className="result-title-row">
+                  <span className="num">#{prUrlTarget.number}</span>
+                  <strong>Open from link</strong>
+                </div>
+                <div className="result-meta">
+                  <span className="mono">{prUrlTarget.repository.fullName}</span>
+                  <span aria-hidden="true">·</span>
+                  <span>Press Enter to open</span>
+                </div>
+              </div>
+            </button>
+          </section>
+        ) : null}
 
+        {githubAuthed && !prUrlTarget && searchQuery.isLoading ? <SearchResultsSkeleton /> : null}
+        {githubAuthed && !prUrlTarget && searchQuery.isError ? (
+          <div className="error-panel">{errorMessage(searchQuery.error)}</div>
+        ) : null}
+
+        {!prUrlTarget ? (
         <section className="result-panel" aria-label="Pull request results">
           {githubAuthed && filteredPullRequests.length === 0 && !searchQuery.isLoading && !searchQuery.isError ? (
             <div className="empty-result">No PRs match.</div>
@@ -307,6 +342,7 @@ export function SearchView(): React.JSX.Element {
             </button>
           ))}
         </section>
+        ) : null}
 
         <CheckedOutBranchesPanel
           error={checkedOutBranchesQuery.error}
@@ -333,6 +369,151 @@ export function SearchView(): React.JSX.Element {
         </aside>
       ) : null}
     </main>
+  );
+}
+
+interface FilterSearchInputProps {
+  value: string;
+  onChange: (value: string) => void;
+  inputRef: React.RefObject<HTMLInputElement | null>;
+  onSubmit?: () => void;
+}
+
+function FilterSearchInput({ value, onChange, inputRef, onSubmit }: FilterSearchInputProps): React.JSX.Element {
+  const wrapperRef = useRef<HTMLDivElement | null>(null);
+  const [caret, setCaret] = useState(value.length);
+  const [open, setOpen] = useState(false);
+  const [highlight, setHighlight] = useState(0);
+  const pendingCaret = useRef<number | null>(null);
+  const listId = useId();
+
+  const token = useMemo(() => activeTokenAt(value, caret), [value, caret]);
+  const suggestions = useMemo(() => suggestFilters(token.text), [token.text]);
+  const menuOpen = open && suggestions.length > 0;
+
+  useEffect(() => {
+    if (highlight >= suggestions.length) {
+      setHighlight(0);
+    }
+  }, [highlight, suggestions.length]);
+
+  // Restore the caret after a suggestion rewrites the query value.
+  useLayoutEffect(() => {
+    if (pendingCaret.current === null) {
+      return;
+    }
+    const next = pendingCaret.current;
+    pendingCaret.current = null;
+    const input = inputRef.current;
+    if (input) {
+      input.setSelectionRange(next, next);
+    }
+    setCaret(next);
+  }, [value, inputRef]);
+
+  useEffect(() => {
+    if (!menuOpen) {
+      return undefined;
+    }
+    const onPointer = (event: PointerEvent): void => {
+      if (wrapperRef.current && !wrapperRef.current.contains(event.target as Node)) {
+        setOpen(false);
+      }
+    };
+    window.addEventListener("pointerdown", onPointer);
+    return () => window.removeEventListener("pointerdown", onPointer);
+  }, [menuOpen]);
+
+  const syncCaret = (input: HTMLInputElement): void => {
+    setCaret(input.selectionStart ?? input.value.length);
+  };
+
+  const apply = (suggestion: FilterSuggestion): void => {
+    const before = value.slice(0, token.start);
+    const after = value.slice(caret);
+    const nextValue = before + suggestion.insert + after;
+    const nextCaret = before.length + suggestion.insert.length;
+    pendingCaret.current = nextCaret;
+    onChange(nextValue);
+    setHighlight(0);
+    setOpen(Boolean(suggestion.keepOpen));
+    inputRef.current?.focus();
+  };
+
+  const onKeyDown = (event: React.KeyboardEvent<HTMLInputElement>): void => {
+    if (menuOpen && (event.key === "ArrowDown" || event.key === "ArrowUp")) {
+      event.preventDefault();
+      const delta = event.key === "ArrowDown" ? 1 : -1;
+      setHighlight((current) => (current + delta + suggestions.length) % suggestions.length);
+      return;
+    }
+    if (menuOpen && (event.key === "Enter" || event.key === "Tab")) {
+      const picked = suggestions[highlight];
+      if (picked) {
+        event.preventDefault();
+        apply(picked);
+      }
+      return;
+    }
+    if (event.key === "Escape" && menuOpen) {
+      event.preventDefault();
+      setOpen(false);
+      return;
+    }
+    if (event.key === "Enter" && !menuOpen && onSubmit) {
+      event.preventDefault();
+      onSubmit();
+    }
+  };
+
+  return (
+    <section className="search-box filter-search" aria-label="Pull request search" ref={wrapperRef}>
+      <Search size={17} aria-hidden="true" />
+      <input
+        ref={inputRef}
+        value={value}
+        onChange={(event) => {
+          onChange(event.target.value);
+          setCaret(event.target.selectionStart ?? event.target.value.length);
+          setOpen(true);
+          setHighlight(0);
+        }}
+        onKeyDown={onKeyDown}
+        onKeyUp={(event) => syncCaret(event.currentTarget)}
+        onClick={(event) => syncCaret(event.currentTarget)}
+        onSelect={(event) => syncCaret(event.currentTarget)}
+        onFocus={() => setOpen(true)}
+        placeholder="Search PRs by #number, branch, author, or title — type / for filters"
+        aria-autocomplete="list"
+        aria-controls={menuOpen ? listId : undefined}
+        aria-expanded={menuOpen}
+        role="combobox"
+      />
+      <span className="kbd">Cmd K</span>
+      {menuOpen ? (
+        <ul className="filter-menu" role="listbox" id={listId}>
+          {suggestions.map((suggestion, index) => {
+            const isHighlighted = highlight === index;
+            return (
+              <li
+                key={suggestion.id}
+                role="option"
+                aria-selected={isHighlighted}
+                className={isHighlighted ? "filter-option is-highlighted" : "filter-option"}
+                onMouseEnter={() => setHighlight(index)}
+                onMouseDown={(event) => event.preventDefault()}
+                onClick={() => apply(suggestion)}
+              >
+                <span className="mono filter-option-label">{suggestion.label}</span>
+                {suggestion.description ? (
+                  <span className="filter-option-desc">{suggestion.description}</span>
+                ) : null}
+              </li>
+            );
+          })}
+        </ul>
+      ) : null}
+    </section>
   );
 }
 
@@ -615,6 +796,38 @@ function SearchResultsSkeleton(): React.JSX.Element {
       ))}
     </section>
   );
+}
+
+// Recognizes a GitHub pull request URL so it can be opened directly instead of
+// being run as a search query. Accepts URLs with or without a scheme, and
+// ignores trailing path segments (e.g. /files) and fragments.
+function parsePullRequestUrl(input: string): { repository: RepositoryRef; number: number } | null {
+  const trimmed = input.trim();
+  if (!trimmed || !/github\.com/i.test(trimmed)) {
+    return null;
+  }
+  let url: URL;
+  try {
+    url = new URL(trimmed.includes("://") ? trimmed : `https://${trimmed}`);
+  } catch {
+    return null;
+  }
+  if (url.hostname !== "github.com" && url.hostname !== "www.github.com") {
+    return null;
+  }
+  const parts = url.pathname.split("/").filter(Boolean);
+  if (parts.length < 4 || parts[2] !== "pull") {
+    return null;
+  }
+  const [owner, name] = parts;
+  const number = Number.parseInt(parts[3], 10);
+  if (!owner || !name || !Number.isInteger(number) || number <= 0) {
+    return null;
+  }
+  return {
+    repository: { provider: "github", owner, name, fullName: `${owner}/${name}` },
+    number
+  };
 }
 
 function composeSearchQuery(baseQuery: string, ownerRepo: string, pinnedRepos: string[]): string {

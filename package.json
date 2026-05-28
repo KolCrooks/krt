@@ -1,7 +1,7 @@
 {
   "name": "krt2",
   "version": "0.1.0",
-  "description": "Kol's Review Tool desktop app",
+  "description": "KRT desktop app",
   "author": "Kol Crooks",
   "type": "module",
   "main": "dist-electron/main/index.js",

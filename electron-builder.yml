@@ -1,5 +1,5 @@
 appId: com.kolcrooks.krt
-productName: Kol's Review Tool
+productName: KRT
 copyright: Copyright (c) 2026 Kol Crooks
 artifactName: ${productName}-${version}-${arch}.${ext}
 

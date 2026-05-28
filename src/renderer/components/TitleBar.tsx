@@ -8,10 +8,12 @@ export function TitleBar(): React.JSX.Element {
   return (
     <header className="titlebar">
       <div className="titlebar-center" aria-label="Current workspace">
-        <span className="repo">{detail?.repository.fullName ?? "Kol's Review"}</span>
+        <span className="repo">{detail?.repository.fullName ?? "KRT"}</span>
         {detail ? (
           <>
-            <span className="titlebar-dot" aria-hidden="true">·</span>
+            <span className="titlebar-dot" aria-hidden="true">
+              ·
+            </span>
             <span className="branch">
               <GitBranch size={10} aria-hidden="true" />
               {detail.headRef || detail.headSha.slice(0, 7)}

@@ -43,14 +43,55 @@ vi.mock("@pierre/diffs/react", async () => {
   const React = await import("react");
   return {
     File: () => React.createElement("div"),
-    FileDiff: ({ options }: { options?: { onGutterUtilityClick?: (range: unknown) => void } }) =>
+    FileDiff: ({
+      lineAnnotations,
+      options,
+      renderAnnotation
+    }: {
+      lineAnnotations?: unknown[];
+      options?: {
+        onGutterUtilityClick?: (range: unknown) => void;
+        onLineSelectionStart?: (range: unknown) => void;
+        onLineSelectionChange?: (range: unknown) => void;
+        onLineSelectionEnd?: (range: unknown) => void;
+        onLineSelected?: (range: unknown) => void;
+      };
+      renderAnnotation?: (annotation: unknown) => React.ReactNode;
+    }) =>
       React.createElement(
-        "button",
-        {
-          type: "button",
-          onClick: () => options?.onGutterUtilityClick?.({ start: 2, end: 3, side: "additions" })
-        },
-        "Add line comment"
+        "div",
+        null,
+        React.createElement(
+          "button",
+          {
+            type: "button",
+            onClick: () => options?.onGutterUtilityClick?.({ start: 2, end: 3, side: "additions" })
+          },
+          "Add line comment"
+        ),
+        React.createElement(
+          "button",
+          {
+            type: "button",
+            onClick: () => options?.onLineSelectionStart?.({ start: 2, end: 2, side: "additions" })
+          },
+          "Press line comment"
+        ),
+        React.createElement(
+          "button",
+          {
+            type: "button",
+            onClick: () => {
+              options?.onLineSelectionStart?.({ start: 2, end: 2, side: "additions" });
+              options?.onLineSelectionChange?.({ start: 2, end: 4, side: "additions" });
+              options?.onLineSelectionEnd?.({ start: 2, end: 4, side: "additions" });
+            }
+          },
+          "Drag line comment"
+        ),
+        ...(lineAnnotations ?? []).map((annotation, index) =>
+          React.createElement("div", { key: index, "data-testid": "diff-annotation" }, renderAnnotation?.(annotation))
+        )
       ),
     useWorkerPool: () => undefined
   };
@@ -115,6 +156,85 @@ describe("DiffPanel review comments", () => {
         startSide: "right"
       }
     ]);
+  });
+
+  it("adds dragged line selections as draft review comments", async () => {
+    const tab = createTab();
+    window.krt.pullRequests.filePatch = vi.fn(async (input) => ({
+      provider: "github" as const,
+      repository: input.repository,
+      pullNumber: input.number,
+      path: input.path,
+      patch: tab.bundle.changedFiles[0].patch ?? "",
+      headSha: input.headSha,
+      isLarge: false
+    }));
+    useUiStore.setState({
+      activeView: "review",
+      modal: null,
+      tabs: [tab],
+      activeTabKey: tab.key,
+      selectedSearchResult: null
+    });
+
+    renderWithClient(
+      <DiffPanel
+        tabKey={tab.key}
+        pullRequest={tab.bundle.detail}
+        file={tab.bundle.changedFiles[0]}
+        layout="inline"
+      />
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "Drag line comment" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "Review comment" }), {
+      target: { value: "This whole section needs a tighter explanation." }
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Add to review" }));
+
+    expect(useUiStore.getState().tabs.find((candidate) => candidate.key === tab.key)?.finish.comments).toMatchObject([
+      {
+        path: "src/lib.rs",
+        body: "This whole section needs a tighter explanation.",
+        line: 4,
+        side: "right",
+        startLine: 2,
+        startSide: "right"
+      }
+    ]);
+  });
+
+  it("does not show the draft editor until a line selection is released", async () => {
+    const tab = createTab();
+    window.krt.pullRequests.filePatch = vi.fn(async (input) => ({
+      provider: "github" as const,
+      repository: input.repository,
+      pullNumber: input.number,
+      path: input.path,
+      patch: tab.bundle.changedFiles[0].patch ?? "",
+      headSha: input.headSha,
+      isLarge: false
+    }));
+    useUiStore.setState({
+      activeView: "review",
+      modal: null,
+      tabs: [tab],
+      activeTabKey: tab.key,
+      selectedSearchResult: null
+    });
+
+    renderWithClient(
+      <DiffPanel
+        tabKey={tab.key}
+        pullRequest={tab.bundle.detail}
+        file={tab.bundle.changedFiles[0]}
+        layout="inline"
+      />
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "Press line comment" }));
+
+    expect(screen.queryByRole("textbox", { name: "Review comment" })).not.toBeInTheDocument();
   });
 });
 
