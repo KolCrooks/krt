@@ -48,6 +48,7 @@ function AppFrame(): React.JSX.Element {
   const activeView = useUiStore((state) => state.activeView);
   const setActiveView = useUiStore((state) => state.setActiveView);
   const modal = useUiStore((state) => state.modal);
+  const openModal = useUiStore((state) => state.openModal);
   const closeModal = useUiStore((state) => state.closeModal);
   const tabs = useUiStore((state) => state.tabs);
   const openPrTab = useUiStore((state) => state.openPrTab);
@@ -153,6 +154,7 @@ function AppFrame(): React.JSX.Element {
   }, [openPrTab, selectTab]);
 
   useEffect(() => krtClient.app.onCloseSubTab(() => runCloseSubTabCommand("menu")), [runCloseSubTabCommand]);
+  useEffect(() => krtClient.app.onOpenPreferences(() => openModal("settings")), [openModal]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent): void => {
@@ -166,6 +168,12 @@ function AppFrame(): React.JSX.Element {
         event.preventDefault();
         event.stopPropagation();
         runCloseSubTabCommand("keyboard");
+        return;
+      }
+      if ((event.metaKey || event.ctrlKey) && event.key === ",") {
+        event.preventDefault();
+        event.stopPropagation();
+        openModal("settings");
         return;
       }
       // Cmd/Ctrl+K opens search globally
@@ -188,7 +196,7 @@ function AppFrame(): React.JSX.Element {
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [closeModal, modal, runCloseSubTabCommand, setActiveView]);
+  }, [closeModal, modal, openModal, runCloseSubTabCommand, setActiveView]);
 
   return (
     <div className="app-shell">

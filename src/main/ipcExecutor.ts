@@ -445,6 +445,22 @@ function createIpcHandlers(context: IpcHandlerContext): HandlerMap {
       return comment;
     },
 
+    "comments:updateReviewComment": async (input) => {
+      const provider = await context.providers.get(input.repository.provider);
+      const comment = await provider.updateReviewComment(input.repository, input.commentId, input.body);
+      context.prCache.invalidate(input.repository, input.number);
+      context.providerCache.invalidatePrefix(input.repository.provider, githubPullScope(input.repository, input.number));
+      return { ...comment, threadId: comment.threadId ?? input.threadId };
+    },
+
+    "comments:deleteReviewComment": async (input) => {
+      const provider = await context.providers.get(input.repository.provider);
+      const result = await provider.deleteReviewComment(input.repository, input.commentId);
+      context.prCache.invalidate(input.repository, input.number);
+      context.providerCache.invalidatePrefix(input.repository.provider, githubPullScope(input.repository, input.number));
+      return { threadId: input.threadId, commentId: result.commentId, deleted: result.deleted };
+    },
+
     "comments:toggleReaction": async (input) => {
       const provider = await context.providers.get(input.repository.provider);
       const reactions = await provider.toggleReaction(input.subjectNodeId, input.content, input.add);
@@ -555,9 +571,15 @@ function createIpcHandlers(context: IpcHandlerContext): HandlerMap {
 
       const startedAt = performance.now();
       void (async () => {
+        const runStats: { turns?: number; outputTokens?: number; stoppedReason?: string } = {};
         try {
           const tour = await context.ai.generateTour(hydratedInput, {
             signal: context.operations.signal(operationId),
+            onStats: (stats) => {
+              runStats.turns = stats.turns;
+              runStats.outputTokens = stats.outputTokens;
+              runStats.stoppedReason = stats.stoppedReason;
+            },
             onProgress: (progress) =>
               context.operations.update({
                 operationId,
@@ -566,7 +588,8 @@ function createIpcHandlers(context: IpcHandlerContext): HandlerMap {
                 percent: progress.percent,
                 done: false,
                 cancelled: context.operations.get(operationId)?.cancelled ?? false,
-                tour: progress.tour
+                tour: progress.tour,
+                activity: progress.activity
               })
           });
           const current = context.operations.get(operationId);
@@ -596,7 +619,13 @@ function createIpcHandlers(context: IpcHandlerContext): HandlerMap {
             changedFileCount: input.changedFiles.length,
             model: tour.model,
             chapterCount: tour.chapters.length,
-            riskSignalCount: tour.riskSignals.length
+            riskSignalCount: tour.riskSignals.length,
+            inlineCommentCount: tour.chapters.reduce((sum, chapter) => sum + chapter.diffAnchors.filter((anchor) => anchor.note).length, 0),
+            edgeCount: tour.graph.edges.length,
+            deterministicEdgeCount: tour.graph.edges.filter((edge) => edge.source === "deterministic").length,
+            ...(runStats.turns !== undefined
+              ? { agentTurns: runStats.turns, agentOutputTokens: runStats.outputTokens, agentStop: runStats.stoppedReason }
+              : {})
           });
         } catch (error) {
           const cancelled = context.operations.get(operationId)?.cancelled ?? false;

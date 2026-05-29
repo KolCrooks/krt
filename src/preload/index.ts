@@ -1,5 +1,13 @@
 import { contextBridge, ipcRenderer } from "electron";
-import { closeSubTabEvent, operationProgressEvent, workspaceFileChangeEvent, type IpcChannel, type IpcInput, type IpcOutput } from "../shared/ipc.js";
+import {
+  closeSubTabEvent,
+  openPreferencesEvent,
+  operationProgressEvent,
+  workspaceFileChangeEvent,
+  type IpcChannel,
+  type IpcInput,
+  type IpcOutput
+} from "../shared/ipc.js";
 import {
   type OperationProgress,
   type TypedError,
@@ -28,6 +36,13 @@ const api = {
       ipcRenderer.on(closeSubTabEvent, handler);
       return () => {
         ipcRenderer.off(closeSubTabEvent, handler);
+      };
+    },
+    onOpenPreferences: (listener: () => void) => {
+      const handler = () => listener();
+      ipcRenderer.on(openPreferencesEvent, handler);
+      return () => {
+        ipcRenderer.off(openPreferencesEvent, handler);
       };
     }
   },
@@ -92,6 +107,8 @@ const api = {
   comments: {
     postIssueComment: (input: IpcInput<"comments:postIssueComment">) => invoke("comments:postIssueComment", input),
     replyToReviewThread: (input: IpcInput<"comments:replyToReviewThread">) => invoke("comments:replyToReviewThread", input),
+    updateReviewComment: (input: IpcInput<"comments:updateReviewComment">) => invoke("comments:updateReviewComment", input),
+    deleteReviewComment: (input: IpcInput<"comments:deleteReviewComment">) => invoke("comments:deleteReviewComment", input),
     toggleReaction: (input: IpcInput<"comments:toggleReaction">) => invoke("comments:toggleReaction", input)
   },
   reviews: {

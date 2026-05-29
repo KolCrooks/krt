@@ -14,11 +14,12 @@ import {
   Terminal,
   X,
 } from "lucide-react";
-import { useState } from "react";
+import { useId, useState } from "react";
 import { krtClient } from "../api/client.js";
 import { ModalBackdrop } from "./ExtensionsView.js";
 import type { IpcInput } from "../../shared/ipc.js";
 import type {
+  AiProvider,
   AiKeyProvider,
   AppSettings,
   GitHubKeyProvider,
@@ -50,6 +51,44 @@ const SECTIONS: SettingsSection[] = [
   { id: "updates", label: "Updates", Icon: RefreshCw },
   { id: "about", label: "About", Icon: Info },
 ];
+
+interface ModelSuggestion {
+  value: string;
+  label: string;
+}
+
+const MODEL_SUGGESTIONS: Record<AiProvider, ModelSuggestion[]> = {
+  disabled: [],
+  anthropic: [
+    { value: "claude-sonnet-4-5", label: "Default, tool-capable" },
+    { value: "claude-3-7-sonnet-latest", label: "Tool-capable, thinking-capable" },
+    { value: "claude-3-5-sonnet-20241022", label: "Tool-capable" }
+  ],
+  openai: [
+    { value: "gpt-5-mini", label: "Default, tool-capable" },
+    { value: "gpt-5", label: "Tool-capable" },
+    { value: "gpt-4.1", label: "Tool-capable" },
+    { value: "gpt-4.1-mini", label: "Tool-capable" }
+  ],
+  google: [
+    { value: "gemini-2.5-flash", label: "Default, tool-capable" },
+    { value: "gemini-2.5-pro", label: "Tool-capable" }
+  ],
+  "azure-openai": [
+    { value: "gpt-5-mini", label: "Use your Azure deployment name" },
+    { value: "gpt-5", label: "Use your Azure deployment name" },
+    { value: "gpt-4.1", label: "Use your Azure deployment name" }
+  ],
+  bedrock: [
+    { value: "anthropic.claude-3-5-sonnet-20241022-v2:0", label: "Default, tool-capable" },
+    { value: "anthropic.claude-3-7-sonnet-20250219-v1:0", label: "Tool-capable" }
+  ],
+  ollama: [
+    { value: "llama3.1", label: "Requires tool support in local runtime" },
+    { value: "qwen2.5-coder", label: "Requires tool support in local runtime" },
+    { value: "mistral-nemo", label: "Requires tool support in local runtime" }
+  ]
+};
 
 interface SettingsViewProps {
   onClose: () => void;
@@ -421,7 +460,9 @@ function AiSection({
   updateSettings,
 }: AiSectionProps): React.JSX.Element {
   const queryClient = useQueryClient();
+  const modelListId = useId();
   const [aiKey, setAiKey] = useState("");
+  const modelSuggestions = MODEL_SUGGESTIONS[settings.ai.provider];
   const aiKeyMutation = useMutation({
     mutationFn: (nextKey: string) => krtClient.auth.saveAiKey(nextKey),
     onSuccess: () => {
@@ -484,18 +525,29 @@ function AiSection({
         </SettingsRow>
         <SettingsRow
           label="Model"
-          hint="The specific model used for AI tour generation."
+          hint="The specific model used for AI review. Must support tool calling — the reviewer agent explores the checked-out code with tools. Models without tool support are not allowed."
         >
-          <input
-            className="settings-input"
-            value={settings.ai.model}
-            placeholder="claude-sonnet-4-5"
-            onChange={(event) =>
-              updateSettings({
-                ai: { ...settings.ai, model: event.target.value },
-              })
-            }
-          />
+          <div className="settings-combobox">
+            <input
+              className="settings-input"
+              value={settings.ai.model}
+              list={modelListId}
+              placeholder={modelSuggestions[0]?.value ?? "Model ID"}
+              autoComplete="off"
+              onChange={(event) =>
+                updateSettings({
+                  ai: { ...settings.ai, model: event.target.value },
+                })
+              }
+            />
+            <datalist id={modelListId}>
+              {modelSuggestions.map((option) => (
+                <option key={option.value} value={option.value}>
+                  {option.label}
+                </option>
+              ))}
+            </datalist>
+          </div>
         </SettingsRow>
         <SettingsRow
           last

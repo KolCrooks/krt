@@ -6,7 +6,8 @@ if (typeof window !== "undefined") {
   Object.defineProperty(window, "krt", {
   value: {
     app: {
-      onCloseSubTab: () => () => undefined
+      onCloseSubTab: () => () => undefined,
+      onOpenPreferences: () => () => undefined
     },
     auth: {
       getStatus: async () => ({ github: null, ai: { configured: false } }),
@@ -141,7 +142,10 @@ if (typeof window !== "undefined") {
     },
     comments: {
       postIssueComment: emptyAsync,
-      replyToReviewThread: emptyAsync
+      replyToReviewThread: emptyAsync,
+      updateReviewComment: emptyAsync,
+      deleteReviewComment: emptyAsync,
+      toggleReaction: async () => []
     },
     reviews: {
       resolveThread: emptyAsync,

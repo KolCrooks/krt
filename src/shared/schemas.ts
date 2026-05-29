@@ -168,6 +168,8 @@ export const reviewCommentSchema = z.object({
   createdAt: z.string(),
   updatedAt: z.string().optional(),
   isBot: z.boolean().default(false),
+  viewerCanUpdate: z.boolean().default(false),
+  viewerCanDelete: z.boolean().default(false),
   reactions: z.array(reactionGroupSchema).default([])
 });
 export type ReviewComment = z.infer<typeof reviewCommentSchema>;
@@ -274,16 +276,46 @@ export const pullRequestBundleSchema = z.object({
 });
 export type PullRequestBundle = z.infer<typeof pullRequestBundleSchema>;
 
+export const inlineCommentSeveritySchema = z.enum(["info", "nit", "warning", "blocker"]);
+export type InlineCommentSeverity = z.infer<typeof inlineCommentSeveritySchema>;
+
+export const inlineCommentCategorySchema = z.enum([
+  "correctness",
+  "security",
+  "performance",
+  "style",
+  "testing",
+  "design",
+  "docs"
+]);
+export type InlineCommentCategory = z.infer<typeof inlineCommentCategorySchema>;
+
 export const diffAnchorSchema = z.object({
   path: z.string(),
   startLine: z.number().int().positive().optional(),
   endLine: z.number().int().positive().optional(),
-  side: z.enum(["left", "right"]).default("right")
+  side: z.enum(["left", "right"]).default("right"),
+  // Inline comment for this region (like a code comment); may use Markdown.
+  note: z.string().optional(),
+  // Optional severity/category so the diff can color and group AI comments.
+  severity: inlineCommentSeveritySchema.optional(),
+  category: inlineCommentCategorySchema.optional()
 });
 export type DiffAnchor = z.infer<typeof diffAnchorSchema>;
 
 export const riskLevelSchema = z.enum(["low", "medium", "high"]);
 export type RiskLevel = z.infer<typeof riskLevelSchema>;
+
+export const chapterKindSchema = z.enum([
+  "concept",
+  "replacement",
+  "behavior",
+  "plumbing",
+  "config",
+  "verification",
+  "cleanup"
+]);
+export type ChapterKind = z.infer<typeof chapterKindSchema>;
 
 export const tourChapterSchema = z.object({
   id: z.string(),
@@ -300,6 +332,17 @@ export const tourChapterSchema = z.object({
   riskReasons: z.array(z.string()).default([]),
   reviewChecklist: z.array(z.string()).default([]),
   dependencies: z.array(z.string()).default([]),
+  // Categorization of the chapter (what kind of change it is). Optional so older
+  // cached tours still load; the storyboard falls back to inferring it.
+  kind: chapterKindSchema.optional(),
+  // Real blast radius for this chapter, grounded in static analysis.
+  impact: z
+    .object({
+      blastRadiusFiles: z.array(z.string()).default([]),
+      referenceCount: z.number().int().nonnegative().default(0),
+      touchedSymbols: z.array(z.string()).default([])
+    })
+    .optional(),
   generatedAt: z.string(),
   model: z.string(),
   headSha: z.string()
@@ -322,7 +365,11 @@ export const tourGraphSchema = z.object({
       to: z.string(),
       relation: z.enum(["dependency", "extension", "gating", "verification", "risk"]),
       confidence: z.number().min(0).max(1),
-      source: z.enum(["ai", "local", "deterministic"])
+      source: z.enum(["ai", "local", "deterministic"]),
+      // Why the edge exists, and the symbol/file evidence backing it (used for
+      // deterministic edges so the storyboard can show grounded relationships).
+      reason: z.string().optional(),
+      evidence: z.array(z.string()).optional()
     })
   )
 });
@@ -535,6 +582,14 @@ export const defaultAppSettings: AppSettings = appSettingsSchema.parse({
   pinnedRepos: []
 });
 
+// One entry in the live "agent working" feed: the model's reasoning (think), a
+// spoken note (say), a tool invocation (tool), or a tool error result (result).
+export const agentActivitySchema = z.object({
+  kind: z.enum(["think", "say", "tool", "result"]),
+  text: z.string()
+});
+export type AgentActivity = z.infer<typeof agentActivitySchema>;
+
 export const operationProgressSchema = z.object({
   operationId: z.string(),
   phase: z.string(),
@@ -546,7 +601,9 @@ export const operationProgressSchema = z.object({
   // Optional in-progress result preview. AI tour generation streams a partial
   // ReviewTour here (chapters filled in as they arrive) so the UI can render
   // the story as it is written, before the operation completes.
-  tour: reviewTourSchema.optional()
+  tour: reviewTourSchema.optional(),
+  // One step of the agent's transcript, surfaced as a live chat feed.
+  activity: agentActivitySchema.optional()
 });
 export type OperationProgress = z.infer<typeof operationProgressSchema>;
 

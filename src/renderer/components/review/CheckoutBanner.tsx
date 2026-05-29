@@ -1,9 +1,10 @@
 import { useMutation, useQuery } from "@tanstack/react-query";
-import { Ban, Code2, GitBranch, RefreshCw, X } from "lucide-react";
-import { useEffect } from "react";
+import { AlertTriangle, Ban, Code2, GitBranch, RefreshCw, X } from "lucide-react";
+import { useCallback, useEffect } from "react";
 import { krtClient } from "../../api/client.js";
 import type { PrTab } from "../../store/uiStore.js";
 import { useUiStore } from "../../store/uiStore.js";
+import type { OperationProgress } from "../../../shared/schemas.js";
 
 interface CheckoutBannerProps {
   tab: PrTab;
@@ -14,6 +15,25 @@ export function CheckoutBanner({ tab }: CheckoutBannerProps): React.JSX.Element 
   const dismissCheckoutBanner = useUiStore((state) => state.dismissCheckoutBanner);
   const setTabMode = useUiStore((state) => state.setTabMode);
   const detail = tab.bundle.detail;
+  const applyProgress = useCallback(
+    (progress: OperationProgress) => {
+      setCheckout(tab.key, { message: progress.message, percent: progress.percent ?? null });
+      if (progress.done && !progress.cancelled && progress.phase === "complete") {
+        setTabMode(tab.key, "managed");
+        setCheckout(tab.key, { state: "checked", message: progress.message, percent: 100, operationId: null });
+        return;
+      }
+      if (progress.done && (progress.cancelled || progress.phase === "failed")) {
+        setCheckout(tab.key, {
+          state: "idle",
+          message: checkoutFailureMessage(progress),
+          percent: null,
+          operationId: null
+        });
+      }
+    },
+    [setCheckout, setTabMode, tab.key]
+  );
   const checkoutStatus = useQuery({
     queryKey: ["checkout-status", detail.repository.fullName, detail.headSha],
     enabled: tab.mode !== "managed" && tab.checkout.state !== "checking",
@@ -43,11 +63,15 @@ export function CheckoutBanner({ tab }: CheckoutBannerProps): React.JSX.Element 
         if (!progress) {
           return;
         }
-        setCheckout(tab.key, { message: progress.message, percent: progress.percent ?? null });
-        if (progress.done && !progress.cancelled && progress.phase === "complete") {
-          setTabMode(tab.key, "managed");
-          setCheckout(tab.key, { state: "checked" });
-        }
+        applyProgress(progress);
+      });
+    },
+    onError: (error) => {
+      setCheckout(tab.key, {
+        state: "idle",
+        message: errorMessage(error),
+        percent: null,
+        operationId: null
       });
     }
   });
@@ -61,13 +85,9 @@ export function CheckoutBanner({ tab }: CheckoutBannerProps): React.JSX.Element 
       if (progress.operationId !== opId) {
         return;
       }
-      setCheckout(tab.key, { message: progress.message, percent: progress.percent ?? null });
-      if (progress.done && !progress.cancelled && progress.phase === "complete") {
-        setTabMode(tab.key, "managed");
-        setCheckout(tab.key, { state: "checked" });
-      }
+      applyProgress(progress);
     });
-  }, [setCheckout, setTabMode, tab.checkout.operationId, tab.key]);
+  }, [applyProgress, tab.checkout.operationId]);
 
   useEffect(() => {
     if (checkoutStatus.data?.mode !== "managed") {
@@ -86,16 +106,24 @@ export function CheckoutBanner({ tab }: CheckoutBannerProps): React.JSX.Element 
   return (
     <div className="checkout-banner" role="status">
       <span className="checkout-banner-icon" aria-hidden="true">
-        <Code2 size={11} />
+        {!isChecking && tab.checkout.message ? <AlertTriangle size={11} /> : <Code2 size={11} />}
       </span>
       <span className="checkout-banner-text">
         {isChecking ? (
           <>
-            Checking out <span className="mono">{detail.headRef}</span>… enables rust-analyzer, jump-to-definition, and refactors.
+            {tab.checkout.message ?? (
+              <>
+                Checking out <span className="mono">{detail.headRef}</span> enables rust-analyzer, jump-to-definition, and refactors.
+              </>
+            )}
+          </>
+        ) : tab.checkout.message ? (
+          <>
+            <strong>{tab.checkout.message}</strong> Review still works in diff mode.
           </>
         ) : (
           <>
-            You're browsing the diff. <strong>Check out the branch</strong> to enable rust-analyzer, jump-to-definition, and refactors — review works fine without it.
+            You're browsing the diff. <strong>Check out the branch</strong> to enable rust-analyzer, jump-to-definition, and refactors - review works fine without it.
           </>
         )}
       </span>
@@ -132,4 +160,28 @@ export function CheckoutBanner({ tab }: CheckoutBannerProps): React.JSX.Element 
       {isChecking ? <RefreshCw className="spin checkout-banner-spinner" size={11} aria-hidden="true" /> : null}
     </div>
   );
+}
+
+function checkoutFailureMessage(progress: OperationProgress): string {
+  if (progress.cancelled) {
+    return progress.message;
+  }
+
+  const errorLine = progress.error
+    ?.split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .at(-1)
+    ?.replace(/^fatal:\s*/i, "");
+  return errorLine ? `${progress.message}: ${errorLine}` : progress.message;
+}
+
+function errorMessage(error: unknown): string {
+  if (error instanceof Error) {
+    return error.message;
+  }
+  if (error && typeof error === "object" && "message" in error && typeof error.message === "string") {
+    return error.message;
+  }
+  return "Managed checkout failed";
 }

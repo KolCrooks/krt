@@ -1,4 +1,4 @@
-import type { ReviewDraftComment, ReviewThread, TourChapter } from "./schemas.js";
+import type { InlineCommentCategory, InlineCommentSeverity, ReviewDraftComment, ReviewThread, TourChapter } from "./schemas.js";
 
 export type DiffAnnotationKind = "review" | "ai" | "draft";
 
@@ -12,7 +12,10 @@ export interface DiffAnnotation {
   endLine?: number;
   side?: "left" | "right";
   status: string;
+  severity?: InlineCommentSeverity;
+  category?: InlineCommentCategory;
   thread?: ReviewThread;
+  draftCommentId?: string;
 }
 
 interface DiffAnnotationInput {
@@ -61,25 +64,31 @@ function buildReviewAnnotations(filePath: string, reviewThreads: readonly Review
 }
 
 function buildTourAnnotations(filePath: string, tourChapters: readonly TourChapter[]): DiffAnnotation[] {
-  return tourChapters.flatMap((chapter) => {
-    const anchors = chapter.diffAnchors.filter((anchor) => anchor.path === filePath);
-    if (anchors.length === 0 && !chapter.files.includes(filePath)) {
-      return [];
-    }
-
-    const annotationAnchors = anchors.length > 0 ? anchors : [{ path: filePath, side: "right" as const }];
-    return annotationAnchors.map((anchor, index) => ({
-      id: `ai:${chapter.id}:${anchor.startLine ?? "file"}:${index}`,
-      kind: "ai" as const,
-      title: `AI: ${chapter.title}`,
-      body: chapter.summary,
-      path: filePath,
-      line: anchor.startLine,
-      endLine: anchor.endLine,
-      side: anchor.side,
-      status: chapter.riskLevel
-    }));
-  });
+  return tourChapters.flatMap((chapter) =>
+    chapter.diffAnchors.flatMap((anchor, index) => {
+      // Inline AI comments come only from the model's per-anchor `note` — a
+      // purpose-generated one-liner — never distilled from the chapter summary.
+      const note = anchor.note?.trim();
+      if (anchor.path !== filePath || !note) {
+        return [];
+      }
+      return [
+        {
+          id: `ai:${chapter.id}:${anchor.startLine ?? "file"}:${index}`,
+          kind: "ai" as const,
+          title: chapter.title,
+          body: note,
+          path: filePath,
+          line: anchor.startLine,
+          endLine: anchor.endLine,
+          side: anchor.side,
+          status: chapter.riskLevel,
+          ...(anchor.severity ? { severity: anchor.severity } : {}),
+          ...(anchor.category ? { category: anchor.category } : {})
+        }
+      ];
+    })
+  );
 }
 
 function buildDraftAnnotations(
@@ -96,7 +105,8 @@ function buildDraftAnnotations(
       path: filePath,
       line: comment.line,
       side: comment.side,
-      status: "pending"
+      status: "pending",
+      draftCommentId: comment.id
     }));
 }
 

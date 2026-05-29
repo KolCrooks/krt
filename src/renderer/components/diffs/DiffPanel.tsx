@@ -1,17 +1,22 @@
 import { useQuery } from "@tanstack/react-query";
 import { File, FileDiff as DiffFileView, useWorkerPool } from "@pierre/diffs/react";
 import { processFile } from "@pierre/diffs";
-import type { DiffLineAnnotation, FileContents, FileDiffMetadata, HunkData, SelectedLineRange } from "@pierre/diffs";
-import { AlertTriangle, ChevronDown, ChevronUp, FileCode2, MessageSquare, Search, Sparkles, X } from "lucide-react";
+import type { DiffLineAnnotation, FileContents, FileDiffMetadata, SelectedLineRange } from "@pierre/diffs";
+import { AlertTriangle, ChevronDown, ChevronUp, FileCode2, MessageSquare, Pencil, Search, Sparkles, Trash2, X } from "lucide-react";
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { krtClient } from "../../api/client.js";
 import { useLspCodeInteractions } from "../../hooks/useLspCodeInteractions.js";
-import { renderMarkdown } from "../../lib/markdown.js";
-import { cropPatchToFocusRanges, type FocusRange } from "./cropPatch.js";
+import { renderInlineMarkdown, renderMarkdown } from "../../lib/markdown.js";
 import { buildDiffAnnotations, type DiffAnnotation } from "../../../shared/diffAnnotations.js";
 import type { ChangedFile, ChangedFileStatus, PullRequestDetail, ReviewDraftComment, ReviewThread, TourChapter } from "../../../shared/schemas.js";
 import { ThreadCard, threadItemFromReviewThread } from "../PullRequestOverview.js";
 import { useUiStore } from "../../store/uiStore.js";
+
+interface DiffSearchTarget extends SelectedLineRange {
+  matchId?: string | null;
+  matchStart?: number | null;
+  matchLength?: number | null;
+}
 
 interface DiffPanelProps {
   pullRequest: PullRequestDetail;
@@ -19,15 +24,15 @@ interface DiffPanelProps {
   layout?: "inline" | "split";
   reviewThreads?: ReviewThread[];
   tourChapters?: TourChapter[];
+  searchTarget?: DiffSearchTarget | null;
   headerless?: boolean;
   enableLsp?: boolean;
   tabKey?: string;
   onOpenDefinition?: (path: string, line: number) => void;
-  /** Crop the diff to only the hunks covered by tourChapters' diffAnchors for this file. */
-  cropToChapters?: boolean;
 }
 
 const EMPTY_DRAFT_COMMENTS: [] = [];
+const SEARCH_SCROLL_RETRY_FRAMES = 8;
 
 interface DraftComposerAnnotation {
   id: "draft-composer";
@@ -49,17 +54,19 @@ export const DiffPanel = memo(function DiffPanel({
   layout = "inline",
   reviewThreads = [],
   tourChapters = [],
+  searchTarget = null,
   headerless = false,
   enableLsp = false,
   tabKey,
-  onOpenDefinition,
-  cropToChapters = false
+  onOpenDefinition
 }: DiffPanelProps): React.JSX.Element {
   const [largeLoadPath, setLargeLoadPath] = useState<string | null>(null);
-  const [fullContextRequested, setFullContextRequested] = useState(false);
   const [selectionTarget, setSelectionTarget] = useState<SelectedLineRange | null>(null);
   const [draftTarget, setDraftTarget] = useState<SelectedLineRange | null>(null);
   const [draftBody, setDraftBody] = useState("");
+  const lastScrolledSearchTarget = useRef<string | null>(null);
+  const diffContainerRef = useRef<HTMLElement | null>(null);
+  const latestSearchScrollKey = useRef<string | null>(null);
   const addDraftReviewComment = useUiStore((state) => state.addDraftReviewComment);
   const draftComments = useUiStore((state) =>
     tabKey ? state.tabs.find((tab) => tab.key === tabKey)?.finish.comments ?? EMPTY_DRAFT_COMMENTS : EMPTY_DRAFT_COMMENTS
@@ -98,46 +105,24 @@ export const DiffPanel = memo(function DiffPanel({
       file?.previousPath,
       file?.status
     ],
-    enabled: Boolean(file && fullContextRequested && !file.isLarge),
+    // Load full file context eagerly (for non-large files) so the diff library
+    // can collapse unchanged regions into natively-expandable separators rather
+    // than leaving gaps the user cannot open.
+    enabled: Boolean(file && !file.isLarge),
     queryFn: () => loadFullDiffContext(pullRequest, file)
   });
-  useEffect(() => {
-    setFullContextRequested(false);
-  }, [file?.path, pullRequest.headSha]);
   useEffect(() => {
     setSelectionTarget(null);
     setDraftTarget(null);
     setDraftBody("");
   }, [file?.path, pullRequest.headSha]);
   const patch = patchQuery.data?.patch ?? file?.patch ?? "";
-  const focusRanges = useMemo<FocusRange[]>(() => {
-    if (!cropToChapters || !file) {
-      return [];
-    }
-    const ranges: FocusRange[] = [];
-    for (const chapter of tourChapters) {
-      for (const anchor of chapter.diffAnchors) {
-        if (anchor.path === file.path && anchor.startLine) {
-          ranges.push({ start: anchor.startLine, end: anchor.endLine ?? anchor.startLine, side: anchor.side });
-        }
-      }
-    }
-    return ranges;
-  }, [cropToChapters, file, tourChapters]);
-  const focusKey = useMemo(() => focusRanges.map((range) => `${range.side}${range.start}-${range.end}`).join("|"), [focusRanges]);
-  const renderablePatch = useMemo(() => {
-    if (!file || !patch) {
-      return "";
-    }
-    const base = buildRenderablePatch(file, patch);
-    return focusRanges.length > 0 ? cropPatchToFocusRanges(base, focusRanges) : base;
-  }, [file, patch, focusRanges]);
+  const renderablePatch = useMemo(() => (file && patch ? buildRenderablePatch(file, patch) : ""), [file, patch]);
   const patchDiffCacheKey = useMemo(
-    () => (file && patch ? `${makePatchDiffCacheKey(pullRequest, file, patch)}:focus:${focusKey}` : ""),
+    () => (file && patch ? makePatchDiffCacheKey(pullRequest, file, patch) : ""),
     [
       file,
       patch,
-      focusKey,
       pullRequest.baseRef,
       pullRequest.baseSha,
       pullRequest.headSha,
@@ -160,40 +145,18 @@ export const DiffPanel = memo(function DiffPanel({
       return null;
     }
     try {
-      return processFile(renderablePatch, {
+      const candidate = processFile(renderablePatch, {
         cacheKey: `${patchDiffCacheKey}:full:${fullContextQuery.data.oldFile.cacheKey ?? ""}:${fullContextQuery.data.newFile.cacheKey ?? ""}`,
         oldFile: fullContextQuery.data.oldFile,
         newFile: fullContextQuery.data.newFile
       }) ?? null;
+      return candidate && isRenderableFullContextDiff(candidate) ? candidate : null;
     } catch {
       return null;
     }
   }, [file, fullContextQuery.data, patchDiffCacheKey, renderablePatch]);
   const activeFileDiff = fullContextFileDiff ?? partialFileDiff;
   const diffRenderVersion = useWorkerCacheRenderVersion("diff", activeFileDiff);
-  const renderPartialHunkSeparator = useCallback(
-    (hunk: HunkData) => {
-      const button = document.createElement("button");
-      button.type = "button";
-      button.className = "diff-context-expander";
-      button.disabled = fullContextQuery.isLoading;
-      button.textContent = fullContextQuery.isLoading
-        ? "Loading context"
-        : fullContextQuery.isError
-          ? "Retry context"
-          : `Show ${hunk.lines} unchanged lines`;
-      button.addEventListener("click", (event) => {
-        event.preventDefault();
-        event.stopPropagation();
-        setFullContextRequested(true);
-        if (fullContextRequested && fullContextQuery.isError) {
-          void fullContextQuery.refetch();
-        }
-      });
-      return button;
-    },
-    [fullContextQuery.isError, fullContextQuery.isLoading, fullContextQuery.refetch, fullContextRequested]
-  );
   const normalizeDraftRange = useCallback(
     (range: SelectedLineRange | null): SelectedLineRange | null => {
       if (!activeFileDiff) {
@@ -282,6 +245,51 @@ export const DiffPanel = memo(function DiffPanel({
       : [];
     return [...sourceAnnotations, ...composerAnnotation];
   }, [activeFileDiff, annotations, draftBody, draftTarget, file]);
+  const searchScrollKey = searchTarget && file
+    ? `${file.path}:${searchTarget.side ?? "additions"}:${searchTarget.start}:${searchTarget.end}:${searchTarget.matchId ?? ""}:${searchTarget.matchStart ?? ""}:${searchTarget.matchLength ?? ""}`
+    : null;
+  latestSearchScrollKey.current = searchScrollKey;
+  const applySearchTarget = useCallback(
+    (node: HTMLElement): boolean => {
+      clearSearchTextHighlights(node);
+      if (!searchTarget?.start || !searchScrollKey) {
+        lastScrolledSearchTarget.current = null;
+        return true;
+      }
+      highlightSearchTextMatch(node, searchTarget);
+      if (lastScrolledSearchTarget.current === searchScrollKey) {
+        return true;
+      }
+      if (scrollFileLineIntoView(node, searchTarget.start, searchTarget.side)) {
+        lastScrolledSearchTarget.current = searchScrollKey;
+        return true;
+      }
+      return false;
+    },
+    [searchScrollKey, searchTarget]
+  );
+  const scheduleSearchTargetApplication = useCallback(
+    (node: HTMLElement, expectedKey: string | null, attempt = 0): void => {
+      const scheduler = attempt === 0 ? scheduleAfterParentScroll : scheduleAfterRender;
+      scheduler(() => {
+        if (latestSearchScrollKey.current !== expectedKey) {
+          return;
+        }
+        const applied = applySearchTarget(node);
+        if (!applied && expectedKey && attempt < SEARCH_SCROLL_RETRY_FRAMES) {
+          scheduleSearchTargetApplication(node, expectedKey, attempt + 1);
+        }
+      });
+    },
+    [applySearchTarget]
+  );
+  useEffect(() => {
+    const node = diffContainerRef.current;
+    if (!node) {
+      return;
+    }
+    scheduleSearchTargetApplication(node, searchScrollKey);
+  }, [scheduleSearchTargetApplication, searchScrollKey]);
   const patchView = useMemo(() => {
     if (!file || !patch) {
       return null;
@@ -290,6 +298,11 @@ export const DiffPanel = memo(function DiffPanel({
     if (!fileDiff) {
       return null;
     }
+    const activeSelectedLines = draftTarget ?? selectionTarget ?? searchTarget;
+    const handlePostRender = (node: HTMLElement): void => {
+      diffContainerRef.current = node;
+      scheduleSearchTargetApplication(node, searchScrollKey);
+    };
     const viewKey = `${fileDiff.cacheKey ?? file.path}:${diffRenderVersion}`;
     const commonOptions = {
       diffStyle: layout === "split" ? "split" as const : "unified" as const,
@@ -304,40 +317,26 @@ export const DiffPanel = memo(function DiffPanel({
       onLineSelectionStart: tabKey ? handleSelectionStart : undefined,
       onLineSelectionChange: tabKey ? handleSelectionChange : undefined,
       onLineSelectionEnd: tabKey ? handleSelectionEnd : undefined,
+      onPostRender: handlePostRender,
       ...lspInteractions.options
     };
-    if (fullContextFileDiff) {
-      return (
-        <DiffFileView<RenderableDiffAnnotation>
-          key={viewKey}
-          fileDiff={fileDiff}
-          disableWorkerPool={false}
-          lineAnnotations={lineAnnotations}
-          selectedLines={draftTarget ?? selectionTarget}
-          renderAnnotation={renderAnnotation}
-          renderHeaderPrefix={() => <StatusBadge status={file.status} />}
-          renderHeaderMetadata={() => <ChangeCounts additions={file.additions} deletions={file.deletions} />}
-          options={{
-            ...commonOptions,
-            expandUnchanged: true,
-            hunkSeparators: "line-info"
-          }}
-        />
-      );
-    }
+    // Collapse unchanged regions into the library's native, expandable
+    // "line-info" separators. When the full file context has loaded the gaps can
+    // be opened; until then the patch's own context shows.
     return (
       <DiffFileView<RenderableDiffAnnotation>
         key={viewKey}
         fileDiff={fileDiff}
         disableWorkerPool={false}
         lineAnnotations={lineAnnotations}
-        selectedLines={draftTarget ?? selectionTarget}
+        selectedLines={activeSelectedLines}
         renderAnnotation={renderAnnotation}
         renderHeaderPrefix={() => <StatusBadge status={file.status} />}
         renderHeaderMetadata={() => <ChangeCounts additions={file.additions} deletions={file.deletions} />}
         options={{
           ...commonOptions,
-          hunkSeparators: renderPartialHunkSeparator
+          expandUnchanged: false,
+          hunkSeparators: "line-info"
         }}
       />
     );
@@ -346,18 +345,19 @@ export const DiffPanel = memo(function DiffPanel({
     diffRenderVersion,
     draftTarget,
     file,
-    fullContextFileDiff,
     headerless,
     layout,
     lineAnnotations,
     lspInteractions.options,
     patch,
+    scheduleSearchTargetApplication,
+    searchScrollKey,
+    searchTarget,
     selectionTarget,
     handleDraftRange,
     handleSelectionChange,
     handleSelectionEnd,
     handleSelectionStart,
-    renderPartialHunkSeparator,
     renderAnnotation
   ]);
 
@@ -715,13 +715,153 @@ function scheduleAfterRender(callback: () => void): void {
   window.setTimeout(callback, 0);
 }
 
-function scrollFileLineIntoView(container: HTMLElement, line: number): boolean {
-  const lineElement = container.shadowRoot?.querySelector(`[data-line="${line}"]`);
+function scheduleAfterParentScroll(callback: () => void): void {
+  scheduleAfterRender(() => scheduleAfterRender(callback));
+}
+
+function scrollFileLineIntoView(container: HTMLElement, line: number, side?: "deletions" | "additions"): boolean {
+  const lineElement = getDiffLineElement(container, line, side);
   if (!(lineElement instanceof HTMLElement)) {
     return false;
   }
-  lineElement.scrollIntoView({ block: "center", inline: "nearest" });
+  if (typeof lineElement.scrollIntoView !== "function") {
+    return false;
+  }
+  lineElement.scrollIntoView({ block: "center", inline: "nearest", behavior: "auto" });
   return true;
+}
+
+function highlightSearchTextMatch(container: HTMLElement, target: DiffSearchTarget): boolean {
+  const matchStart = normalizeMatchOffset(target.matchStart);
+  const matchLength = normalizeMatchLength(target.matchLength);
+  if (matchStart === null || matchLength === null) {
+    return false;
+  }
+  const lineElement = getDiffLineElement(container, target.start, target.side);
+  if (!(lineElement instanceof HTMLElement)) {
+    return false;
+  }
+  return wrapTextRange(lineElement, matchStart, matchLength);
+}
+
+function getDiffLineElement(
+  container: HTMLElement,
+  line: number,
+  side?: "deletions" | "additions"
+): HTMLElement | null {
+  const root = container.shadowRoot;
+  if (!root) {
+    return null;
+  }
+  const lineType = side === "deletions" ? "change-deletion" : side === "additions" ? "change-addition" : null;
+  const selector = lineType ? `[data-line="${line}"][data-line-type="${lineType}"]` : `[data-line="${line}"]`;
+  const sideMatch = root.querySelector(selector);
+  if (sideMatch instanceof HTMLElement) {
+    return sideMatch;
+  }
+  const fallback = root.querySelector(`[data-line="${line}"]`);
+  return fallback instanceof HTMLElement ? fallback : null;
+}
+
+function clearSearchTextHighlights(container: HTMLElement): void {
+  const root = container.shadowRoot;
+  if (!root) {
+    return;
+  }
+  const parents = new Set<ParentNode>();
+  for (const mark of Array.from(root.querySelectorAll("mark[data-diff-search-text-match]"))) {
+    const parent = mark.parentNode;
+    if (!parent) {
+      continue;
+    }
+    parents.add(parent);
+    while (mark.firstChild) {
+      parent.insertBefore(mark.firstChild, mark);
+    }
+    mark.remove();
+  }
+  for (const parent of parents) {
+    parent.normalize();
+  }
+}
+
+function wrapTextRange(container: HTMLElement, start: number, length: number): boolean {
+  const end = start + length;
+  const ranges: Array<{ node: Text; start: number; end: number }> = [];
+  let offset = 0;
+  const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT, {
+    acceptNode(node) {
+      if (!node.textContent) {
+        return NodeFilter.FILTER_REJECT;
+      }
+      const parent = node.parentElement;
+      if (!parent || parent.closest("mark[data-diff-search-text-match]")) {
+        return NodeFilter.FILTER_REJECT;
+      }
+      return NodeFilter.FILTER_ACCEPT;
+    }
+  });
+
+  while (true) {
+    const node = walker.nextNode();
+    if (!(node instanceof Text)) {
+      break;
+    }
+    const nodeLength = node.data.length;
+    const nodeStart = offset;
+    const nodeEnd = offset + nodeLength;
+    const overlapStart = Math.max(start, nodeStart);
+    const overlapEnd = Math.min(end, nodeEnd);
+    if (overlapStart < overlapEnd) {
+      ranges.push({
+        node,
+        start: overlapStart - nodeStart,
+        end: overlapEnd - nodeStart
+      });
+    }
+    offset = nodeEnd;
+    if (offset >= end) {
+      break;
+    }
+  }
+
+  for (const range of ranges.reverse()) {
+    wrapTextNodeRange(range.node, range.start, range.end);
+  }
+  return ranges.length > 0;
+}
+
+function wrapTextNodeRange(node: Text, start: number, end: number): void {
+  const parent = node.parentNode;
+  if (!parent || start >= end) {
+    return;
+  }
+  const range = document.createRange();
+  range.setStart(node, start);
+  range.setEnd(node, end);
+  const mark = document.createElement("mark");
+  mark.setAttribute("data-diff-search-text-match", "");
+  mark.style.background = "color-mix(in srgb, #facc15 70%, transparent)";
+  mark.style.borderRadius = "2px";
+  mark.style.boxShadow = "0 0 0 1px color-mix(in srgb, #b45309 35%, transparent)";
+  mark.style.color = "inherit";
+  mark.style.padding = "0 1px";
+  range.surroundContents(mark);
+  range.detach();
+}
+
+function normalizeMatchOffset(value: number | null | undefined): number | null {
+  if (value == null || !Number.isFinite(value) || value < 0) {
+    return null;
+  }
+  return Math.floor(value);
+}
+
+function normalizeMatchLength(value: number | null | undefined): number | null {
+  if (value == null || !Number.isFinite(value) || value < 1) {
+    return null;
+  }
+  return Math.floor(value);
 }
 
 function buildRenderablePatch(file: ChangedFile, patch: string): string {
@@ -795,6 +935,62 @@ function makeDiffFile(name: string, contents: string, ref: string, language: str
     lang: language,
     cacheKey: `${ref}:${name}:${contents.length}`
   };
+}
+
+function isRenderableFullContextDiff(fileDiff: FileDiffMetadata): boolean {
+  if (fileDiff.isPartial) {
+    return true;
+  }
+
+  let previousDeletionEnd = 0;
+  let previousAdditionEnd = 0;
+
+  for (const hunk of fileDiff.hunks) {
+    if (
+      hunk.deletionLineIndex < 0 ||
+      hunk.additionLineIndex < 0 ||
+      hunk.deletionLineIndex + hunk.deletionCount > fileDiff.deletionLines.length ||
+      hunk.additionLineIndex + hunk.additionCount > fileDiff.additionLines.length
+    ) {
+      return false;
+    }
+
+    const deletionContextBefore = hunk.deletionLineIndex - previousDeletionEnd;
+    const additionContextBefore = hunk.additionLineIndex - previousAdditionEnd;
+    if (deletionContextBefore !== additionContextBefore) {
+      return false;
+    }
+
+    for (const content of hunk.hunkContent) {
+      if (content.type === "context") {
+        if (
+          content.deletionLineIndex < 0 ||
+          content.additionLineIndex < 0 ||
+          content.deletionLineIndex + content.lines > fileDiff.deletionLines.length ||
+          content.additionLineIndex + content.lines > fileDiff.additionLines.length
+        ) {
+          return false;
+        }
+        for (let index = 0; index < content.lines; index += 1) {
+          if (fileDiff.deletionLines[content.deletionLineIndex + index] !== fileDiff.additionLines[content.additionLineIndex + index]) {
+            return false;
+          }
+        }
+      } else if (
+        content.deletionLineIndex < 0 ||
+        content.additionLineIndex < 0 ||
+        content.deletionLineIndex + content.deletions > fileDiff.deletionLines.length ||
+        content.additionLineIndex + content.additions > fileDiff.additionLines.length
+      ) {
+        return false;
+      }
+    }
+
+    previousDeletionEnd = hunk.deletionLineIndex + hunk.deletionCount;
+    previousAdditionEnd = hunk.additionLineIndex + hunk.additionCount;
+  }
+
+  return fileDiff.deletionLines.length - previousDeletionEnd === fileDiff.additionLines.length - previousAdditionEnd;
 }
 
 type WorkerCacheKind = "file" | "diff";
@@ -1003,14 +1199,55 @@ function toDiffLineAnnotation<TAnnotation extends RenderableDiffAnnotation>(
   annotation: TAnnotation,
   fileDiff: FileDiffMetadata | null
 ): DiffLineAnnotation<TAnnotation>[] {
-  if (!annotation.line) {
-    return [];
-  }
+  const isAi = "kind" in annotation && annotation.kind === "ai";
   const side = annotation.side === "left" ? "deletions" : "additions";
-  if (fileDiff && lineIndexForSelectionPoint(fileDiff, annotation.line, side, "inline") == null) {
-    return [];
+  let line = annotation.line;
+
+  // AI primer comments are model-anchored, so their line can be slightly off or
+  // land on a line outside the rendered hunks. Rather than silently dropping
+  // them (which makes the guided comments disappear), snap to the nearest
+  // changed line in the diff so the comment still shows next to its region.
+  if (!line) {
+    if (!isAi || !fileDiff) {
+      return [];
+    }
+    const snapped = nearestDiffLine(fileDiff, 1, side);
+    if (snapped == null) {
+      return [];
+    }
+    line = snapped;
+  } else if (fileDiff && lineIndexForSelectionPoint(fileDiff, line, side, "inline") == null) {
+    const snapped = isAi ? nearestDiffLine(fileDiff, line, side) : null;
+    if (snapped == null) {
+      return [];
+    }
+    line = snapped;
   }
-  return [{ side, lineNumber: annotation.line, metadata: annotation } as unknown as DiffLineAnnotation<TAnnotation>];
+
+  return [{ side, lineNumber: line, metadata: annotation } as unknown as DiffLineAnnotation<TAnnotation>];
+}
+
+// The closest line on the given side that actually appears in the diff, found
+// by clamping into the nearest hunk's covered range. Returns null when the diff
+// has no lines on that side.
+function nearestDiffLine(fileDiff: FileDiffMetadata, line: number, side: "additions" | "deletions"): number | null {
+  let best: number | null = null;
+  let bestDistance = Number.POSITIVE_INFINITY;
+  for (const hunk of fileDiff.hunks) {
+    const start = side === "deletions" ? hunk.deletionStart : hunk.additionStart;
+    const count = side === "deletions" ? hunk.deletionCount : hunk.additionCount;
+    if (count <= 0) {
+      continue;
+    }
+    const end = start + count - 1;
+    const candidate = line < start ? start : line > end ? end : line;
+    const distance = Math.abs(candidate - line);
+    if (distance < bestDistance) {
+      bestDistance = distance;
+      best = candidate;
+    }
+  }
+  return best;
 }
 
 interface InlineAnnotationProps {
@@ -1020,6 +1257,10 @@ interface InlineAnnotationProps {
 }
 
 function InlineAnnotation({ annotation, tabKey, pullRequest }: InlineAnnotationProps): React.JSX.Element {
+  const removeDraftReviewComment = useUiStore((state) => state.removeDraftReviewComment);
+  const updateDraftReviewComment = useUiStore((state) => state.updateDraftReviewComment);
+  const [isEditingDraft, setIsEditingDraft] = useState(false);
+  const [editBody, setEditBody] = useState(annotation.body);
   if (annotation.kind === "review" && annotation.thread && tabKey) {
     const item = threadItemFromReviewThread(annotation.thread);
     if (item) {
@@ -1030,13 +1271,109 @@ function InlineAnnotation({ annotation, tabKey, pullRequest }: InlineAnnotationP
       );
     }
   }
-  const Icon = annotation.kind === "ai" ? Sparkles : MessageSquare;
+  if (annotation.kind === "ai") {
+    // Terse inline comment — reads like a code comment, color-coded by severity.
+    const severity = annotation.severity && annotation.severity !== "info" ? annotation.severity : null;
+    const range = annotation.line && annotation.endLine && annotation.endLine > annotation.line ? ` · lines ${annotation.line}–${annotation.endLine}` : "";
+    return (
+      <div className={`diff-anno diff-anno-ai diff-anno-note${severity ? ` diff-anno-sev-${severity}` : ""}`} title={`${annotation.title}${range}`}>
+        <Sparkles size={11} aria-hidden="true" />
+        <span className="diff-anno-note-text" dangerouslySetInnerHTML={{ __html: renderInlineMarkdown(annotation.body) }} />
+        {annotation.category ? <span className="diff-anno-cat">{annotation.category}</span> : null}
+      </div>
+    );
+  }
+  if (annotation.kind === "draft" && annotation.draftCommentId && tabKey && isEditingDraft) {
+    const body = editBody.trim();
+    return (
+      <div className="diff-anno diff-anno-draft">
+        <div className="diff-anno-head">
+          <MessageSquare size={11} aria-hidden="true" />
+          <strong>{annotation.title}</strong>
+          <span className="diff-anno-status">{annotation.status}</span>
+        </div>
+        <textarea
+          className="diff-anno-edit"
+          value={editBody}
+          rows={3}
+          autoFocus
+          aria-label="Draft review comment"
+          onChange={(event) => setEditBody(event.target.value)}
+          onKeyDown={(event) => {
+            if ((event.metaKey || event.ctrlKey) && event.key === "Enter" && body) {
+              event.preventDefault();
+              updateDraftReviewComment(tabKey, annotation.draftCommentId!, { body });
+              setIsEditingDraft(false);
+            }
+            if (event.key === "Escape") {
+              event.preventDefault();
+              setEditBody(annotation.body);
+              setIsEditingDraft(false);
+            }
+          }}
+        />
+        <div className="diff-anno-edit-actions">
+          <button
+            type="button"
+            className="secondary-button"
+            onClick={() => {
+              setEditBody(annotation.body);
+              setIsEditingDraft(false);
+            }}
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            className="primary-button"
+            disabled={!body}
+            onClick={() => {
+              if (!annotation.draftCommentId || !body) {
+                return;
+              }
+              updateDraftReviewComment(tabKey, annotation.draftCommentId, { body });
+              setIsEditingDraft(false);
+            }}
+          >
+            Save
+          </button>
+        </div>
+      </div>
+    );
+  }
   return (
     <div className={`diff-anno diff-anno-${annotation.kind}`}>
       <div className="diff-anno-head">
-        <Icon size={11} aria-hidden="true" />
+        <MessageSquare size={11} aria-hidden="true" />
         <strong>{annotation.title}</strong>
         <span className="diff-anno-status">{annotation.status}</span>
+        {annotation.kind === "draft" && annotation.draftCommentId && tabKey ? (
+          <>
+            <button
+              type="button"
+              className="icon-button diff-anno-action"
+              aria-label="Edit draft comment"
+              onClick={() => {
+                setEditBody(annotation.body);
+                setIsEditingDraft(true);
+              }}
+            >
+              <Pencil size={11} aria-hidden="true" />
+            </button>
+            <button
+              type="button"
+              className="icon-button diff-anno-action"
+              aria-label="Delete draft comment"
+              onClick={() => {
+                if (annotation.draftCommentId) {
+                  removeDraftReviewComment(tabKey, annotation.draftCommentId);
+                }
+              }}
+            >
+              <Trash2 size={11} aria-hidden="true" />
+            </button>
+          </>
+        ) : null}
       </div>
       <div className="markdown compact" dangerouslySetInnerHTML={{ __html: renderMarkdown(annotation.body) }} />
     </div>

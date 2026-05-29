@@ -1,6 +1,7 @@
 import { ChevronDown, ChevronRight, File as FileIcon } from "lucide-react";
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { DiffPanel, DiffChangeCounts, DiffStatusBadge } from "../diffs/DiffPanel.js";
+import { DiffSearchBar, type DiffSearchMatch } from "../diffs/DiffSearchBar.js";
 import { ChangedFileTree } from "../trees/ChangedFileTree.js";
 import type { ChangedFile } from "../../../shared/schemas.js";
 import { orderChangedFilesDepthFirst } from "../../../shared/treeModel.js";
@@ -24,6 +25,7 @@ export const DiffReviewBody = memo(function DiffReviewBody({ tab, layout, active
   const fileEls = useRef<Array<HTMLElement | null>>([]);
   const lastReportedPath = useRef<string | null>(null);
   const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set());
+  const [activeSearchMatch, setActiveSearchMatch] = useState<DiffSearchMatch | null>(null);
   const handleOpenDefinition = useCallback(
     (path: string, line: number) => {
       openFileInTab(tab.key, path, line);
@@ -91,6 +93,32 @@ export const DiffReviewBody = memo(function DiffReviewBody({ tab, layout, active
     });
   };
 
+  useEffect(() => {
+    if (!active || !activeSearchMatch) {
+      return;
+    }
+    const index = files.findIndex((file) => file.path === activeSearchMatch.path);
+    if (index === -1) {
+      return;
+    }
+    setCollapsed((previous) => {
+      if (!previous.has(activeSearchMatch.path)) {
+        return previous;
+      }
+      const next = new Set(previous);
+      next.delete(activeSearchMatch.path);
+      return next;
+    });
+    lastReportedPath.current = null;
+    selectFile(tab.key, activeSearchMatch.path);
+    scheduleAfterRender(() => {
+      const target = fileEls.current[index];
+      if (target) {
+        scrollRef.current?.scrollTo({ top: Math.max(0, target.offsetTop - 8), behavior: "auto" });
+      }
+    });
+  }, [active, activeSearchMatch, files, selectFile, tab.key]);
+
   return (
     <section className="diff-review-body">
       <aside className="workspace-sidebar">
@@ -104,37 +132,43 @@ export const DiffReviewBody = memo(function DiffReviewBody({ tab, layout, active
         />
       </aside>
       <section className="diff-stack" ref={scrollRef} onScroll={onScroll} aria-label="Stacked diff">
+        <DiffSearchBar
+          pullRequest={tab.bundle.detail}
+          files={files}
+          active={active}
+          onActiveMatch={setActiveSearchMatch}
+        />
         {files.map((file, index) => {
           const isCollapsed = collapsed.has(file.path);
           return (
-            <article
-              key={file.path}
-              className={isCollapsed ? "diff-stack-file is-collapsed" : "diff-stack-file"}
-              ref={(el) => {
-                fileEls.current[index] = el;
-              }}
-            >
+            <Fragment key={file.path}>
               <StackFileHeader
                 file={file}
                 ordinal={index + 1}
                 total={files.length}
                 collapsed={isCollapsed}
+                elementRef={(el) => {
+                  fileEls.current[index] = el;
+                }}
                 onToggle={() => toggleCollapse(file.path)}
               />
               {!isCollapsed ? (
-                <DiffPanel
-                  tabKey={tab.key}
-                  pullRequest={tab.bundle.detail}
-                  file={file}
-                  layout={layout}
-                  reviewThreads={tab.bundle.reviewThreads}
-                  tourChapters={tab.tour?.chapters ?? EMPTY_TOUR_CHAPTERS}
-                  headerless
-                  enableLsp={active && tab.mode === "managed"}
-                  onOpenDefinition={handleOpenDefinition}
-                />
+                <article className="diff-stack-file-body">
+                  <DiffPanel
+                    tabKey={tab.key}
+                    pullRequest={tab.bundle.detail}
+                    file={file}
+                    layout={layout}
+                    reviewThreads={tab.bundle.reviewThreads}
+                    tourChapters={tab.tour?.chapters ?? EMPTY_TOUR_CHAPTERS}
+                    searchTarget={searchTargetForFile(activeSearchMatch, file.path)}
+                    headerless
+                    enableLsp={active && tab.mode === "managed"}
+                    onOpenDefinition={handleOpenDefinition}
+                  />
+                </article>
               ) : null}
-            </article>
+            </Fragment>
           );
         })}
         <div className="diff-stack-end">End of diff · {files.length} files</div>
@@ -157,19 +191,43 @@ function areDiffReviewBodyPropsEqual(previous: DiffReviewBodyProps, next: DiffRe
   );
 }
 
+function searchTargetForFile(match: DiffSearchMatch | null, path: string) {
+  if (!match || match.path !== path || !match.lineNumber) {
+    return null;
+  }
+  return {
+    start: match.lineNumber,
+    end: match.lineNumber,
+    side: match.side === "left" ? "deletions" as const : "additions" as const,
+    matchId: match.id,
+    matchStart: match.matchStart,
+    matchLength: match.matchLength
+  };
+}
+
+function scheduleAfterRender(callback: () => void): void {
+  if (typeof window.requestAnimationFrame === "function") {
+    window.requestAnimationFrame(callback);
+    return;
+  }
+  window.setTimeout(callback, 0);
+}
+
 interface StackFileHeaderProps {
   file: ChangedFile;
   ordinal: number;
   total: number;
   collapsed: boolean;
+  elementRef: (element: HTMLButtonElement | null) => void;
   onToggle: () => void;
 }
 
-function StackFileHeader({ file, ordinal, total, collapsed, onToggle }: StackFileHeaderProps): React.JSX.Element {
+function StackFileHeader({ file, ordinal, total, collapsed, elementRef, onToggle }: StackFileHeaderProps): React.JSX.Element {
   return (
     <button
       type="button"
-      className="diff-stack-file-header"
+      className={collapsed ? "diff-stack-file-header is-collapsed" : "diff-stack-file-header"}
+      ref={elementRef}
       onClick={onToggle}
       aria-expanded={!collapsed}
       title={collapsed ? "Expand diff" : "Collapse diff"}

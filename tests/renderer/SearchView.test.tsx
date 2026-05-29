@@ -19,18 +19,18 @@ afterEach(() => {
 });
 
 describe("SearchView", () => {
-  it("renders checked out branches and deletes a managed worktree", async () => {
+  it("renders active reviews and uncheckouts a managed worktree", async () => {
     const worktree = worktreeFixture();
     window.krt.repos.listManagedWorktrees = vi.fn(async () => [worktree]);
     window.krt.repos.deleteWorktree = vi.fn(async () => ({ deleted: true, worktree }));
 
     renderSearchView();
 
-    expect(await screen.findByText("Checked out branches")).toBeInTheDocument();
+    expect(await screen.findByText("Active Reviews")).toBeInTheDocument();
     expect(await screen.findByText("feature/branch-list")).toBeInTheDocument();
     expect(screen.getByText("Add branch list")).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: "Delete" }));
+    fireEvent.click(screen.getByRole("button", { name: "Uncheckout" }));
 
     await waitFor(() => {
       expect(window.krt.repos.deleteWorktree).toHaveBeenCalledWith({
@@ -41,7 +41,27 @@ describe("SearchView", () => {
     });
   });
 
-  it("keeps delete loading state on each clicked branch", async () => {
+  it("renders open tabs as active reviews without an uncheckout button", async () => {
+    const worktree = worktreeFixture();
+    const bundle = bundleFixture(worktree);
+    window.krt.repos.listManagedWorktrees = vi.fn(async () => []);
+    useUiStore.getState().openPrTab(bundle);
+    const key = useUiStore.getState().tabs[0]?.key;
+    useUiStore.setState({ activeView: "search", activeTabKey: null });
+
+    renderSearchView();
+
+    expect(await screen.findByText("Active Reviews")).toBeInTheDocument();
+    expect(await screen.findByText("feature/branch-list")).toBeInTheDocument();
+    expect(screen.getByText("Open tab")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Uncheckout" })).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByTitle("Open kol/repo#12"));
+
+    expect(useUiStore.getState().activeTabKey).toBe(key);
+  });
+
+  it("keeps uncheckout loading state on each clicked review", async () => {
     const first = worktreeFixture({ number: 12, headSha: "abc123def456", headRef: "feature/branch-list" });
     const second = worktreeFixture({ number: 13, headSha: "def456abc123", headRef: "feature/other-branch" });
     let resolveFirst: (() => void) | undefined;
@@ -60,24 +80,24 @@ describe("SearchView", () => {
 
     renderSearchView();
 
-    const deleteButtons = await screen.findAllByRole("button", { name: "Delete" });
+    const deleteButtons = await screen.findAllByRole("button", { name: "Uncheckout" });
     fireEvent.click(deleteButtons[0]);
 
     await waitFor(() => {
-      expect(screen.getAllByRole("button", { name: "Deleting" })).toHaveLength(1);
+      expect(screen.getAllByRole("button", { name: "Unchecking out" })).toHaveLength(1);
     });
 
     fireEvent.click(deleteButtons[1]);
 
     await waitFor(() => {
-      expect(screen.getAllByRole("button", { name: "Deleting" })).toHaveLength(2);
+      expect(screen.getAllByRole("button", { name: "Unchecking out" })).toHaveLength(2);
     });
 
     resolveFirst?.();
     resolveSecond?.();
   });
 
-  it("opens the pull request for a checked out branch", async () => {
+  it("opens the pull request for a checked out active review", async () => {
     const worktree = worktreeFixture();
     const bundle = bundleFixture(worktree);
     window.krt.repos.listManagedWorktrees = vi.fn(async () => [worktree]);

@@ -1,5 +1,5 @@
 import { useMutation } from "@tanstack/react-query";
-import { Check, Lightbulb, MessageSquare, X } from "lucide-react";
+import { Check, Lightbulb, MessageSquare, Pencil, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { krtClient } from "../api/client.js";
 import type { PrTab } from "../store/uiStore.js";
@@ -14,11 +14,14 @@ type ReviewEvent = "comment" | "approve" | "request_changes";
 
 export function FinishReviewPopover({ tab, onClose }: FinishReviewPopoverProps): React.JSX.Element {
   const setFinishBody = useUiStore((state) => state.setFinishBody);
+  const updateDraftReviewComment = useUiStore((state) => state.updateDraftReviewComment);
   const removeDraftReviewComment = useUiStore((state) => state.removeDraftReviewComment);
   const clearFinishReview = useUiStore((state) => state.clearFinishReview);
   const body = tab.finish.body;
   const comments = tab.finish.comments ?? [];
   const [submitted, setSubmitted] = useState(false);
+  const [editingCommentId, setEditingCommentId] = useState<string | null>(null);
+  const [editingCommentBody, setEditingCommentBody] = useState("");
   const ref = useRef<HTMLDivElement>(null);
 
   const submitMutation = useMutation({
@@ -39,7 +42,10 @@ export function FinishReviewPopover({ tab, onClose }: FinishReviewPopoverProps):
 
   useEffect(() => {
     const handleClick = (event: MouseEvent): void => {
-      if (ref.current && !ref.current.contains(event.target as Node)) {
+      if (isInsideFinishReviewSurface(event, ref.current)) {
+        return;
+      }
+      if (ref.current) {
         onClose();
       }
     };
@@ -59,7 +65,7 @@ export function FinishReviewPopover({ tab, onClose }: FinishReviewPopoverProps):
 
   if (submitted) {
     return (
-      <div className="finish-review-popover" ref={ref}>
+      <div className="finish-review-popover" ref={ref} onMouseDownCapture={(event) => event.stopPropagation()}>
         <div className="finish-review-success">
           <Check size={18} aria-hidden="true" />
           <span>Review submitted</span>
@@ -69,7 +75,12 @@ export function FinishReviewPopover({ tab, onClose }: FinishReviewPopoverProps):
   }
 
   return (
-    <div className="finish-review-popover" ref={ref} aria-label="Finish review">
+    <div
+      className="finish-review-popover"
+      ref={ref}
+      aria-label="Finish review"
+      onMouseDownCapture={(event) => event.stopPropagation()}
+    >
       <header className="finish-review-popover-header">
         <strong>
           <Check size={13} aria-hidden="true" />
@@ -89,16 +100,87 @@ export function FinishReviewPopover({ tab, onClose }: FinishReviewPopoverProps):
                 <div className="finish-review-comment-row" key={comment.id}>
                   <div>
                     <span className="mono">{formatDraftCommentLocation(comment)}</span>
-                    <p>{comment.body}</p>
+                    {editingCommentId === comment.id ? (
+                      <textarea
+                        className="finish-review-comment-edit"
+                        value={editingCommentBody}
+                        rows={3}
+                        autoFocus
+                        aria-label={`Edit comment on ${formatDraftCommentLocation(comment)}`}
+                        onChange={(event) => setEditingCommentBody(event.target.value)}
+                        onKeyDown={(event) => {
+                          const nextBody = editingCommentBody.trim();
+                          if ((event.metaKey || event.ctrlKey) && event.key === "Enter" && nextBody) {
+                            event.preventDefault();
+                            updateDraftReviewComment(tab.key, comment.id, { body: nextBody });
+                            setEditingCommentId(null);
+                          }
+                          if (event.key === "Escape") {
+                            event.preventDefault();
+                            setEditingCommentId(null);
+                            setEditingCommentBody("");
+                          }
+                        }}
+                      />
+                    ) : (
+                      <p>{comment.body}</p>
+                    )}
                   </div>
-                  <button
-                    type="button"
-                    className="icon-button"
-                    aria-label={`Remove comment on ${formatDraftCommentLocation(comment)}`}
-                    onClick={() => removeDraftReviewComment(tab.key, comment.id)}
-                  >
-                    <X size={12} aria-hidden="true" />
-                  </button>
+                  <div className="finish-review-comment-actions">
+                    {editingCommentId === comment.id ? (
+                      <>
+                        <button
+                          type="button"
+                          className="icon-button"
+                          aria-label={`Save comment on ${formatDraftCommentLocation(comment)}`}
+                          disabled={!editingCommentBody.trim()}
+                          onClick={() => {
+                            const nextBody = editingCommentBody.trim();
+                            if (!nextBody) {
+                              return;
+                            }
+                            updateDraftReviewComment(tab.key, comment.id, { body: nextBody });
+                            setEditingCommentId(null);
+                          }}
+                        >
+                          <Check size={12} aria-hidden="true" />
+                        </button>
+                        <button
+                          type="button"
+                          className="icon-button"
+                          aria-label={`Cancel editing comment on ${formatDraftCommentLocation(comment)}`}
+                          onClick={() => {
+                            setEditingCommentId(null);
+                            setEditingCommentBody("");
+                          }}
+                        >
+                          <X size={12} aria-hidden="true" />
+                        </button>
+                      </>
+                    ) : (
+                      <>
+                        <button
+                          type="button"
+                          className="icon-button"
+                          aria-label={`Edit comment on ${formatDraftCommentLocation(comment)}`}
+                          onClick={() => {
+                            setEditingCommentId(comment.id);
+                            setEditingCommentBody(comment.body);
+                          }}
+                        >
+                          <Pencil size={12} aria-hidden="true" />
+                        </button>
+                        <button
+                          type="button"
+                          className="icon-button"
+                          aria-label={`Remove comment on ${formatDraftCommentLocation(comment)}`}
+                          onClick={() => removeDraftReviewComment(tab.key, comment.id)}
+                        >
+                          <X size={12} aria-hidden="true" />
+                        </button>
+                      </>
+                    )}
+                  </div>
                 </div>
               ))}
             </div>
@@ -146,6 +228,16 @@ export function FinishReviewPopover({ tab, onClose }: FinishReviewPopoverProps):
         </div>
       </footer>
     </div>
+  );
+}
+
+function isInsideFinishReviewSurface(event: MouseEvent, popover: HTMLElement | null): boolean {
+  const path = event.composedPath();
+  if (popover && path.includes(popover)) {
+    return true;
+  }
+  return path.some(
+    (target) => target instanceof HTMLElement && Boolean(target.closest(".finish-review-button"))
   );
 }
 

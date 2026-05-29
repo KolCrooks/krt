@@ -126,6 +126,8 @@ const bundle: PullRequestBundle = {
           body: "Validate both request and response payloads here.",
           createdAt: "2026-05-22T14:33:00.000Z",
           isBot: false,
+          viewerCanUpdate: false,
+          viewerCanDelete: false,
           reactions: []
         }
       ]
@@ -235,7 +237,8 @@ export function createBrowserPreviewApi(): KrtApi {
 
   return {
     app: {
-      onCloseSubTab: () => () => undefined
+      onCloseSubTab: () => () => undefined,
+      onOpenPreferences: () => () => undefined
     },
     auth: {
       getStatus: async () => ({
@@ -434,6 +437,8 @@ export function createBrowserPreviewApi(): KrtApi {
         body: input.body,
         createdAt: new Date().toISOString(),
         isBot: false,
+        viewerCanUpdate: true,
+        viewerCanDelete: true,
         reactions: []
       }),
       replyToReviewThread: async (input) => ({
@@ -443,7 +448,26 @@ export function createBrowserPreviewApi(): KrtApi {
         body: input.body,
         createdAt: new Date().toISOString(),
         isBot: false,
+        viewerCanUpdate: true,
+        viewerCanDelete: true,
         reactions: []
+      }),
+      updateReviewComment: async (input) => ({
+        id: input.commentId,
+        threadId: input.threadId,
+        author: { login: "preview" },
+        body: input.body,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        isBot: false,
+        viewerCanUpdate: true,
+        viewerCanDelete: true,
+        reactions: []
+      }),
+      deleteReviewComment: async (input) => ({
+        threadId: input.threadId,
+        commentId: input.commentId,
+        deleted: true
       }),
       toggleReaction: async (input) => [
         { content: input.content, count: input.add ? 1 : 0, viewerHasReacted: input.add }

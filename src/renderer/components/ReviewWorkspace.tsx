@@ -30,8 +30,8 @@ export function ReviewWorkspace({ tab, active = true }: ReviewWorkspaceProps): R
       />
       <div className={`review-body review-body-${tab.reviewSubMode}`}>
         {tab.reviewSubMode === "diff" ? <DiffReviewBody tab={tab} layout={layout} active={active} /> : null}
-        {tab.reviewSubMode === "tour" ? <TourBody tab={tab} layout={layout} /> : null}
-        {tab.reviewSubMode === "storyboard" ? <StoryboardBody tab={tab} layout={layout} /> : null}
+        {tab.reviewSubMode === "tour" ? <TourBody tab={tab} layout={layout} active={active} /> : null}
+        {tab.reviewSubMode === "storyboard" ? <StoryboardBody tab={tab} layout={layout} active={active} /> : null}
       </div>
       {tab.finish.open ? <FinishReviewPopover tab={tab} onClose={() => setFinishOpen(tab.key, false)} /> : null}
     </main>

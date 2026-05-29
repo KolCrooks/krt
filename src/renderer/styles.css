@@ -1545,24 +1545,24 @@ button:focus-visible {
   text-align: center;
 }
 
-.checked-out-branches {
+.active-reviews {
   margin-top: 24px;
 }
 
-.checked-out-branches-header {
+.active-reviews-header {
   align-items: center;
   display: flex;
   justify-content: space-between;
   margin-bottom: 8px;
 }
 
-.checked-out-branches-header h2 {
+.active-reviews-header h2 {
   color: var(--ink);
   font-size: 13px;
   font-weight: 650;
 }
 
-.checked-out-count {
+.active-review-count {
   align-items: center;
   background: var(--bg-elev);
   border: 1px solid var(--line);
@@ -1577,29 +1577,29 @@ button:focus-visible {
   padding: 0 7px;
 }
 
-.checked-out-list {
+.active-review-list {
   background: var(--bg-elev);
   border: 1px solid var(--line);
   border-radius: 10px;
   overflow: hidden;
 }
 
-.checked-out-row {
+.active-review-row {
   align-items: center;
   display: grid;
   gap: 8px;
   grid-template-columns: minmax(0, 1fr) auto;
 }
 
-.checked-out-row + .checked-out-row {
+.active-review-row + .active-review-row {
   border-top: 1px solid var(--line-2);
 }
 
-.checked-out-open > svg {
+.active-review-open > svg {
   color: var(--ink-3);
 }
 
-.checked-out-open {
+.active-review-open {
   align-items: center;
   background: transparent;
   border: 0;
@@ -1614,22 +1614,22 @@ button:focus-visible {
   text-align: left;
 }
 
-.checked-out-open:hover {
+.active-review-open:hover {
   background: var(--bg-soft);
 }
 
-.checked-out-main {
+.active-review-main {
   min-width: 0;
 }
 
-.checked-out-title-row {
+.active-review-title-row {
   align-items: center;
   display: flex;
   gap: 8px;
   min-width: 0;
 }
 
-.checked-out-title-row strong {
+.active-review-title-row strong {
   color: var(--ink);
   font-size: 12.5px;
   overflow: hidden;
@@ -1637,7 +1637,7 @@ button:focus-visible {
   white-space: nowrap;
 }
 
-.checked-out-meta {
+.active-review-meta {
   align-items: center;
   color: var(--ink-3);
   display: flex;
@@ -1647,7 +1647,7 @@ button:focus-visible {
   margin-top: 5px;
 }
 
-.checked-out-title {
+.active-review-title {
   color: var(--ink-2);
   font-size: 12px;
   margin-top: 5px;
@@ -1656,7 +1656,7 @@ button:focus-visible {
   white-space: nowrap;
 }
 
-.checked-out-empty {
+.active-review-empty {
   background: var(--bg-elev);
   border: 1px solid var(--line);
   border-radius: 10px;
@@ -1666,7 +1666,7 @@ button:focus-visible {
   text-align: center;
 }
 
-.checked-out-delete {
+.active-review-delete {
   align-items: center;
   background: var(--danger-soft);
   border: 1px solid color-mix(in oklch, var(--danger) 24%, transparent);
@@ -1683,11 +1683,11 @@ button:focus-visible {
   padding: 0 9px;
 }
 
-.checked-out-delete:hover:not(:disabled) {
+.active-review-delete:hover:not(:disabled) {
   background: color-mix(in oklch, var(--danger-soft) 70%, var(--danger) 18%);
 }
 
-.checked-out-delete:disabled {
+.active-review-delete:disabled {
   cursor: default;
   opacity: 0.65;
 }
@@ -2701,6 +2701,60 @@ button:focus-visible {
   padding: 10px 12px;
 }
 
+.editable-review-comment {
+  position: relative;
+}
+
+.editable-review-comment .markdown {
+  min-width: 0;
+}
+
+.editable-review-comment:hover .editable-review-comment-actions,
+.editable-review-comment:focus-within .editable-review-comment-actions {
+  opacity: 1;
+}
+
+.editable-review-comment.is-editing {
+  display: grid;
+  gap: 8px;
+}
+
+.editable-review-comment textarea {
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--ink);
+  font: inherit;
+  line-height: 1.5;
+  min-height: 92px;
+  padding: 8px 10px;
+  resize: vertical;
+  width: 100%;
+}
+
+.editable-review-comment-actions {
+  align-items: center;
+  display: flex;
+  gap: 6px;
+  justify-content: flex-end;
+}
+
+.editable-review-comment:not(.is-editing) .editable-review-comment-actions {
+  background: linear-gradient(90deg, transparent, var(--bg-elev) 22%);
+  opacity: 0;
+  padding-left: 18px;
+  position: absolute;
+  right: 8px;
+  top: 8px;
+  transition: opacity 120ms ease;
+}
+
+.thread-reply-content .editable-review-comment:not(.is-editing) .editable-review-comment-actions {
+  background: linear-gradient(90deg, transparent, var(--bg-soft) 22%);
+  right: 0;
+  top: 0;
+}
+
 .thread-replies {
   background: var(--bg-soft);
   border-top: 1px solid var(--line-2);
@@ -3298,24 +3352,94 @@ button:focus-visible {
 .diff-stack {
   display: flex;
   flex-direction: column;
-  gap: 18px;
+  gap: 0;
   min-height: 0;
   min-width: 0;
   overflow-x: hidden;
   overflow-y: auto;
   padding: 14px 18px 40px;
+  position: relative;
 }
 
-.diff-stack-file {
-  background: var(--bg-elev);
+.diff-search-bar {
+  align-items: center;
+  background: color-mix(in srgb, var(--bg-elev) 96%, transparent);
   border: 1px solid var(--line);
   border-radius: 8px;
+  box-shadow: var(--shadow-subtle), 0 16px 40px rgb(0 0 0 / 16%);
+  display: flex;
+  flex: 0 0 auto;
+  gap: 6px;
+  margin-left: auto;
+  min-width: 0;
+  padding: 6px 8px;
+  position: fixed;
+  right: 18px;
+  top: calc(30px + 38px + 8px);
+  width: min(420px, calc(100vw - 36px));
+  z-index: 60;
+}
+
+.diff-search-bar input {
+  background: transparent;
+  border: 0;
+  color: var(--ink);
+  flex: 1 1 180px;
+  font: inherit;
+  font-size: 12px;
+  min-width: 80px;
+  outline: none;
+}
+
+.diff-search-bar input::placeholder {
+  color: var(--ink-4);
+}
+
+.diff-search-count {
+  color: var(--ink-4);
+  flex: 0 0 auto;
+  font-size: 10.5px;
+  min-width: 42px;
+  text-align: right;
+}
+
+.diff-search-button {
+  flex: 0 0 auto;
+  height: 24px;
+  width: 24px;
+}
+
+.diff-search-hint {
+  color: var(--ink-4);
+  flex: 0 0 auto;
+  font-size: 11px;
+}
+
+.diff-search-active {
+  color: var(--ink-3);
+  flex: 0 1 auto;
+  font-size: 10.5px;
+  max-width: min(280px, 34vw);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.diff-stack-file-body {
+  background: var(--bg-elev);
+  border: 1px solid var(--line);
+  border-top: 0;
+  border-radius: 8px;
+  border-top-left-radius: 0;
+  border-top-right-radius: 0;
   display: flex;
   flex-direction: column;
+  margin-bottom: 18px;
   min-width: 0;
 }
 
-.diff-stack-file > .diff-surface {
+.diff-stack-file-body > .diff-surface {
   border-bottom-left-radius: 8px;
   border-bottom-right-radius: 8px;
   display: block;
@@ -3327,24 +3451,30 @@ button:focus-visible {
 .diff-stack-file-header {
   align-items: center;
   background: var(--bg-elev);
-  border: 0;
+  border: 1px solid var(--line);
+  border-bottom: 1px solid var(--line-2);
+  border-radius: 8px 8px 0 0;
   color: var(--ink);
   cursor: pointer;
   display: flex;
   gap: 10px;
+  margin-top: 18px;
   padding: 10px 12px;
   position: sticky;
   text-align: left;
   top: 0;
   z-index: 2;
+  width: 100%;
 }
 
-.diff-stack-file.is-collapsed .diff-stack-file-header {
-  border-bottom: 0;
+.diff-stack > .diff-stack-file-header:first-of-type {
+  margin-top: 0;
 }
 
-.diff-stack-file:not(.is-collapsed) .diff-stack-file-header {
-  border-bottom: 1px solid var(--line-2);
+.diff-stack-file-header.is-collapsed {
+  border-bottom: 1px solid var(--line);
+  border-radius: 8px;
+  margin-bottom: 18px;
 }
 
 .diff-stack-file-header:hover {
@@ -3839,10 +3969,18 @@ button:focus-visible {
   display: flex;
   flex-direction: column;
   gap: 12px;
-  margin: 60px auto;
-  max-width: 420px;
+  margin: 48px auto;
+  max-width: 100%;
   padding: 24px;
   text-align: center;
+  width: 100%;
+}
+
+/* Keep the header copy comfortably narrow even though the container now spans
+   the pane so the activity feed can be wide. */
+.tour-empty h2,
+.tour-empty p {
+  max-width: 460px;
 }
 
 .tour-empty h2 {
@@ -3873,6 +4011,237 @@ button:focus-visible {
 
 .tour-empty-status.is-error {
   color: var(--del);
+}
+
+/* Marks chapters that are still streaming in (provisional until generation ends). */
+.chapter-draft-pill {
+  align-items: center;
+  background: color-mix(in srgb, var(--warning) 16%, transparent);
+  border-radius: 4px;
+  color: var(--warning);
+  display: inline-flex;
+  flex: none;
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  line-height: 1;
+  margin-right: 6px;
+  padding: 2px 5px;
+  text-transform: uppercase;
+}
+
+/* Clickable "more chapters loading" skeletons open the agent overlay. */
+.tour-chapter.is-clickable,
+.storyboard-v2-card.is-clickable {
+  cursor: pointer;
+}
+
+.tour-chapter.is-clickable:hover,
+.storyboard-v2-card.is-clickable:hover {
+  border-color: var(--accent);
+}
+
+.tour-chapter.is-clickable:focus-visible,
+.storyboard-v2-card.is-clickable:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* Modal that shows the full loading view + chat feed over a partial tour. */
+.agent-overlay {
+  align-items: center;
+  background: color-mix(in srgb, var(--bg, #000) 55%, transparent);
+  display: flex;
+  inset: 0;
+  justify-content: center;
+  padding: 32px;
+  position: fixed;
+  z-index: 60;
+}
+
+.agent-overlay-panel {
+  align-items: center;
+  background: var(--bg-elev, var(--surface-strong));
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.28);
+  color: var(--ink-3);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  max-width: 820px;
+  padding: 28px 28px 22px;
+  position: relative;
+  text-align: center;
+  width: min(820px, 92%);
+}
+
+.agent-overlay-panel h2 {
+  color: var(--ink);
+  font-family: var(--font-sans);
+  font-size: 16px;
+  font-weight: 600;
+  margin: 0;
+}
+
+.agent-overlay-panel p {
+  color: var(--ink-3);
+  font-size: 13px;
+  line-height: 1.5;
+  margin: 0;
+  max-width: 520px;
+}
+
+.agent-overlay-panel .agent-chat {
+  max-height: min(52vh, 460px);
+  width: 100%;
+}
+
+.agent-overlay-close {
+  position: absolute;
+  right: 12px;
+  top: 12px;
+}
+
+.agent-overlay-footer {
+  align-items: center;
+  display: flex;
+  gap: 10px;
+  justify-content: center;
+}
+
+/* Live chat-style transcript of the agent working while a tour generates. */
+.agent-chat {
+  background: var(--bg-soft, var(--surface-muted));
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 2px 0;
+  max-height: 340px;
+  max-width: 1000px;
+  overflow-y: auto;
+  padding: 12px 14px;
+  text-align: left;
+  width: 80%;
+}
+
+.agent-chat-row {
+  align-items: flex-start;
+  display: flex;
+  gap: 8px;
+}
+
+.agent-chat-avatar {
+  align-items: center;
+  background: var(--bg-elev, var(--surface-strong));
+  border: 1px solid var(--line);
+  border-radius: 50%;
+  color: var(--ink-3);
+  display: flex;
+  flex: none;
+  height: 22px;
+  justify-content: center;
+  margin-top: 1px;
+  width: 22px;
+}
+
+.agent-chat-bubble {
+  background: var(--bg-elev, var(--surface-strong));
+  border: 1px solid var(--line);
+  border-radius: 4px 10px 10px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  padding: 5px 9px;
+}
+
+.agent-chat-role {
+  color: var(--ink-4);
+  font-size: 9.5px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.agent-chat-text {
+  color: var(--ink-2, var(--ink));
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+/* Thinking reads as quiet, italic reasoning. */
+.agent-chat-think .agent-chat-avatar {
+  color: var(--accent);
+}
+
+.agent-chat-think .agent-chat-text {
+  color: var(--ink-3);
+  font-style: italic;
+}
+
+.agent-chat-tool .agent-chat-avatar {
+  color: var(--accent);
+}
+
+.agent-chat-tool .agent-chat-text {
+  font-family: var(--font-mono, ui-monospace, "SFMono-Regular", monospace);
+  font-size: 11.5px;
+}
+
+.agent-chat-result .agent-chat-avatar {
+  color: var(--warning);
+}
+
+.agent-chat-result .agent-chat-text {
+  color: var(--warning);
+}
+
+/* Typing indicator while the agent keeps working. */
+.agent-chat-typing .agent-chat-dots {
+  display: inline-flex;
+  gap: 4px;
+  padding: 4px 2px;
+}
+
+.agent-chat-typing .agent-chat-dots span {
+  animation: agent-chat-bounce 1.2s ease-in-out infinite;
+  background: var(--ink-4);
+  border-radius: 50%;
+  height: 5px;
+  width: 5px;
+}
+
+.agent-chat-typing .agent-chat-dots span:nth-child(2) {
+  animation-delay: 0.18s;
+}
+
+.agent-chat-typing .agent-chat-dots span:nth-child(3) {
+  animation-delay: 0.36s;
+}
+
+.agent-chat-dot {
+  animation: agent-chat-bounce 1.2s ease-in-out infinite;
+  background: var(--accent);
+  border-radius: 50%;
+  height: 7px;
+  width: 7px;
+}
+
+@keyframes agent-chat-bounce {
+  0%,
+  100% {
+    opacity: 0.3;
+    transform: translateY(0);
+  }
+  50% {
+    opacity: 1;
+    transform: translateY(-2px);
+  }
 }
 
 .tour-rail-header {
@@ -4418,6 +4787,59 @@ button.rev-tab {
   border-left-color: var(--warning);
 }
 
+/* Compact single-line AI note that reads like an inline code comment. */
+.diff-anno-note {
+  align-items: center;
+  color: var(--text-secondary);
+  display: flex;
+  font-size: 11.5px;
+  gap: 6px;
+  grid-template-columns: none;
+  margin: 3px 10px;
+  padding: 4px 9px;
+}
+
+.diff-anno-note .diff-anno-note-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.diff-anno-note .diff-anno-note-text code {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 0.92em;
+  font-style: normal;
+}
+
+/* Severity-coded AI inline comments: info reads as a neutral primer, while
+   nit/warning/blocker escalate the gutter color so issues stand out. */
+.diff-anno-sev-nit {
+  border-left-color: var(--text-muted);
+}
+
+.diff-anno-sev-warning {
+  border-left-color: var(--warning);
+  color: var(--text-primary);
+}
+
+.diff-anno-sev-blocker {
+  border-left-color: var(--danger);
+  color: var(--text-primary);
+}
+
+.diff-anno-cat {
+  background: var(--surface-muted);
+  border-radius: 4px;
+  color: var(--text-muted);
+  flex: none;
+  font-size: 9.5px;
+  font-style: normal;
+  letter-spacing: 0.02em;
+  margin-left: auto;
+  padding: 1px 5px;
+  text-transform: uppercase;
+}
+
 .diff-anno-draft {
   border-left-color: var(--accent-strong);
 }
@@ -4519,6 +4941,16 @@ button.rev-tab {
   white-space: nowrap;
 }
 
+.diff-anno-action {
+  height: 22px;
+  margin-left: auto;
+  width: 22px;
+}
+
+.diff-anno-action + .diff-anno-action {
+  margin-left: 0;
+}
+
 .diff-anno-status {
   background: var(--surface-muted);
   border-radius: 999px;
@@ -4533,6 +4965,27 @@ button.rev-tab {
   font-size: 12px;
   line-height: 1.4;
   margin: 0;
+}
+
+.diff-anno-edit {
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--ink);
+  font-family: var(--font-sans);
+  font-size: 12px;
+  line-height: 1.45;
+  min-height: 72px;
+  outline: none;
+  padding: 8px 10px;
+  resize: vertical;
+  width: 100%;
+}
+
+.diff-anno-edit-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
 }
 
 .draft-review-composer {
@@ -4785,6 +5238,64 @@ button.rev-tab {
 .risk-high {
   background: var(--danger-soft);
   color: var(--danger);
+}
+
+.risk-with-help {
+  align-items: center;
+  display: inline-flex;
+  gap: 4px;
+  outline: none;
+  position: relative;
+}
+
+.risk-with-help svg {
+  flex: 0 0 auto;
+  opacity: 0.72;
+}
+
+.risk-with-help:focus-visible {
+  box-shadow: 0 0 0 2px color-mix(in oklch, var(--accent) 24%, transparent);
+}
+
+.risk-help-tooltip {
+  background: var(--ink);
+  border-radius: 6px;
+  bottom: calc(100% + 8px);
+  box-shadow: 0 10px 24px -14px rgb(0 0 0 / 45%);
+  color: var(--bg);
+  font-size: 11px;
+  font-weight: 500;
+  left: 50%;
+  line-height: 1.35;
+  max-width: 260px;
+  min-width: 220px;
+  opacity: 0;
+  padding: 8px 9px;
+  pointer-events: none;
+  position: absolute;
+  text-transform: none;
+  transform: translateX(-50%) translateY(3px);
+  transition:
+    opacity 120ms ease,
+    transform 120ms ease;
+  white-space: normal;
+  z-index: 80;
+}
+
+.risk-help-tooltip::after {
+  border: 5px solid transparent;
+  border-top-color: var(--ink);
+  content: "";
+  left: 50%;
+  position: absolute;
+  top: 100%;
+  transform: translateX(-50%);
+}
+
+.risk-with-help:hover .risk-help-tooltip,
+.risk-with-help:focus-visible .risk-help-tooltip {
+  opacity: 1;
+  transform: translateX(-50%) translateY(0);
 }
 
 .file-pills button,
@@ -5062,7 +5573,14 @@ button.rev-tab {
 }
 
 .tour-diff {
+  display: grid;
+  gap: 12px;
   min-height: 0;
+  position: relative;
+}
+
+.tour-diff-file {
+  min-width: 0;
 }
 
 .storyboard-view > .storyboard-shell {
@@ -5436,6 +5954,8 @@ button.rev-tab {
   display: flex;
   flex-direction: column;
   flex-shrink: 0;
+  position: relative;
+  --diff-search-top: 48px;
 }
 
 .storyboard-v2-diff-head {
@@ -5513,16 +6033,20 @@ button.rev-tab {
   display: flex;
   flex: 1;
   flex-direction: column;
+  gap: 12px;
   min-width: 0;
+  padding: 12px;
 }
 
 .storyboard-v2-diff-file {
-  border-bottom: 1px solid var(--line-2);
+  border: 1px solid var(--line-2);
+  border-radius: 8px;
   min-width: 0;
+  overflow: hidden;
 }
 
 .storyboard-v2-diff-file:last-child {
-  border-bottom: 0;
+  border-bottom: 1px solid var(--line-2);
 }
 
 .tour-chapter.is-loading {
@@ -6055,6 +6579,24 @@ button.rev-tab {
   flex-shrink: 0;
 }
 
+.settings-combobox {
+  position: relative;
+}
+
+.settings-combobox::after {
+  color: var(--ink-4);
+  content: "⌄";
+  font-size: 13px;
+  pointer-events: none;
+  position: absolute;
+  right: 9px;
+  top: 5px;
+}
+
+.settings-combobox .settings-input {
+  padding-right: 28px;
+}
+
 .settings-row-stack {
   display: flex;
   flex-direction: column;
@@ -6302,7 +6844,7 @@ button.rev-tab {
   border-radius: 6px;
   display: grid;
   gap: 8px;
-  grid-template-columns: minmax(0, 1fr) 24px;
+  grid-template-columns: minmax(0, 1fr) auto;
   padding: 7px;
 }
 
@@ -6322,6 +6864,27 @@ button.rev-tab {
   margin: 3px 0 0;
   max-height: 46px;
   overflow: hidden;
+}
+
+.finish-review-comment-actions {
+  display: flex;
+  gap: 4px;
+}
+
+.finish-review-comment-edit {
+  background: var(--bg-elev);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--ink);
+  font-family: var(--font-sans);
+  font-size: 11.5px;
+  line-height: 1.4;
+  margin-top: 5px;
+  min-height: 62px;
+  outline: none;
+  padding: 7px 8px;
+  resize: vertical;
+  width: 100%;
 }
 
 .finish-review-popover-footer {

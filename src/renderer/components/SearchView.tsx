@@ -4,7 +4,7 @@ import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "re
 import { krtClient } from "../api/client.js";
 import { formatBytes, formatCount, formatDate } from "../lib/format.js";
 import { activeTokenAt, suggestFilters, type FilterSuggestion } from "../lib/githubFilters.js";
-import { useUiStore } from "../store/uiStore.js";
+import { useUiStore, type PrTab } from "../store/uiStore.js";
 import type { AppSettings, ManagedWorktree, PullRequestSummary, RepositoryRef } from "../../shared/schemas.js";
 import type { OperationProgress } from "../../shared/schemas.js";
 
@@ -15,6 +15,8 @@ export function SearchView(): React.JSX.Element {
   const [openProgress, setOpenProgress] = useState<OperationProgress | null>(null);
   const inputRef = useRef<HTMLInputElement | null>(null);
   const openPrTab = useUiStore((state) => state.openPrTab);
+  const selectTab = useUiStore((state) => state.selectTab);
+  const tabs = useUiStore((state) => state.tabs);
   const setSelectedSearchResult = useUiStore((state) => state.setSelectedSearchResult);
   const openModal = useUiStore((state) => state.openModal);
   const queryClient = useQueryClient();
@@ -65,6 +67,10 @@ export function SearchView(): React.JSX.Element {
     queryKey: ["managed-worktrees"],
     queryFn: () => krtClient.repos.listManagedWorktrees()
   });
+  const activeReviews = useMemo(
+    () => buildActiveReviews(tabs, checkedOutBranchesQuery.data ?? []),
+    [tabs, checkedOutBranchesQuery.data]
+  );
   const [deletingWorktreeKeys, setDeletingWorktreeKeys] = useState<ReadonlySet<string>>(() => new Set());
   const deleteWorktree = (worktree: ManagedWorktree): void => {
     const key = managedWorktreeKey(worktree);
@@ -344,15 +350,23 @@ export function SearchView(): React.JSX.Element {
         </section>
         ) : null}
 
-        <CheckedOutBranchesPanel
+        <ActiveReviewsPanel
           error={checkedOutBranchesQuery.error}
           isLoading={checkedOutBranchesQuery.isLoading}
-          onOpen={(worktree) => {
-            openMutation.mutate({ repository: worktree.repository, number: worktree.number });
+          onOpen={(review) => {
+            if (review.tabKey) {
+              selectTab(review.tabKey);
+              return;
+            }
+            openMutation.mutate({ repository: review.repository, number: review.number });
           }}
-          onDelete={deleteWorktree}
+          onDelete={(review) => {
+            if (review.worktree) {
+              deleteWorktree(review.worktree);
+            }
+          }}
           deletingKeys={deletingWorktreeKeys}
-          worktrees={checkedOutBranchesQuery.data ?? []}
+          reviews={activeReviews}
         />
 
       </div>
@@ -517,85 +531,107 @@ function FilterSearchInput({ value, onChange, inputRef, onSubmit }: FilterSearch
   );
 }
 
-interface CheckedOutBranchesPanelProps {
-  worktrees: ManagedWorktree[];
+interface ActiveReviewItem {
+  key: string;
+  repository: RepositoryRef;
+  number: number;
+  headSha: string;
+  headRef: string | null;
+  baseRef: string | null;
+  title: string | null;
+  updatedAt: string;
+  tabKey: string | null;
+  worktree: ManagedWorktree | null;
+  activeWorktree: boolean;
+  sizeBytes: number | null;
+}
+
+interface ActiveReviewsPanelProps {
+  reviews: ActiveReviewItem[];
   isLoading: boolean;
   error: unknown;
   deletingKeys: ReadonlySet<string>;
-  onOpen: (worktree: ManagedWorktree) => void;
-  onDelete: (worktree: ManagedWorktree) => void;
+  onOpen: (review: ActiveReviewItem) => void;
+  onDelete: (review: ActiveReviewItem) => void;
 }
 
-function CheckedOutBranchesPanel({
-  worktrees,
+function ActiveReviewsPanel({
+  reviews,
   isLoading,
   error,
   deletingKeys,
   onOpen,
   onDelete
-}: CheckedOutBranchesPanelProps): React.JSX.Element {
+}: ActiveReviewsPanelProps): React.JSX.Element {
   return (
-    <section className="checked-out-branches" aria-label="Checked out branches">
-      <div className="checked-out-branches-header">
+    <section className="active-reviews" aria-label="Active reviews">
+      <div className="active-reviews-header">
         <div>
-          <h2>Checked out branches</h2>
+          <h2>Active Reviews</h2>
         </div>
-        <span className="checked-out-count">{worktrees.length}</span>
+        <span className="active-review-count">{reviews.length}</span>
       </div>
-      {isLoading ? <div className="checked-out-empty">Loading checked out branches...</div> : null}
-      {!isLoading && error ? <div className="checked-out-empty">{errorMessage(error)}</div> : null}
-      {!isLoading && !error && worktrees.length === 0 ? (
-        <div className="checked-out-empty">No checked out branches.</div>
+      {isLoading && reviews.length === 0 ? <div className="active-review-empty">Loading active reviews...</div> : null}
+      {!isLoading && error && reviews.length === 0 ? <div className="active-review-empty">{errorMessage(error)}</div> : null}
+      {!isLoading && !error && reviews.length === 0 ? (
+        <div className="active-review-empty">No active reviews.</div>
       ) : null}
-      {!isLoading && !error && worktrees.length > 0 ? (
-        <div className="checked-out-list">
-          {worktrees.map((worktree) => {
-            const key = managedWorktreeKey(worktree);
-            const deleting = deletingKeys.has(key);
+      {reviews.length > 0 ? (
+        <div className="active-review-list">
+          {reviews.map((review) => {
+            const deleting = review.worktree ? deletingKeys.has(managedWorktreeKey(review.worktree)) : false;
             return (
-              <div className="checked-out-row" key={key}>
+              <div className="active-review-row" key={review.key}>
                 <button
                   type="button"
-                  className="checked-out-open"
-                  onClick={() => onOpen(worktree)}
-                  title={`Open ${worktree.repository.fullName}#${worktree.number}`}
+                  className="active-review-open"
+                  onClick={() => onOpen(review)}
+                  title={`Open ${review.repository.fullName}#${review.number}`}
                 >
                   <GitBranch size={15} aria-hidden="true" />
-                  <div className="checked-out-main">
-                    <div className="checked-out-title-row">
-                      <strong className="mono">{worktree.headRef ?? shortSha(worktree.headSha)}</strong>
-                      {worktree.active ? <span className="chip add">Active</span> : null}
+                  <div className="active-review-main">
+                    <div className="active-review-title-row">
+                      <strong className="mono">{review.headRef ?? shortSha(review.headSha)}</strong>
+                      {review.tabKey ? <span className="chip">Open tab</span> : null}
+                      {review.worktree ? <span className="chip">Checked out</span> : null}
+                      {review.activeWorktree ? <span className="chip add">Active</span> : null}
                     </div>
-                    <div className="checked-out-meta">
-                      <span className="mono">{worktree.repository.fullName}</span>
+                    <div className="active-review-meta">
+                      <span className="mono">{review.repository.fullName}</span>
                       <span aria-hidden="true">·</span>
-                      <span>PR #{worktree.number}</span>
-                      {worktree.baseRef ? (
+                      <span>PR #{review.number}</span>
+                      {review.baseRef ? (
                         <>
                           <span aria-hidden="true">·</span>
-                          <span className="mono">{worktree.baseRef}</span>
+                          <span className="mono">{review.baseRef}</span>
                         </>
                       ) : null}
                       <span aria-hidden="true">·</span>
-                      <span>{shortSha(worktree.headSha)}</span>
+                      <span>{shortSha(review.headSha)}</span>
+                      {review.sizeBytes !== null ? (
+                        <>
+                          <span aria-hidden="true">·</span>
+                          <span>{formatBytes(review.sizeBytes)}</span>
+                        </>
+                      ) : null}
                       <span aria-hidden="true">·</span>
-                      <span>{formatBytes(worktree.sizeBytes)}</span>
-                      <span aria-hidden="true">·</span>
-                      <span>{formatDate(worktree.lastUsedAt)}</span>
+                      <span>{formatDate(review.updatedAt)}</span>
                     </div>
-                    {worktree.title ? <div className="checked-out-title">{worktree.title}</div> : null}
+                    {review.title ? <div className="active-review-title">{review.title}</div> : null}
                   </div>
                 </button>
-                <button
-                  type="button"
-                  className="checked-out-delete"
-                  disabled={deleting}
-                  onClick={() => onDelete(worktree)}
-                  title={`Delete ${worktree.repository.fullName}#${worktree.number}`}
-                >
-                  {deleting ? <Loader2 className="spin" size={13} aria-hidden="true" /> : <Trash2 size={13} aria-hidden="true" />}
-                  {deleting ? "Deleting" : "Delete"}
-                </button>
+                {review.worktree ? (
+                  <button
+                    type="button"
+                    className="active-review-delete"
+                    disabled={deleting}
+                    onClick={() => onDelete(review)}
+                    title={`Uncheckout ${review.repository.fullName}#${review.number}`}
+                  >
+                    {deleting ? <Loader2 className="spin" size={13} aria-hidden="true" /> : <Trash2 size={13} aria-hidden="true" />}
+                    {deleting ? "Unchecking out" : "Uncheckout"}
+                  </button>
+                ) : null}
               </div>
             );
           })}
@@ -603,6 +639,80 @@ function CheckedOutBranchesPanel({
       ) : null}
     </section>
   );
+}
+
+function buildActiveReviews(tabs: readonly PrTab[], worktrees: readonly ManagedWorktree[]): ActiveReviewItem[] {
+  const reviews = new Map<string, ActiveReviewItem>();
+
+  for (const worktree of worktrees) {
+    const key = activeReviewKey(worktree.repository, worktree.number, worktree.headSha);
+    reviews.set(key, {
+      key,
+      repository: worktree.repository,
+      number: worktree.number,
+      headSha: worktree.headSha,
+      headRef: worktree.headRef ?? null,
+      baseRef: worktree.baseRef ?? null,
+      title: worktree.title ?? null,
+      updatedAt: worktree.lastUsedAt,
+      tabKey: null,
+      worktree,
+      activeWorktree: worktree.active,
+      sizeBytes: worktree.sizeBytes
+    });
+  }
+
+  for (const tab of tabs) {
+    const detail = tab.bundle.detail;
+    const key = activeReviewKey(detail.repository, detail.number, detail.headSha);
+    const existing = reviews.get(key);
+    reviews.set(key, {
+      key,
+      repository: detail.repository,
+      number: detail.number,
+      headSha: detail.headSha,
+      headRef: detail.headRef || existing?.headRef || null,
+      baseRef: detail.baseRef || existing?.baseRef || null,
+      title: tab.title || detail.title || existing?.title || null,
+      updatedAt: detail.updatedAt || existing?.updatedAt || "",
+      tabKey: tab.key,
+      worktree: existing?.worktree ?? null,
+      activeWorktree: existing?.activeWorktree ?? false,
+      sizeBytes: existing?.sizeBytes ?? null
+    });
+  }
+
+  return [...reviews.values()].sort((left, right) => {
+    const leftRank = activeReviewRank(left);
+    const rightRank = activeReviewRank(right);
+    if (leftRank !== rightRank) {
+      return leftRank - rightRank;
+    }
+    const byDate = timestamp(right.updatedAt) - timestamp(left.updatedAt);
+    if (byDate !== 0) {
+      return byDate;
+    }
+    return `${left.repository.fullName}#${left.number}`.localeCompare(`${right.repository.fullName}#${right.number}`);
+  });
+}
+
+function activeReviewKey(repository: RepositoryRef, number: number, headSha: string): string {
+  return `${repository.fullName}#${number}:${headSha}`;
+}
+
+function activeReviewRank(review: ActiveReviewItem): number {
+  if (review.tabKey) {
+    return 0;
+  }
+  if (review.activeWorktree) {
+    return 1;
+  }
+  return 2;
+}
+
+function timestamp(value: string): number {
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : 0;
 }
 
 interface RepoComboboxProps {

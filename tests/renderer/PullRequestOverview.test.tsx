@@ -231,6 +231,8 @@ describe("PullRequestOverview", () => {
             outdated: true,
             createdAt: "2026-05-22T00:01:00.000Z",
             isBot: false,
+            viewerCanUpdate: false,
+            viewerCanDelete: false,
             reactions: []
           }
         ]
@@ -321,6 +323,8 @@ describe("PullRequestOverview", () => {
             path: "src/lib.rs",
             createdAt: "2026-05-22T00:01:00.000Z",
             isBot: false,
+            viewerCanUpdate: false,
+            viewerCanDelete: false,
             reactions: []
           }
         ]
@@ -471,6 +475,8 @@ function bundleFixture(): PullRequestBundle {
             side: "right",
             createdAt: "2026-05-22T00:01:00.000Z",
             isBot: false,
+            viewerCanUpdate: false,
+            viewerCanDelete: false,
             reactions: []
           }
         ]

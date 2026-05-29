@@ -110,7 +110,7 @@ describe("CodeFilePanel definition navigation", () => {
 
     expect(await screen.findByTestId("file-view")).toHaveTextContent("src/main.rs");
     await waitFor(() => {
-      expect(diffMockState.scrollIntoView).toHaveBeenCalledWith({ block: "center", inline: "nearest" });
+      expect(diffMockState.scrollIntoView).toHaveBeenCalledWith({ block: "center", inline: "nearest", behavior: "auto" });
     });
     expect(diffMockState.fileProps.at(-1)?.selectedLines).toEqual({ start: 42, end: 42 });
   });

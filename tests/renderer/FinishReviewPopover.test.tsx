@@ -20,6 +20,31 @@ afterEach(() => {
 });
 
 describe("FinishReviewPopover", () => {
+  it("stays open for menu and trigger mouse interactions", async () => {
+    const tab = createTab();
+    const onClose = vi.fn();
+
+    renderWithClient(
+      <>
+        <button className="finish-review-button" type="button">
+          Finish review
+        </button>
+        <FinishReviewPopover tab={tab} onClose={onClose} />
+      </>
+    );
+
+    await waitForDocumentListener();
+
+    fireEvent.mouseDown(screen.getByLabelText("Summary"));
+    fireEvent.mouseDown(screen.getByRole("button", { name: "Finish review" }));
+
+    expect(onClose).not.toHaveBeenCalled();
+
+    fireEvent.mouseDown(document.body);
+
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
   it("submits pending diff comments with the active review", async () => {
     const tab = createTab();
     window.krt.reviews.submit = vi.fn(async (input) => ({
@@ -65,6 +90,30 @@ describe("FinishReviewPopover", () => {
     });
     expect(useUiStore.getState().tabs.find((candidate) => candidate.key === tab.key)?.finish.comments).toEqual([]);
   });
+
+  it("edits pending diff comments before submission", async () => {
+    const tab = createTab();
+    useUiStore.setState({
+      activeView: "review",
+      modal: null,
+      tabs: [tab],
+      activeTabKey: tab.key,
+      selectedSearchResult: null
+    });
+
+    renderWithClient(<FinishReviewPopover tab={tab} onClose={() => undefined} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Edit comment on src/lib.rs:2-3" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "Edit comment on src/lib.rs:2-3" }), {
+      target: { value: "Please tighten this branch and add a regression test." }
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save comment on src/lib.rs:2-3" }));
+
+    expect(useUiStore.getState().tabs.find((candidate) => candidate.key === tab.key)?.finish.comments[0]).toMatchObject({
+      id: "draft-1",
+      body: "Please tighten this branch and add a regression test."
+    });
+  });
 });
 
 function renderWithClient(ui: React.ReactElement): void {
@@ -75,6 +124,10 @@ function renderWithClient(ui: React.ReactElement): void {
     }
   });
   render(<QueryClientProvider client={queryClient}>{ui}</QueryClientProvider>);
+}
+
+function waitForDocumentListener(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, 0));
 }
 
 function createTab(): PrTab {

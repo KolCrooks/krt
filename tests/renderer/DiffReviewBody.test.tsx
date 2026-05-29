@@ -14,6 +14,13 @@ vi.mock("../../src/renderer/components/diffs/DiffPanel.js", async () => {
   };
 });
 
+vi.mock("../../src/renderer/components/diffs/DiffSearchBar.js", async () => {
+  const React = await import("react");
+  return {
+    DiffSearchBar: () => React.createElement("div", { role: "search", "aria-label": "Find in diff" })
+  };
+});
+
 const repository: RepositoryRef = {
   provider: "github",
   owner: "kol",
