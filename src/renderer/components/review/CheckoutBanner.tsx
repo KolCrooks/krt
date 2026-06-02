@@ -37,6 +37,9 @@ export function CheckoutBanner({ tab }: CheckoutBannerProps): React.JSX.Element 
     onMutate: () => {
       setCheckout(tab.key, { state: "checking", message: "Starting checkout", percent: 0, operationId: null });
     },
+    onError: () => {
+      setCheckout(tab.key, { state: "idle", operationId: null, message: null, percent: null });
+    },
     onSuccess: (result) => {
       setCheckout(tab.key, { operationId: result.operationId });
       void krtClient.operations.progressSnapshot({ operationId: result.operationId }).then((progress) => {
@@ -62,9 +65,13 @@ export function CheckoutBanner({ tab }: CheckoutBannerProps): React.JSX.Element 
         return;
       }
       setCheckout(tab.key, { message: progress.message, percent: progress.percent ?? null });
-      if (progress.done && !progress.cancelled && progress.phase === "complete") {
-        setTabMode(tab.key, "managed");
-        setCheckout(tab.key, { state: "checked" });
+      if (progress.done) {
+        if (!progress.cancelled && progress.phase === "complete") {
+          setTabMode(tab.key, "managed");
+          setCheckout(tab.key, { state: "checked" });
+        } else if (progress.cancelled) {
+          setCheckout(tab.key, { state: "idle", operationId: null, message: null, percent: null });
+        }
       }
     });
   }, [setCheckout, setTabMode, tab.checkout.operationId, tab.key]);
@@ -81,7 +88,7 @@ export function CheckoutBanner({ tab }: CheckoutBannerProps): React.JSX.Element 
     return null;
   }
 
-  const isChecking = tab.checkout.state === "checking" || checkoutMutation.isPending;
+  const isChecking = tab.checkout.state === "checking" && tab.checkout.operationId !== null;
 
   return (
     <div className="checkout-banner" role="status">
@@ -103,7 +110,6 @@ export function CheckoutBanner({ tab }: CheckoutBannerProps): React.JSX.Element 
         <button
           type="button"
           className="secondary-button"
-          disabled={!tab.checkout.operationId}
           onClick={() => {
             if (tab.checkout.operationId) {
               void krtClient.operations.cancel({ operationId: tab.checkout.operationId });
@@ -114,7 +120,7 @@ export function CheckoutBanner({ tab }: CheckoutBannerProps): React.JSX.Element 
           Cancel
         </button>
       ) : (
-        <button type="button" className="primary-button" onClick={() => checkoutMutation.mutate()}>
+        <button type="button" className="primary-button" disabled={checkoutMutation.isPending} onClick={() => checkoutMutation.mutate()}>
           <GitBranch size={12} aria-hidden="true" />
           Check out branch
         </button>
