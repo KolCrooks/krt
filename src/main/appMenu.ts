@@ -1,6 +1,6 @@
 import { BrowserWindow, Menu, app, type MenuItemConstructorOptions } from "electron";
 import { openExternalUrl } from "./externalLinks.js";
-import { closeSubTabEvent } from "../shared/ipc.js";
+import { closeSubTabEvent, openSettingsEvent } from "../shared/ipc.js";
 
 export function installApplicationMenu(): void {
   Menu.setApplicationMenu(Menu.buildFromTemplate(createApplicationMenuTemplate()));
@@ -14,6 +14,14 @@ export function createApplicationMenuTemplate(): MenuItemConstructorOptions[] {
       label: app.name,
       submenu: [
         { role: "about" },
+        { type: "separator" },
+        {
+          label: "Preferences…",
+          accelerator: "CmdOrCtrl+,",
+          click: (_item, focusedWindow) => {
+            getCloseTargetWindow(focusedWindow)?.webContents.send(openSettingsEvent);
+          }
+        },
         { type: "separator" },
         { role: "services" },
         { type: "separator" },

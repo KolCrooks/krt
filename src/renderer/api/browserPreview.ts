@@ -235,7 +235,8 @@ export function createBrowserPreviewApi(): KrtApi {
 
   return {
     app: {
-      onCloseSubTab: () => () => undefined
+      onCloseSubTab: () => () => undefined,
+      onOpenSettings: () => () => undefined
     },
     auth: {
       getStatus: async () => ({

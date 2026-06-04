@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer } from "electron";
-import { closeSubTabEvent, operationProgressEvent, workspaceFileChangeEvent, type IpcChannel, type IpcInput, type IpcOutput } from "../shared/ipc.js";
+import { closeSubTabEvent, openSettingsEvent, operationProgressEvent, workspaceFileChangeEvent, type IpcChannel, type IpcInput, type IpcOutput } from "../shared/ipc.js";
 import {
   type OperationProgress,
   type TypedError,
@@ -28,6 +28,13 @@ const api = {
       ipcRenderer.on(closeSubTabEvent, handler);
       return () => {
         ipcRenderer.off(closeSubTabEvent, handler);
+      };
+    },
+    onOpenSettings: (listener: () => void) => {
+      const handler = () => listener();
+      ipcRenderer.on(openSettingsEvent, handler);
+      return () => {
+        ipcRenderer.off(openSettingsEvent, handler);
       };
     }
   },

@@ -491,5 +491,6 @@ export type IpcParsedInput<TChannel extends IpcChannel> = z.output<IpcContract[T
 export type IpcOutput<TChannel extends IpcChannel> = z.output<IpcContract[TChannel]["output"]>;
 
 export const closeSubTabEvent = "app:closeSubTab";
+export const openSettingsEvent = "app:openSettings";
 export const operationProgressEvent = "operations:progress";
 export const workspaceFileChangeEvent = "repos:workspaceFileChange";
