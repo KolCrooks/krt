@@ -1,9 +1,12 @@
 import { Ban, Bot, RefreshCw } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
-import { relativeRiskClass } from "../../lib/format.js";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useAutoTour } from "../../hooks/useAutoTour.js";
 import { DiffPanel } from "../diffs/DiffPanel.js";
+import { DiffSearchBar, type DiffSearchMatch } from "../diffs/DiffSearchBar.js";
 import { renderMarkdown, renderInlineMarkdown } from "../../lib/markdown.js";
+import { AgentActivityFeed } from "./AgentActivityFeed.js";
+import { AgentWorkingOverlay } from "./AgentWorkingOverlay.js";
+import { RiskLevelPill } from "./RiskLevelPill.js";
 import { resolveChapterFiles } from "./chapterFiles.js";
 import type { PrTab } from "../../store/uiStore.js";
 import { useUiStore } from "../../store/uiStore.js";
@@ -11,14 +14,24 @@ import { useUiStore } from "../../store/uiStore.js";
 interface TourBodyProps {
   tab: PrTab;
   layout: "inline" | "split";
+  active?: boolean;
 }
 
-export function TourBody({ tab, layout }: TourBodyProps): React.JSX.Element {
+export function TourBody({ tab, layout, active = true }: TourBodyProps): React.JSX.Element {
   const setTabViewMode = useUiStore((state) => state.setTabViewMode);
   const openFileInTab = useUiStore((state) => state.openFileInTab);
+  const toggleTourChapterReviewed = useUiStore((state) => state.toggleTourChapterReviewed);
   const [selectedChapterId, setSelectedChapterId] = useState<string | null>(tab.tour?.chapters[0]?.id ?? null);
-  const [reviewed, setReviewed] = useState<Record<string, boolean>>({});
+  const [activeSearchMatch, setActiveSearchMatch] = useState<DiffSearchMatch | null>(null);
+  const [watchingAgent, setWatchingAgent] = useState(false);
+  const diffFileRefs = useRef<Record<string, HTMLElement | null>>({});
   const auto = useAutoTour(tab);
+  // Close the "watch the agent" overlay once generation finishes.
+  useEffect(() => {
+    if (!auto.isGenerating) {
+      setWatchingAgent(false);
+    }
+  }, [auto.isGenerating]);
 
   const tour = tab.tour;
   useEffect(() => {
@@ -39,8 +52,29 @@ export function TourBody({ tab, layout }: TourBodyProps): React.JSX.Element {
     () => resolveChapterFiles(selectedChapter, tab.bundle.changedFiles),
     [selectedChapter, tab.bundle.changedFiles]
   );
-  const reviewedCount = tour ? tour.chapters.filter((chapter) => reviewed[chapter.id]).length : 0;
-  const toggleReviewed = (id: string): void => setReviewed((prev) => ({ ...prev, [id]: !prev[id] }));
+  const reviewedChapterIds = useMemo(() => new Set(tab.reviewedTourChapterIds ?? []), [tab.reviewedTourChapterIds]);
+  const reviewedCount = tour ? tour.chapters.filter((chapter) => reviewedChapterIds.has(chapter.id)).length : 0;
+  const toggleReviewed = (id: string): void => toggleTourChapterReviewed(tab.key, id);
+  useEffect(() => {
+    if (!active || !activeSearchMatch) {
+      return;
+    }
+    diffFileRefs.current[activeSearchMatch.path]?.scrollIntoView({ block: "start", behavior: "auto" });
+  }, [active, activeSearchMatch]);
+  // When the reviewer picks a chapter, jump the diff to that chapter's first
+  // anchored region so the tour leads them straight to the relevant code.
+  const firstAnchorPath = selectedChapter?.diffAnchors[0]?.path ?? chapterFiles[0]?.path ?? null;
+  useEffect(() => {
+    if (!active || auto.isGenerating || !firstAnchorPath) {
+      return;
+    }
+    const handle = requestAnimationFrame(() => {
+      diffFileRefs.current[firstAnchorPath]?.scrollIntoView({ block: "start", behavior: "auto" });
+    });
+    return () => cancelAnimationFrame(handle);
+    // Re-run only when the chapter selection changes, not on every render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedChapterId, active]);
 
   if (!tour) {
     return (
@@ -48,6 +82,7 @@ export function TourBody({ tab, layout }: TourBodyProps): React.JSX.Element {
         <Bot size={22} aria-hidden="true" className={auto.isGenerating ? "spin" : undefined} />
         <h2>{auto.isGenerating ? "Generating AI tour" : auto.hasFailed ? "Tour generation failed" : "Preparing AI tour"}</h2>
         <p>{auto.message ?? "Reading the diff and timeline to organize this PR into chapters."}</p>
+        <AgentActivityFeed entries={auto.activity} active={auto.isGenerating} />
         <div className="tour-empty-actions">
           {auto.isGenerating && auto.operationId ? (
             <button type="button" className="secondary-button" onClick={auto.cancel}>
@@ -68,6 +103,18 @@ export function TourBody({ tab, layout }: TourBodyProps): React.JSX.Element {
 
   return (
     <section className="tour-shell">
+      {watchingAgent && auto.isGenerating ? (
+        <AgentWorkingOverlay
+          title="Generating AI tour"
+          message={auto.message}
+          percent={auto.percent}
+          activity={auto.activity}
+          isGenerating={auto.isGenerating}
+          canCancel={Boolean(auto.operationId)}
+          onCancel={auto.cancel}
+          onClose={() => setWatchingAgent(false)}
+        />
+      ) : null}
       <aside className="tour-chapter-rail" aria-label="Tour chapters">
         <div className="tour-rail-header">
           <span>Tour</span>
@@ -75,7 +122,7 @@ export function TourBody({ tab, layout }: TourBodyProps): React.JSX.Element {
         </div>
         <div className="tour-rail-list">
           {tour.chapters.map((chapter, index) => {
-            const isReviewed = Boolean(reviewed[chapter.id]);
+            const isReviewed = reviewedChapterIds.has(chapter.id);
             const isActive = chapter.id === selectedChapter?.id;
             return (
               <button
@@ -102,6 +149,7 @@ export function TourBody({ tab, layout }: TourBodyProps): React.JSX.Element {
                     dangerouslySetInnerHTML={{ __html: renderInlineMarkdown(chapter.title) }}
                   />
                   <span>
+                    {auto.isGenerating ? <span className="chapter-draft-pill">Draft</span> : null}
                     <span className="mono">{String(index + 1).padStart(2, "0")}</span> · {chapter.changeStats.files} files ·{" "}
                     <span className="diff-counts-add">+{chapter.changeStats.additions}</span>{" "}
                     <span className="diff-counts-del">−{chapter.changeStats.deletions}</span>
@@ -111,7 +159,20 @@ export function TourBody({ tab, layout }: TourBodyProps): React.JSX.Element {
             );
           })}
           {auto.isGenerating ? (
-            <div className="tour-chapter is-loading" aria-label="More chapters loading">
+            <div
+              className="tour-chapter is-loading is-clickable"
+              role="button"
+              tabIndex={0}
+              aria-label="Watch the agent work"
+              title="Watch the agent work"
+              onClick={() => setWatchingAgent(true)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" || event.key === " ") {
+                  event.preventDefault();
+                  setWatchingAgent(true);
+                }
+              }}
+            >
               <span className="tour-chapter-check" aria-hidden="true" />
               <div className="tour-chapter-text">
                 <span className="skeleton skeleton-line skeleton-line-wide" />
@@ -153,7 +214,7 @@ export function TourBody({ tab, layout }: TourBodyProps): React.JSX.Element {
               }
             }}
           >
-            {selectedChapter && reviewed[selectedChapter.id] ? "Unmark" : "Mark reviewed"}
+            {selectedChapter && reviewedChapterIds.has(selectedChapter.id) ? "Unmark" : "Mark reviewed"}
           </button>
         </div>
       </aside>
@@ -162,7 +223,8 @@ export function TourBody({ tab, layout }: TourBodyProps): React.JSX.Element {
           <article className="tour-detail-card">
             <div className="tour-detail-eyebrow">
               <span>Chapter {tour.chapters.findIndex((chapter) => chapter.id === selectedChapter.id) + 1} of {tour.chapters.length}</span>
-              <span className={relativeRiskClass(selectedChapter.riskLevel)}>{selectedChapter.riskLevel}</span>
+              {auto.isGenerating ? <span className="chapter-draft-pill">Draft</span> : null}
+              <RiskLevelPill level={selectedChapter.riskLevel} />
             </div>
             <h2 dangerouslySetInnerHTML={{ __html: renderInlineMarkdown(selectedChapter.title) }} />
             <div className="markdown tour-detail-summary" dangerouslySetInnerHTML={{ __html: renderMarkdown(selectedChapter.summary) }} />
@@ -190,25 +252,52 @@ export function TourBody({ tab, layout }: TourBodyProps): React.JSX.Element {
           </article>
         ) : null}
         <section className="tour-diff" aria-label="Selected tour diff">
+          <DiffSearchBar
+            pullRequest={tab.bundle.detail}
+            files={chapterFiles}
+            active={active}
+            onActiveMatch={setActiveSearchMatch}
+          />
           {chapterFiles.map((file) => (
-            <DiffPanel
+            <div
               key={file.path}
-              tabKey={tab.key}
-              pullRequest={tab.bundle.detail}
-              file={file}
-              layout={layout}
-              reviewThreads={tab.bundle.reviewThreads}
-              tourChapters={selectedChapter ? [selectedChapter] : []}
-              cropToChapters
-              enableLsp={tab.mode === "managed"}
-              onOpenDefinition={(path, line) => {
-                openFileInTab(tab.key, path, line);
-                setTabViewMode(tab.key, "editor");
+              className="tour-diff-file"
+              ref={(el) => {
+                diffFileRefs.current[file.path] = el;
               }}
-            />
+            >
+              <DiffPanel
+                tabKey={tab.key}
+                pullRequest={tab.bundle.detail}
+                file={file}
+                layout={layout}
+                reviewThreads={tab.bundle.reviewThreads}
+                tourChapters={selectedChapter ? [selectedChapter] : []}
+                searchTarget={searchTargetForFile(activeSearchMatch, file.path)}
+                enableLsp={tab.mode === "managed"}
+                onOpenDefinition={(path, line) => {
+                  openFileInTab(tab.key, path, line);
+                  setTabViewMode(tab.key, "editor");
+                }}
+              />
+            </div>
           ))}
         </section>
       </section>
     </section>
   );
+}
+
+function searchTargetForFile(match: DiffSearchMatch | null, path: string) {
+  if (!match || match.path !== path || !match.lineNumber) {
+    return null;
+  }
+  return {
+    start: match.lineNumber,
+    end: match.lineNumber,
+    side: match.side === "left" ? "deletions" as const : "additions" as const,
+    matchId: match.id,
+    matchStart: match.matchStart,
+    matchLength: match.matchLength
+  };
 }

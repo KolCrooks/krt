@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import type {
+  AgentActivity,
   DataMode,
   OperationProgress,
   PullRequestBundle,
@@ -56,6 +57,10 @@ export interface PrTab {
   // switching tabs or views (the view components mount/unmount freely).
   tourOperationId: string | null;
   tourProgress: OperationProgress | null;
+  // A running transcript of what the agent is doing (thinking, exploration, tool
+  // calls), shown as a live chat feed while the tour generates. Reset on a new run.
+  tourActivity?: AgentActivity[];
+  reviewedTourChapterIds?: string[];
   viewMode: TabViewMode;
   reviewSubMode: ReviewSubMode;
   checkout: TabCheckout;
@@ -96,10 +101,14 @@ interface UiState {
   closeFile: (tabKey: string, path: string) => void;
   openFileInTab: (tabKey: string, path: string, line?: number) => void;
   setTour: (tabKey: string, tour: ReviewTour | null) => void;
+  toggleTourChapterReviewed: (tabKey: string, chapterId: string) => void;
   setTourOperation: (tabKey: string, operationId: string | null) => void;
   setTourProgress: (tabKey: string, progress: OperationProgress | null) => void;
+  appendTourActivity: (tabKey: string, entry: AgentActivity) => void;
   updateReviewThread: (tabKey: string, thread: ReviewThread) => void;
   appendReviewThreadComment: (tabKey: string, threadId: string, comment: ReviewComment) => void;
+  updateReviewThreadComment: (tabKey: string, threadId: string, comment: ReviewComment) => void;
+  deleteReviewThreadComment: (tabKey: string, threadId: string, commentId: string) => void;
   setReviewCommentReactions: (tabKey: string, commentId: string, reactions: ReactionGroup[]) => void;
   setActivityEventReactions: (tabKey: string, eventId: string, reactions: ReactionGroup[]) => void;
   setCheckout: (tabKey: string, patch: Partial<TabCheckout>) => void;
@@ -107,6 +116,7 @@ interface UiState {
   setFinishOpen: (tabKey: string, open: boolean) => void;
   setFinishBody: (tabKey: string, body: string) => void;
   addDraftReviewComment: (tabKey: string, comment: ReviewDraftComment) => void;
+  updateDraftReviewComment: (tabKey: string, commentId: string, patch: Partial<ReviewDraftComment>) => void;
   removeDraftReviewComment: (tabKey: string, commentId: string) => void;
   clearFinishReview: (tabKey: string) => void;
 }
@@ -138,6 +148,8 @@ export const useUiStore = create<UiState>((set) => ({
         tour: null,
         tourOperationId: null,
         tourProgress: null,
+        tourActivity: [],
+        reviewedTourChapterIds: [],
         viewMode: "overview",
         reviewSubMode: "diff",
         checkout: { ...defaultCheckout },
@@ -149,7 +161,7 @@ export const useUiStore = create<UiState>((set) => ({
         tabs: existing
           ? state.tabs.map((candidate) =>
               candidate.key === key
-                ? { ...candidate, ...tab, tour: candidate.tour, tourOperationId: candidate.tourOperationId, tourProgress: candidate.tourProgress, viewMode: candidate.viewMode, reviewSubMode: candidate.reviewSubMode, checkout: candidate.checkout, finish: candidate.finish, editorNavigationTarget: candidate.editorNavigationTarget ?? null }
+                ? { ...candidate, ...tab, tour: candidate.tour, tourOperationId: candidate.tourOperationId, tourProgress: candidate.tourProgress, tourActivity: candidate.tourActivity, reviewedTourChapterIds: candidate.reviewedTourChapterIds ?? [], viewMode: candidate.viewMode, reviewSubMode: candidate.reviewSubMode, checkout: candidate.checkout, finish: candidate.finish, editorNavigationTarget: candidate.editorNavigationTarget ?? null }
                 : candidate
             )
           : [...state.tabs, tab],
@@ -229,6 +241,8 @@ export const useUiStore = create<UiState>((set) => ({
             tour: headShaChanged ? null : tab.tour,
             tourOperationId: headShaChanged ? null : tab.tourOperationId,
             tourProgress: headShaChanged ? null : tab.tourProgress,
+            tourActivity: headShaChanged ? [] : tab.tourActivity,
+            reviewedTourChapterIds: headShaChanged ? [] : tab.reviewedTourChapterIds,
             editorNavigationTarget: headShaChanged ? null : tab.editorNavigationTarget
           };
         })
@@ -285,7 +299,31 @@ export const useUiStore = create<UiState>((set) => ({
     })),
   setTour: (tabKeyToUpdate, tour) =>
     set((state) => ({
-      tabs: state.tabs.map((tab) => (tab.key === tabKeyToUpdate ? { ...tab, tour } : tab))
+      tabs: state.tabs.map((tab) =>
+        tab.key === tabKeyToUpdate
+          ? {
+              ...tab,
+              tour,
+              reviewedTourChapterIds: pruneReviewedTourChapterIds(tab.reviewedTourChapterIds, tour)
+            }
+          : tab
+      )
+    })),
+  toggleTourChapterReviewed: (tabKeyToUpdate, chapterId) =>
+    set((state) => ({
+      tabs: state.tabs.map((tab) => {
+        if (tab.key !== tabKeyToUpdate) {
+          return tab;
+        }
+        const reviewedIds = tab.reviewedTourChapterIds ?? [];
+        const isReviewed = reviewedIds.includes(chapterId);
+        return {
+          ...tab,
+          reviewedTourChapterIds: isReviewed
+            ? reviewedIds.filter((id) => id !== chapterId)
+            : [...reviewedIds, chapterId]
+        };
+      })
     })),
   setTourOperation: (tabKeyToUpdate, operationId) =>
     set((state) => ({
@@ -293,7 +331,25 @@ export const useUiStore = create<UiState>((set) => ({
     })),
   setTourProgress: (tabKeyToUpdate, progress) =>
     set((state) => ({
-      tabs: state.tabs.map((tab) => (tab.key === tabKeyToUpdate ? { ...tab, tourProgress: progress } : tab))
+      // A null progress marks a fresh start (or reset) — clear the activity feed too.
+      tabs: state.tabs.map((tab) =>
+        tab.key === tabKeyToUpdate ? { ...tab, tourProgress: progress, tourActivity: progress ? tab.tourActivity : [] } : tab
+      )
+    })),
+  appendTourActivity: (tabKeyToUpdate, entry) =>
+    set((state) => ({
+      tabs: state.tabs.map((tab) => {
+        if (tab.key !== tabKeyToUpdate) {
+          return tab;
+        }
+        const feed = tab.tourActivity ?? [];
+        const last = feed[feed.length - 1];
+        // Skip blank entries and consecutive duplicates; keep the feed bounded.
+        if (!entry.text.trim() || (last && last.kind === entry.kind && last.text === entry.text)) {
+          return tab;
+        }
+        return { ...tab, tourActivity: [...feed, entry].slice(-80) };
+      })
     })),
   updateReviewThread: (tabKeyToUpdate, thread) =>
     set((state) => ({
@@ -335,6 +391,60 @@ export const useUiStore = create<UiState>((set) => ({
                       }
                     : thread
                 )
+              }
+            }
+          : tab
+      )
+    })),
+  updateReviewThreadComment: (tabKeyToUpdate, threadId, comment) =>
+    set((state) => ({
+      tabs: state.tabs.map((tab) =>
+        tab.key === tabKeyToUpdate
+          ? {
+              ...tab,
+              bundle: {
+                ...tab.bundle,
+                reviewThreads: tab.bundle.reviewThreads.map((thread) =>
+                  thread.id === threadId
+                    ? {
+                        ...thread,
+                        comments: thread.comments.map((candidate) =>
+                          candidate.id === comment.id
+                            ? {
+                                ...candidate,
+                                ...comment,
+                                threadId: comment.threadId ?? candidate.threadId ?? threadId,
+                                path: comment.path ?? candidate.path ?? thread.path,
+                                line: comment.line ?? candidate.line ?? thread.line
+                              }
+                            : candidate
+                        )
+                      }
+                    : thread
+                )
+              }
+            }
+          : tab
+      )
+    })),
+  deleteReviewThreadComment: (tabKeyToUpdate, threadId, commentId) =>
+    set((state) => ({
+      tabs: state.tabs.map((tab) =>
+        tab.key === tabKeyToUpdate
+          ? {
+              ...tab,
+              bundle: {
+                ...tab.bundle,
+                reviewThreads: tab.bundle.reviewThreads
+                  .map((thread) =>
+                    thread.id === threadId
+                      ? {
+                          ...thread,
+                          comments: thread.comments.filter((comment) => comment.id !== commentId)
+                        }
+                      : thread
+                  )
+                  .filter((thread) => thread.comments.length > 0)
               }
             }
           : tab
@@ -416,6 +526,22 @@ export const useUiStore = create<UiState>((set) => ({
           : tab
       )
     })),
+  updateDraftReviewComment: (tabKeyToUpdate, commentId, patch) =>
+    set((state) => ({
+      tabs: state.tabs.map((tab) =>
+        tab.key === tabKeyToUpdate
+          ? {
+              ...tab,
+              finish: {
+                ...tab.finish,
+                comments: (tab.finish.comments ?? []).map((comment) =>
+                  comment.id === commentId ? { ...comment, ...patch, id: comment.id } : comment
+                )
+              }
+            }
+          : tab
+      )
+    })),
   removeDraftReviewComment: (tabKeyToUpdate, commentId) =>
     set((state) => ({
       tabs: state.tabs.map((tab) =>
@@ -444,6 +570,17 @@ export function tabKey(repository: string, number: number): string {
 
 function firstReviewFilePath(bundle: PullRequestBundle): string | null {
   return orderChangedFilesDepthFirst(bundle.changedFiles)[0]?.path ?? null;
+}
+
+function pruneReviewedTourChapterIds(
+  reviewedChapterIds: readonly string[] | undefined,
+  tour: ReviewTour | null
+): string[] {
+  if (!tour || !reviewedChapterIds?.length) {
+    return [];
+  }
+  const chapterIds = new Set(tour.chapters.map((chapter) => chapter.id));
+  return reviewedChapterIds.filter((id) => chapterIds.has(id));
 }
 
 export function useActiveTab(): PrTab | null {

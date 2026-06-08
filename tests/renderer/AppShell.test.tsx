@@ -19,10 +19,12 @@ const originalFilePatch = window.krt.pullRequests.filePatch;
 const originalStartLsp = window.krt.lsp.startForWorktree;
 const originalStopLsp = window.krt.lsp.stopForWorktree;
 const originalOnCloseSubTab = window.krt.app.onCloseSubTab;
+const originalOnOpenPreferences = window.krt.app.onOpenPreferences;
 const originalScrollTo = HTMLElement.prototype.scrollTo;
 
 afterEach(() => {
   window.krt.app.onCloseSubTab = originalOnCloseSubTab;
+  window.krt.app.onOpenPreferences = originalOnOpenPreferences;
   window.krt.repos.listManagedWorktrees = originalListManagedWorktrees;
   window.krt.pullRequests.open = originalOpenPullRequest;
   window.krt.pullRequests.filePatch = originalFilePatch;
@@ -192,6 +194,18 @@ describe("AppShell", () => {
       openFilePaths: ["src/lib.rs"],
       viewMode: "review",
     });
+  });
+
+  it("opens settings with Cmd+,", async () => {
+    render(<AppShell />);
+
+    await act(async () => {
+      fireEvent.keyDown(window, { key: ",", metaKey: true });
+      await Promise.resolve();
+    });
+
+    expect(await screen.findByRole("dialog", { name: "Settings" })).toBeInTheDocument();
+    expect(useUiStore.getState().modal).toBe("settings");
   });
 
   it("keeps a managed tab language server running across review submodes", async () => {

@@ -349,6 +349,29 @@ export const ipcContract = {
     }),
     output: reviewCommentSchema
   },
+  "comments:updateReviewComment": {
+    input: z.object({
+      repository: repositoryRefSchema,
+      number: z.number().int().positive(),
+      threadId: z.string().min(1),
+      commentId: z.string().min(1),
+      body: z.string().min(1)
+    }),
+    output: reviewCommentSchema
+  },
+  "comments:deleteReviewComment": {
+    input: z.object({
+      repository: repositoryRefSchema,
+      number: z.number().int().positive(),
+      threadId: z.string().min(1),
+      commentId: z.string().min(1)
+    }),
+    output: z.object({
+      threadId: z.string(),
+      commentId: z.string(),
+      deleted: z.boolean()
+    })
+  },
   "comments:toggleReaction": {
     input: z.object({
       repository: repositoryRefSchema,
@@ -491,5 +514,6 @@ export type IpcParsedInput<TChannel extends IpcChannel> = z.output<IpcContract[T
 export type IpcOutput<TChannel extends IpcChannel> = z.output<IpcContract[TChannel]["output"]>;
 
 export const closeSubTabEvent = "app:closeSubTab";
+export const openPreferencesEvent = "app:openPreferences";
 export const operationProgressEvent = "operations:progress";
 export const workspaceFileChangeEvent = "repos:workspaceFileChange";

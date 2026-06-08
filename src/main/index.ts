@@ -9,6 +9,7 @@ import { ProviderRegistry } from "./providers/providerRegistry.js";
 import { OperationService } from "./services/operationService.js";
 import { RepoService } from "./services/repoService.js";
 import { AiService } from "./services/aiService.js";
+import { ChangeMapService } from "./services/changeMapService.js";
 import { ExtensionService } from "./services/extensionService.js";
 import { PerfService } from "./services/perfService.js";
 import { registerIpcHandlers } from "./ipcHandlers.js";
@@ -34,12 +35,15 @@ async function createMainWindow(): Promise<void> {
   const providerCache = new ProviderResponseCache(db);
   const providers = new ProviderRegistry(keychain, providerCache, () => settings.get());
   const operations = new OperationService();
-  const repos = new RepoService(appPaths, db, operations, { getSettings: () => settings.get() });
-  const ai = new AiService(db, keychain, () => settings.get());
+  const repos = new RepoService(appPaths, db, operations, {
+    getSettings: () => settings.get(),
+    getGitHubToken: () => providers.getGitHubToken()
+  });
   const extensions = new ExtensionService(() => settings.get(), (update) => settings.update(update), {
     localExtensionDir: appPaths.extensions
   });
   const lsp = new LspService(repos, extensions);
+  const ai = new AiService(db, keychain, () => settings.get(), repos, new ChangeMapService(lsp));
   const perf = new PerfService(db);
   const prCache = new PrCacheService(db);
   const updates = new UpdateService(() => settings.get(), app.getVersion(), autoUpdater);

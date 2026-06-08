@@ -1,4 +1,5 @@
 // @vitest-environment node
+import { Buffer } from "node:buffer";
 import { existsSync } from "node:fs";
 import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -10,7 +11,7 @@ import { createAppPaths } from "../../src/main/appPaths.js";
 import { AppError } from "../../src/main/errors.js";
 import { openDatabase } from "../../src/main/services/database.js";
 import { OperationService } from "../../src/main/services/operationService.js";
-import { RepoService } from "../../src/main/services/repoService.js";
+import { buildGitEnvironment, RepoService, worktreeAddArgs } from "../../src/main/services/repoService.js";
 import { defaultAppSettings } from "../../src/shared/schemas.js";
 import type { RepositoryRef } from "../../src/shared/schemas.js";
 
@@ -22,6 +23,40 @@ const repository: RepositoryRef = {
 };
 
 describe("RepoService managed worktree reads", () => {
+  it("passes configured GitHub tokens to git through process-local config", () => {
+    const env = buildGitEnvironment(
+      {
+        GIT_CONFIG_COUNT: "1",
+        GIT_CONFIG_KEY_0: "safe.directory",
+        GIT_CONFIG_VALUE_0: "*"
+      },
+      repository,
+      "secret-token"
+    );
+
+    expect(env.GIT_TERMINAL_PROMPT).toBe("0");
+    expect(env.GIT_CONFIG_COUNT).toBe("2");
+    expect(env.GIT_CONFIG_KEY_0).toBe("safe.directory");
+    expect(env.GIT_CONFIG_VALUE_0).toBe("*");
+    expect(env.GIT_CONFIG_KEY_1).toBe("http.https://github.com/.extraheader");
+    expect(env.GIT_CONFIG_VALUE_1).toBe(
+      `AUTHORIZATION: basic ${Buffer.from("x-access-token:secret-token").toString("base64")}`
+    );
+  });
+
+  it("forces worktree creation over stale git worktree metadata", () => {
+    expect(worktreeAddArgs("/tmp/mirror.git", "/tmp/worktree", "abc123")).toEqual([
+      "--git-dir",
+      "/tmp/mirror.git",
+      "worktree",
+      "add",
+      "--force",
+      "--detach",
+      "/tmp/worktree",
+      "abc123"
+    ]);
+  });
+
   it("returns a checkout operation immediately and completes the worktree mapping in the background", async () => {
     const root = await mkdtemp(join(tmpdir(), "krt2-repo-service-"));
     const paths = createAppPaths(root);

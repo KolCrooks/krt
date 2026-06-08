@@ -38,6 +38,8 @@ export interface Provider {
   getFileContent(repository: RepositoryRef, path: string, ref: string): Promise<FileContent>;
   postIssueComment(repository: RepositoryRef, number: number, body: string): Promise<ReviewComment>;
   replyToReviewThread(repository: RepositoryRef, threadId: string, body: string): Promise<ReviewComment>;
+  updateReviewComment(repository: RepositoryRef, commentId: string, body: string): Promise<ReviewComment>;
+  deleteReviewComment(repository: RepositoryRef, commentId: string): Promise<{ commentId: string; deleted: boolean }>;
   resolveReviewThread(repository: RepositoryRef, number: number, threadId: string): Promise<ReviewThread>;
   reopenReviewThread(repository: RepositoryRef, number: number, threadId: string): Promise<ReviewThread>;
   toggleReaction(subjectId: string, content: ReactionContent, add: boolean): Promise<ReactionGroup[]>;

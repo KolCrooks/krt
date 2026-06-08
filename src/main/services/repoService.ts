@@ -1,3 +1,4 @@
+import { Buffer } from "node:buffer";
 import { existsSync, watch, type Dirent, type FSWatcher } from "node:fs";
 import { lstat, mkdir, readdir, readFile, rm, stat } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve } from "node:path";
@@ -59,9 +60,14 @@ export class RepoService {
     private readonly appPaths: AppPaths,
     private readonly db: SqliteDatabase,
     private readonly operations: OperationService,
-    options: { getSettings?: () => AppSettings; watchFactory?: WatchFactory } = {}
+    options: {
+      getSettings?: () => AppSettings;
+      getGitHubToken?: () => Promise<string | null>;
+      watchFactory?: WatchFactory;
+    } = {}
   ) {
     this.getSettings = options.getSettings;
+    this.getGitHubToken = options.getGitHubToken;
     this.watchFactory =
       options.watchFactory ??
       ((path, listener) =>
@@ -71,6 +77,7 @@ export class RepoService {
   }
 
   private readonly getSettings?: () => AppSettings;
+  private readonly getGitHubToken?: () => Promise<string | null>;
 
   attachWindow(window: BrowserWindow): void {
     this.windows.add(window);
@@ -148,6 +155,7 @@ export class RepoService {
       this.operations.assertNotCancelled(operationId);
       await mkdir(this.repoRoot(input.repository), { recursive: true });
       await mkdir(this.worktreeRoot(input.repository), { recursive: true });
+      const gitEnv = await this.gitNetworkEnvironment(input.repository);
 
       if (!existsSync(mirrorPath)) {
         this.operations.update({
@@ -158,7 +166,10 @@ export class RepoService {
           done: false,
           cancelled: false
         });
-        await this.runGit(["clone", "--bare", this.cloneUrl(input.repository), mirrorPath], { operationId });
+        await this.runGit(["clone", "--bare", this.cloneUrl(input.repository), mirrorPath], {
+          operationId,
+          env: gitEnv
+        });
       }
 
       this.operations.assertNotCancelled(operationId);
@@ -171,15 +182,27 @@ export class RepoService {
         cancelled: false
       });
 
-      await this.runGit(["--git-dir", mirrorPath, "fetch", "origin", `refs/heads/${input.baseRef}:refs/krt/base/${input.number}`], {
+      await this.runGit(
+        ["--git-dir", mirrorPath, "fetch", "origin", `refs/heads/${input.baseRef}:refs/krt/base/${input.number}`],
+        {
+          allowFailure: true,
+          operationId,
+          env: gitEnv
+        }
+      );
+      await this.runGit(
+        ["--git-dir", mirrorPath, "fetch", "origin", `pull/${input.number}/head:refs/krt/head/${input.number}`],
+        {
+          allowFailure: true,
+          operationId,
+          env: gitEnv
+        }
+      );
+      await this.runGit(["--git-dir", mirrorPath, "fetch", "origin", input.headSha], {
         allowFailure: true,
-        operationId
+        operationId,
+        env: gitEnv
       });
-      await this.runGit(["--git-dir", mirrorPath, "fetch", "origin", `pull/${input.number}/head:refs/krt/head/${input.number}`], {
-        allowFailure: true,
-        operationId
-      });
-      await this.runGit(["--git-dir", mirrorPath, "fetch", "origin", input.headSha], { allowFailure: true, operationId });
 
       if (!existsSync(worktreePath)) {
         this.operations.assertNotCancelled(operationId);
@@ -191,7 +214,7 @@ export class RepoService {
           done: false,
           cancelled: false
         });
-        await this.runGit(["--git-dir", mirrorPath, "worktree", "add", "--detach", worktreePath, input.headSha], {
+        await this.runGit(worktreeAddArgs(mirrorPath, worktreePath, input.headSha), {
           operationId
         });
       }
@@ -765,13 +788,25 @@ export class RepoService {
     }
   }
 
-  private async runGit(args: string[], options: { allowFailure?: boolean; operationId?: string } = {}): Promise<void> {
+  private async gitNetworkEnvironment(repository: RepositoryRef): Promise<NodeJS.ProcessEnv> {
+    let token: string | null = null;
+    if (repository.provider === "github" && this.getGitHubToken) {
+      token = await this.getGitHubToken();
+    }
+    return buildGitEnvironment(process.env, repository, token);
+  }
+
+  private async runGit(
+    args: string[],
+    options: { allowFailure?: boolean; operationId?: string; env?: NodeJS.ProcessEnv } = {}
+  ): Promise<void> {
     const signal = options.operationId ? this.operations.signal(options.operationId) : undefined;
     try {
       await execFileAsync("git", args, {
         timeout: 120_000,
         maxBuffer: 1024 * 1024 * 10,
-        signal
+        signal,
+        env: options.env
       });
     } catch (error) {
       if (signal?.aborted) {
@@ -802,6 +837,40 @@ export class RepoService {
       throw error;
     }
   }
+}
+
+export function buildGitEnvironment(
+  baseEnv: NodeJS.ProcessEnv,
+  repository: RepositoryRef,
+  token: string | null | undefined
+): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {
+    ...baseEnv,
+    GIT_TERMINAL_PROMPT: "0"
+  };
+
+  if (repository.provider !== "github" || !token) {
+    return env;
+  }
+
+  const configIndex = parseGitConfigCount(env.GIT_CONFIG_COUNT);
+  const credential = Buffer.from(`x-access-token:${token}`).toString("base64");
+  env.GIT_CONFIG_COUNT = String(configIndex + 1);
+  env[`GIT_CONFIG_KEY_${configIndex}`] = "http.https://github.com/.extraheader";
+  env[`GIT_CONFIG_VALUE_${configIndex}`] = `AUTHORIZATION: basic ${credential}`;
+  return env;
+}
+
+export function worktreeAddArgs(mirrorPath: string, worktreePath: string, headSha: string): string[] {
+  return ["--git-dir", mirrorPath, "worktree", "add", "--force", "--detach", worktreePath, headSha];
+}
+
+function parseGitConfigCount(value: string | undefined): number {
+  if (!value) {
+    return 0;
+  }
+  const parsed = Number.parseInt(value, 10);
+  return Number.isInteger(parsed) && parsed >= 0 ? parsed : 0;
 }
 
 function normalizeSearchTerms(query: string): string[] {

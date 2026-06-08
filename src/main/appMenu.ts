@@ -1,6 +1,6 @@
 import { BrowserWindow, Menu, app, type MenuItemConstructorOptions } from "electron";
 import { openExternalUrl } from "./externalLinks.js";
-import { closeSubTabEvent } from "../shared/ipc.js";
+import { closeSubTabEvent, openPreferencesEvent } from "../shared/ipc.js";
 
 export function installApplicationMenu(): void {
   Menu.setApplicationMenu(Menu.buildFromTemplate(createApplicationMenuTemplate()));
@@ -14,6 +14,14 @@ export function createApplicationMenuTemplate(): MenuItemConstructorOptions[] {
       label: app.name,
       submenu: [
         { role: "about" },
+        { type: "separator" },
+        {
+          label: "Preferences...",
+          accelerator: "CommandOrControl+,",
+          click: (_item, focusedWindow) => {
+            getCloseTargetWindow(focusedWindow)?.webContents.send(openPreferencesEvent);
+          }
+        },
         { type: "separator" },
         { role: "services" },
         { type: "separator" },
@@ -89,7 +97,18 @@ function createFileMenu(): MenuItemConstructorOptions[] {
   ];
 
   if (process.platform !== "darwin") {
-    submenu.push({ type: "separator" }, { role: "quit" });
+    submenu.push(
+      { type: "separator" },
+      {
+        label: "Preferences...",
+        accelerator: "CommandOrControl+,",
+        click: (_item, focusedWindow) => {
+          getCloseTargetWindow(focusedWindow)?.webContents.send(openPreferencesEvent);
+        }
+      },
+      { type: "separator" },
+      { role: "quit" }
+    );
   }
 
   return submenu;

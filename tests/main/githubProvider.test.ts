@@ -430,6 +430,69 @@ describe("GitHubProvider response caching", () => {
     });
     expect(graphql).toHaveBeenCalledTimes(3);
   });
+
+  it("updates and deletes GitHub review comments through GraphQL", async () => {
+    const cache = new ProviderResponseCache(openDatabase(":memory:"));
+    const graphql = vi
+      .fn()
+      .mockResolvedValueOnce({
+        updatePullRequestReviewComment: {
+          pullRequestReviewComment: {
+            id: "comment-id",
+            body: "Edited review note.",
+            url: "https://github.com/kol/repo/pull/12#discussion_r1",
+            path: "src/app.ts",
+            line: 42,
+            originalLine: 42,
+            originalStartLine: null,
+            diffHunk: "@@ -40,3 +40,3 @@\n context\n",
+            outdated: false,
+            viewerCanUpdate: true,
+            viewerCanDelete: true,
+            originalCommit: { oid: "abc123" },
+            createdAt: "2026-05-22T00:00:00.000Z",
+            updatedAt: "2026-05-22T00:02:00.000Z",
+            author: {
+              login: "kol",
+              avatarUrl: "https://github.com/kol.png",
+              url: "https://github.com/kol"
+            },
+            reactionGroups: []
+          }
+        }
+      })
+      .mockResolvedValueOnce({
+        deletePullRequestReviewComment: {
+          pullRequestReviewComment: {
+            id: "comment-id"
+          }
+        }
+      });
+    const provider = providerWithGraphql(cache, graphql, "token");
+
+    const updated = await provider.updateReviewComment(repository, "comment-id", "Edited review note.");
+    const deleted = await provider.deleteReviewComment(repository, "comment-id");
+
+    expect(updated).toMatchObject({
+      id: "comment-id",
+      body: "Edited review note.",
+      path: "src/app.ts",
+      line: 42,
+      viewerCanUpdate: true,
+      viewerCanDelete: true
+    });
+    expect(deleted).toEqual({ commentId: "comment-id", deleted: true });
+    expect(graphql).toHaveBeenNthCalledWith(
+      1,
+      expect.stringContaining("updatePullRequestReviewComment"),
+      { commentId: "comment-id", body: "Edited review note." }
+    );
+    expect(graphql).toHaveBeenNthCalledWith(
+      2,
+      expect.stringContaining("deletePullRequestReviewComment"),
+      { commentId: "comment-id" }
+    );
+  });
 });
 
 function providerWithOctokit(cache: ProviderResponseCache, octokit: object, token: string | null = null): GitHubProvider {

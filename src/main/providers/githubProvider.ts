@@ -269,6 +269,8 @@ export class GitHubProvider implements Provider {
                     url
                     path
                     line
+                    viewerCanUpdate
+                    viewerCanDelete
                     originalLine
                     originalStartLine
                     diffHunk
@@ -472,6 +474,8 @@ export class GitHubProvider implements Provider {
       createdAt: data.created_at,
       updatedAt: data.updated_at,
       isBot: this.isBot(data.user),
+      viewerCanUpdate: true,
+      viewerCanDelete: true,
       reactions: []
     };
   }
@@ -487,6 +491,8 @@ export class GitHubProvider implements Provider {
           url: string;
           path?: string | null;
           line?: number | null;
+          viewerCanUpdate?: boolean | null;
+          viewerCanDelete?: boolean | null;
           createdAt: string;
           updatedAt: string;
           author?: { login: string; avatarUrl?: string; url?: string } | null;
@@ -501,6 +507,8 @@ export class GitHubProvider implements Provider {
             url
             path
             line
+            viewerCanUpdate
+            viewerCanDelete
             createdAt
             updatedAt
             author {
@@ -526,8 +534,81 @@ export class GitHubProvider implements Provider {
       createdAt: comment.createdAt,
       updatedAt: comment.updatedAt,
       isBot: false,
+      viewerCanUpdate: comment.viewerCanUpdate ?? true,
+      viewerCanDelete: comment.viewerCanDelete ?? true,
       reactions: []
     };
+  }
+
+  async updateReviewComment(repository: RepositoryRef, commentId: string, body: string): Promise<ReviewComment> {
+    this.requireToken("Editing a review comment requires a token.");
+
+    const response = await this.graphql<{
+      updatePullRequestReviewComment: {
+        pullRequestReviewComment: GraphqlReviewComment;
+      };
+    }>(
+      `mutation UpdateReviewComment($commentId: ID!, $body: String!) {
+        updatePullRequestReviewComment(input: { pullRequestReviewCommentId: $commentId, body: $body }) {
+          pullRequestReviewComment {
+            id
+            body
+            url
+            path
+            line
+            originalLine
+            originalStartLine
+            diffHunk
+            outdated
+            viewerCanUpdate
+            viewerCanDelete
+            originalCommit {
+              oid
+            }
+            createdAt
+            updatedAt
+            author {
+              login
+              avatarUrl
+              url
+            }
+            reactionGroups {
+              content
+              viewerHasReacted
+              reactors {
+                totalCount
+              }
+            }
+          }
+        }
+      }`,
+      { commentId, body }
+    );
+
+    return mapGraphqlReviewComment(response.updatePullRequestReviewComment.pullRequestReviewComment, repository);
+  }
+
+  async deleteReviewComment(_repository: RepositoryRef, commentId: string): Promise<{ commentId: string; deleted: boolean }> {
+    this.requireToken("Deleting a review comment requires a token.");
+
+    const response = await this.graphql<{
+      deletePullRequestReviewComment: {
+        pullRequestReviewComment?: {
+          id: string;
+        } | null;
+      };
+    }>(
+      `mutation DeleteReviewComment($commentId: ID!) {
+        deletePullRequestReviewComment(input: { id: $commentId }) {
+          pullRequestReviewComment {
+            id
+          }
+        }
+      }`,
+      { commentId }
+    );
+
+    return { commentId: response.deletePullRequestReviewComment.pullRequestReviewComment?.id ?? commentId, deleted: true };
   }
 
   async toggleReaction(
@@ -959,23 +1040,27 @@ type GraphqlThread = {
   originalLine?: number | null;
   originalStartLine?: number | null;
   comments: {
-    nodes: Array<{
-      id: string;
-      body: string;
-      url: string;
-      path?: string | null;
-      line?: number | null;
-      originalLine?: number | null;
-      originalStartLine?: number | null;
-      diffHunk?: string | null;
-      outdated?: boolean | null;
-      originalCommit?: { oid?: string | null } | null;
-      createdAt: string;
-      updatedAt: string;
-      author?: { login: string; avatarUrl?: string; url?: string } | null;
-      reactionGroups?: GraphqlReactionGroup[] | null;
-    }>;
+    nodes: GraphqlReviewComment[];
   };
+};
+
+type GraphqlReviewComment = {
+  id: string;
+  body: string;
+  url: string;
+  path?: string | null;
+  line?: number | null;
+  originalLine?: number | null;
+  originalStartLine?: number | null;
+  diffHunk?: string | null;
+  outdated?: boolean | null;
+  viewerCanUpdate?: boolean | null;
+  viewerCanDelete?: boolean | null;
+  originalCommit?: { oid?: string | null } | null;
+  createdAt: string;
+  updatedAt: string;
+  author?: { login: string; avatarUrl?: string; url?: string } | null;
+  reactionGroups?: GraphqlReactionGroup[] | null;
 };
 
 type ReviewThreadMutationResponse = {
@@ -998,27 +1083,59 @@ function mapGraphqlThread(thread: GraphqlThread, repository: RepositoryRef, pull
     originalStartLine: thread.originalStartLine ?? undefined,
     resolved: thread.isResolved,
     outdated: thread.isOutdated,
-    comments: thread.comments.nodes.map((comment) => ({
-      id: comment.id,
-      threadId: thread.id,
-      author: mapGraphqlActor(comment.author),
-      body: comment.body,
-      url: comment.url,
-      path: comment.path ?? thread.path ?? undefined,
-      line: comment.line ?? thread.line ?? undefined,
-      side: normalizeReviewCommentSide(thread.diffSide),
-      startLine: thread.startLine ?? undefined,
-      startSide: normalizeReviewCommentSide(thread.startDiffSide),
-      originalLine: comment.originalLine ?? thread.originalLine ?? undefined,
-      originalStartLine: comment.originalStartLine ?? thread.originalStartLine ?? undefined,
-      originalCommitId: comment.originalCommit?.oid ?? undefined,
-      diffHunk: comment.diffHunk ?? undefined,
-      outdated: comment.outdated ?? thread.isOutdated,
-      createdAt: comment.createdAt,
-      updatedAt: comment.updatedAt,
-      isBot: false,
-      reactions: mapGraphqlReactionGroups(comment.reactionGroups)
-    }))
+    comments: thread.comments.nodes.map((comment) =>
+      mapGraphqlReviewComment(comment, repository, {
+        threadId: thread.id,
+        path: thread.path,
+        line: thread.line,
+        side: normalizeReviewCommentSide(thread.diffSide),
+        startLine: thread.startLine,
+        startSide: normalizeReviewCommentSide(thread.startDiffSide),
+        originalLine: thread.originalLine,
+        originalStartLine: thread.originalStartLine,
+        outdated: thread.isOutdated
+      })
+    )
+  };
+}
+
+function mapGraphqlReviewComment(
+  comment: GraphqlReviewComment,
+  _repository: RepositoryRef,
+  fallback: {
+    threadId?: string;
+    path?: string | null;
+    line?: number | null;
+    side?: "left" | "right";
+    startLine?: number | null;
+    startSide?: "left" | "right";
+    originalLine?: number | null;
+    originalStartLine?: number | null;
+    outdated?: boolean;
+  } = {}
+): ReviewComment {
+  return {
+    id: comment.id,
+    threadId: fallback.threadId,
+    author: mapGraphqlActor(comment.author),
+    body: comment.body,
+    url: comment.url,
+    path: comment.path ?? fallback.path ?? undefined,
+    line: comment.line ?? fallback.line ?? undefined,
+    side: fallback.side,
+    startLine: fallback.startLine ?? undefined,
+    startSide: fallback.startSide,
+    originalLine: comment.originalLine ?? fallback.originalLine ?? undefined,
+    originalStartLine: comment.originalStartLine ?? fallback.originalStartLine ?? undefined,
+    originalCommitId: comment.originalCommit?.oid ?? undefined,
+    diffHunk: comment.diffHunk ?? undefined,
+    outdated: comment.outdated ?? fallback.outdated,
+    createdAt: comment.createdAt,
+    updatedAt: comment.updatedAt,
+    isBot: false,
+    viewerCanUpdate: comment.viewerCanUpdate ?? false,
+    viewerCanDelete: comment.viewerCanDelete ?? false,
+    reactions: mapGraphqlReactionGroups(comment.reactionGroups)
   };
 }
 

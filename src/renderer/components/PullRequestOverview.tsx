@@ -15,12 +15,15 @@ import {
   GitPullRequestArrow,
   MessageSquare,
   MoreHorizontal,
+  Pencil,
   Play,
   Plus,
   RefreshCw,
   Smile,
   Sparkles,
-  Tag
+  Tag,
+  Trash2,
+  X
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { krtClient } from "../api/client.js";
@@ -127,6 +130,14 @@ export function PullRequestOverview({ tab }: PullRequestOverviewProps): React.JS
         if (result.cachedTour) {
           setTour(tab.key, result.cachedTour);
           setTourOperation(tab.key, null);
+          setTourProgress(tab.key, {
+            operationId: result.operationId,
+            phase: "complete",
+            message: "AI tour loaded from cache",
+            percent: 100,
+            done: true,
+            cancelled: false
+          });
         } else {
           setTourOperation(tab.key, result.operationId);
           const progress = await krtClient.operations.progressSnapshot({ operationId: result.operationId });
@@ -1200,6 +1211,8 @@ export interface ThreadItem {
   createdAt: string;
   title?: string;
   body: string;
+  viewerCanUpdate: boolean;
+  viewerCanDelete: boolean;
   codeLocation?: DiffCommentLocation;
   replies: ReviewComment[];
   resolved: boolean;
@@ -1225,6 +1238,8 @@ export function threadItemFromReviewThread(
     isBot: first.isBot,
     createdAt: first.createdAt,
     body: first.body,
+    viewerCanUpdate: first.viewerCanUpdate,
+    viewerCanDelete: first.viewerCanDelete,
     codeLocation: options.includeCodeLocation ? locationFromThread(thread) : undefined,
     replies: thread.comments.slice(1),
     resolved: thread.resolved,
@@ -1514,9 +1529,15 @@ export function ThreadCard({
               </div>
             ) : null}
             {item.body ? (
-              <div
-                className="thread-body markdown"
-                dangerouslySetInnerHTML={{ __html: renderMarkdown(item.body) }}
+              <EditableReviewComment
+                tabKey={tabKey}
+                pullRequest={pullRequest}
+                threadId={item.threadId}
+                commentId={item.reactionSourceId}
+                body={item.body}
+                canUpdate={item.viewerCanUpdate}
+                canDelete={item.viewerCanDelete}
+                className="thread-body"
               />
             ) : null}
             <ReactionBar
@@ -1651,9 +1672,15 @@ function ThreadReplies({
               <span className="thread-reply-author">{reply.author.login}</span>
               <span className="thread-reply-when">· {formatDate(reply.createdAt)}</span>
             </div>
-            <div
-              className="thread-reply-content markdown"
-              dangerouslySetInnerHTML={{ __html: renderMarkdown(reply.body) }}
+            <EditableReviewComment
+              tabKey={tabKey}
+              pullRequest={pullRequest}
+              threadId={reply.threadId}
+              commentId={reply.id}
+              body={reply.body}
+              canUpdate={reply.viewerCanUpdate}
+              canDelete={reply.viewerCanDelete}
+              className="thread-reply-content"
             />
             <ReactionBar
               tabKey={tabKey}
@@ -1666,6 +1693,151 @@ function ThreadReplies({
           </div>
         </div>
       ))}
+    </div>
+  );
+}
+
+interface EditableReviewCommentProps {
+  tabKey: string;
+  pullRequest: PullRequestDetail;
+  threadId: string | undefined;
+  commentId: string;
+  body: string;
+  canUpdate: boolean;
+  canDelete: boolean;
+  className: string;
+}
+
+function EditableReviewComment({
+  tabKey,
+  pullRequest,
+  threadId,
+  commentId,
+  body,
+  canUpdate,
+  canDelete,
+  className
+}: EditableReviewCommentProps): React.JSX.Element {
+  const updateReviewThreadComment = useUiStore((state) => state.updateReviewThreadComment);
+  const deleteReviewThreadComment = useUiStore((state) => state.deleteReviewThreadComment);
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(body);
+
+  useEffect(() => {
+    if (!editing) {
+      setDraft(body);
+    }
+  }, [body, editing]);
+
+  const updateMutation = useMutation({
+    mutationFn: () => {
+      if (!threadId) {
+        throw new Error("Review thread is unavailable.");
+      }
+      return krtClient.comments.updateReviewComment({
+        repository: pullRequest.repository,
+        number: pullRequest.number,
+        threadId,
+        commentId,
+        body: draft.trim()
+      });
+    },
+    onSuccess: (comment) => {
+      if (threadId) {
+        updateReviewThreadComment(tabKey, threadId, comment);
+      }
+      setEditing(false);
+    }
+  });
+  const deleteMutation = useMutation({
+    mutationFn: () => {
+      if (!threadId) {
+        throw new Error("Review thread is unavailable.");
+      }
+      return krtClient.comments.deleteReviewComment({
+        repository: pullRequest.repository,
+        number: pullRequest.number,
+        threadId,
+        commentId
+      });
+    },
+    onSuccess: (result) => {
+      deleteReviewThreadComment(tabKey, result.threadId, result.commentId);
+    }
+  });
+
+  if (editing) {
+    return (
+      <div className={`${className} editable-review-comment is-editing`}>
+        <textarea
+          autoFocus
+          aria-label="Edit review comment"
+          value={draft}
+          rows={4}
+          onChange={(event) => setDraft(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === "Escape") {
+              event.preventDefault();
+              setDraft(body);
+              setEditing(false);
+            }
+            if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
+              event.preventDefault();
+              if (draft.trim()) {
+                updateMutation.mutate();
+              }
+            }
+          }}
+        />
+        <div className="editable-review-comment-actions">
+          <button
+            type="button"
+            className="secondary-button"
+            onClick={() => {
+              setDraft(body);
+              setEditing(false);
+            }}
+          >
+            <X size={12} aria-hidden="true" />
+            Cancel
+          </button>
+          <button
+            type="button"
+            className="primary-button"
+            disabled={!draft.trim() || updateMutation.isPending}
+            onClick={() => updateMutation.mutate()}
+          >
+            <Check size={12} aria-hidden="true" />
+            Save
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className={`${className} editable-review-comment`}>
+      <div className="markdown" dangerouslySetInnerHTML={{ __html: renderMarkdown(body) }} />
+      {canUpdate || canDelete ? (
+        <div className="editable-review-comment-actions">
+          {canUpdate ? (
+            <button type="button" className="icon-button" aria-label="Edit review comment" onClick={() => setEditing(true)}>
+              <Pencil size={12} aria-hidden="true" />
+            </button>
+          ) : null}
+          {canDelete ? (
+            <button
+              type="button"
+              className="icon-button"
+              aria-label="Delete review comment"
+              disabled={deleteMutation.isPending}
+              onClick={() => deleteMutation.mutate()}
+            >
+              <Trash2 size={12} aria-hidden="true" />
+            </button>
+          ) : null}
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -2046,6 +2218,8 @@ function partitionActivity(
         createdAt: event.createdAt,
         title: event.kind === "comment" ? undefined : event.title,
         body: event.body ?? event.title,
+        viewerCanUpdate: false,
+        viewerCanDelete: false,
         codeLocation: event.path ? locationFromActivityEvent(event) : undefined,
         replies: [],
         resolved: false,

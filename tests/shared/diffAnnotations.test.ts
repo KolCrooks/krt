@@ -34,7 +34,7 @@ describe("buildDiffAnnotations", () => {
           id: "chapter-1",
           title: "Workspace shell",
           summary: "Review state and editor state share the selected file.",
-          diffAnchors: [{ path: "src/App.tsx", startLine: 12, endLine: 14, side: "right" }],
+          diffAnchors: [{ path: "src/App.tsx", startLine: 12, endLine: 14, side: "right", note: "shares selected file across views" }],
           files: ["src/App.tsx"],
           riskLevel: "medium"
         }),
@@ -42,7 +42,7 @@ describe("buildDiffAnnotations", () => {
           id: "chapter-2",
           title: "Other file",
           summary: "Not selected.",
-          diffAnchors: [{ path: "src/Other.ts", side: "right" }],
+          diffAnchors: [{ path: "src/Other.ts", side: "right", note: "different file" }],
           files: ["src/Other.ts"],
           riskLevel: "low"
         })
@@ -63,20 +63,24 @@ describe("buildDiffAnnotations", () => {
         line: 12,
         endLine: 14,
         status: "medium",
-        title: "AI: Workspace shell"
+        title: "Workspace shell",
+        body: "shares selected file across views"
       })
     ]);
   });
 
-  it("falls back to file-level AI notes when a chapter references a file without anchors", () => {
+  it("emits inline AI comments only for anchors that carry a generated note", () => {
     const annotations = buildDiffAnnotations({
       filePath: "src/App.tsx",
       tourChapters: [
         tourChapter({
           id: "chapter-1",
-          title: "File-level note",
-          summary: "The chapter has file membership but no exact line.",
-          diffAnchors: [],
+          title: "Mixed anchors",
+          summary: "The chapter has file membership but only one noted region.",
+          diffAnchors: [
+            { path: "src/App.tsx", startLine: 20, side: "right" },
+            { path: "src/App.tsx", startLine: 40, endLine: 42, side: "right", note: "guards the write path" }
+          ],
           files: ["src/App.tsx"],
           riskLevel: "high"
         })
@@ -85,13 +89,32 @@ describe("buildDiffAnnotations", () => {
 
     expect(annotations).toEqual([
       expect.objectContaining({
-        id: "ai:chapter-1:file:0",
+        id: "ai:chapter-1:40:1",
         kind: "ai",
-        line: undefined,
-        side: "right",
-        status: "high"
+        line: 40,
+        endLine: 42,
+        status: "high",
+        body: "guards the write path"
       })
     ]);
+  });
+
+  it("carries inline comment severity and category through to the annotation", () => {
+    const annotations = buildDiffAnnotations({
+      filePath: "src/App.tsx",
+      tourChapters: [
+        tourChapter({
+          id: "chapter-1",
+          title: "Risky region",
+          summary: "x",
+          diffAnchors: [{ path: "src/App.tsx", startLine: 7, side: "right", note: "missing null check", severity: "warning", category: "correctness" }],
+          files: ["src/App.tsx"],
+          riskLevel: "medium"
+        })
+      ]
+    });
+
+    expect(annotations[0]).toMatchObject({ kind: "ai", severity: "warning", category: "correctness", body: "missing null check" });
   });
 });
 
@@ -122,6 +145,8 @@ function reviewThread(overrides: {
         side: "right",
         createdAt: "2026-05-22T00:00:00.000Z",
         isBot: false,
+        viewerCanUpdate: false,
+        viewerCanDelete: false,
         reactions: []
       }
     ]

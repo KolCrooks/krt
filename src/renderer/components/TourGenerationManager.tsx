@@ -15,6 +15,7 @@ export function TourGenerationManager(): null {
   const setTour = useUiStore((state) => state.setTour);
   const setTourProgress = useUiStore((state) => state.setTourProgress);
   const setTourOperation = useUiStore((state) => state.setTourOperation);
+  const appendTourActivity = useUiStore((state) => state.appendTourActivity);
 
   useEffect(() => {
     return krtClient.operations.onProgress((progress) => {
@@ -23,6 +24,10 @@ export function TourGenerationManager(): null {
         return;
       }
       setTourProgress(tab.key, progress);
+      // Record each agent step (thinking, exploration, tool calls) in the live feed.
+      if (progress.activity && !progress.done) {
+        appendTourActivity(tab.key, progress.activity);
+      }
       // Stream chapters into the store as they arrive.
       if (progress.tour) {
         setTour(tab.key, progress.tour);
@@ -46,7 +51,7 @@ export function TourGenerationManager(): null {
         setTourOperation(tab.key, null);
       }
     });
-  }, [setTour, setTourOperation, setTourProgress]);
+  }, [appendTourActivity, setTour, setTourOperation, setTourProgress]);
 
   return null;
 }

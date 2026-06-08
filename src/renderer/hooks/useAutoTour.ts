@@ -1,6 +1,7 @@
 import { useMutation } from "@tanstack/react-query";
 import { useEffect, useRef } from "react";
 import { krtClient } from "../api/client.js";
+import type { AgentActivity } from "../../shared/schemas.js";
 import type { PrTab } from "../store/uiStore.js";
 import { useUiStore } from "../store/uiStore.js";
 
@@ -10,6 +11,7 @@ export interface UseAutoTourResult {
   message: string | null;
   percent: number | null;
   operationId: string | null;
+  activity: AgentActivity[];
   regenerate: () => void;
   cancel: () => void;
 }
@@ -41,6 +43,7 @@ export function useAutoTour(tab: PrTab): UseAutoTourResult {
         force
       }),
     onMutate: (force) => {
+      setTourOperation(tab.key, null);
       if (force) {
         setTour(tab.key, null);
       }
@@ -64,6 +67,9 @@ export function useAutoTour(tab: PrTab): UseAutoTourResult {
       void krtClient.operations.progressSnapshot({ operationId: result.operationId }).then((snapshot) => {
         if (snapshot) {
           setTourProgress(tab.key, snapshot);
+          if (snapshot.done) {
+            setTourOperation(tab.key, null);
+          }
         }
       });
     }
@@ -85,9 +91,10 @@ export function useAutoTour(tab: PrTab): UseAutoTourResult {
     // eslint-disable-next-line react-hooks/exhaustive-deps -- intentionally fires only on identity / mount changes below
   }, [tab.bundle.detail.headSha, tab.tour, tab.tourOperationId]);
 
-  const isGenerating = generateMutation.isPending || Boolean(operationId && (!progress || !progress.done));
   const hasFailed =
     generateMutation.isError || Boolean(progress?.done && (progress.cancelled || progress.phase === "failed"));
+  const isStartingGeneration = generateMutation.isPending && !tab.tour;
+  const isGenerating = !hasFailed && (isStartingGeneration || Boolean(operationId && (!progress || !progress.done)));
 
   return {
     isGenerating,
@@ -95,6 +102,7 @@ export function useAutoTour(tab: PrTab): UseAutoTourResult {
     message: progress?.message ?? (isGenerating ? "Preparing AI tour" : null),
     percent: progress?.percent ?? null,
     operationId,
+    activity: tab.tourActivity ?? [],
     regenerate: () => {
       triggeredHeadSha.current = tab.bundle.detail.headSha;
       generateMutation.mutate(true);

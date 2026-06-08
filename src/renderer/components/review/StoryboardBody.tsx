@@ -3,12 +3,16 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useAutoTour } from "../../hooks/useAutoTour.js";
 import { useStoryboardLayout } from "../../hooks/useStoryboardLayout.js";
 import { DiffPanel } from "../diffs/DiffPanel.js";
+import { DiffSearchBar, type DiffSearchMatch } from "../diffs/DiffSearchBar.js";
 import { ChangedFileTree } from "../trees/ChangedFileTree.js";
 import { renderMarkdown, renderInlineMarkdown, stripMarkdown } from "../../lib/markdown.js";
 import type { PrTab } from "../../store/uiStore.js";
 import { useUiStore } from "../../store/uiStore.js";
-import type { TourChapter, TourGraph } from "../../../shared/schemas.js";
+import type { ChapterKind, TourChapter, TourGraph } from "../../../shared/schemas.js";
+import { AgentActivityFeed } from "./AgentActivityFeed.js";
+import { AgentWorkingOverlay } from "./AgentWorkingOverlay.js";
 import { resolveChapterFiles } from "./chapterFiles.js";
+import { RiskLevelPill } from "./RiskLevelPill.js";
 
 type Relation = TourGraph["edges"][number]["relation"];
 
@@ -46,20 +50,29 @@ const KIND_META: Record<Kind, KindMeta> = {
 interface StoryboardBodyProps {
   tab: PrTab;
   layout: "inline" | "split";
+  active?: boolean;
 }
 
-export function StoryboardBody({ tab, layout }: StoryboardBodyProps): React.JSX.Element {
+export function StoryboardBody({ tab, layout, active = true }: StoryboardBodyProps): React.JSX.Element {
   const tour = tab.tour;
   const auto = useAutoTour(tab);
   const { layout: graphLayout, isLayingOut } = useStoryboardLayout(tour);
   const openFileInTab = useUiStore((state) => state.openFileInTab);
   const setTabViewMode = useUiStore((state) => state.setTabViewMode);
+  const toggleTourChapterReviewed = useUiStore((state) => state.toggleTourChapterReviewed);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(
     tour?.graph.nodes[0]?.id ?? tour?.chapters[0]?.id ?? null
   );
   const [previewNodeId, setPreviewNodeId] = useState<string | null>(null);
+  const [watchingAgent, setWatchingAgent] = useState(false);
+  // Close the "watch the agent" overlay once generation finishes.
+  useEffect(() => {
+    if (!auto.isGenerating) {
+      setWatchingAgent(false);
+    }
+  }, [auto.isGenerating]);
   const [hoveredEdgeKey, setHoveredEdgeKey] = useState<string | null>(null);
-  const [reviewed, setReviewed] = useState<Record<string, boolean>>({});
+  const [activeSearchMatch, setActiveSearchMatch] = useState<DiffSearchMatch | null>(null);
 
   useEffect(() => {
     if (!tour) {
@@ -83,7 +96,7 @@ export function StoryboardBody({ tab, layout }: StoryboardBodyProps): React.JSX.
     () => resolveChapterFiles(activeChapter, tab.bundle.changedFiles),
     [activeChapter, tab.bundle.changedFiles]
   );
-  const kindByNode = useMemo(() => (tour ? assignKinds(tour.graph) : new Map<string, Kind>()), [tour]);
+  const kindByNode = useMemo(() => (tour ? assignKinds(tour.graph, tour.chapters) : new Map<string, Kind>()), [tour]);
 
   const diffFileRefs = useRef<Record<string, HTMLElement | null>>({});
   const [diffSelectedPath, setDiffSelectedPath] = useState<string | null>(null);
@@ -92,8 +105,15 @@ export function StoryboardBody({ tab, layout }: StoryboardBodyProps): React.JSX.
   }, [chapterFiles]);
   const onSelectDiffFile = useCallback((path: string): void => {
     setDiffSelectedPath(path);
-    diffFileRefs.current[path]?.scrollIntoView({ block: "start", behavior: "smooth" });
+    diffFileRefs.current[path]?.scrollIntoView({ block: "start", behavior: "auto" });
   }, []);
+  useEffect(() => {
+    if (!active || !activeSearchMatch) {
+      return;
+    }
+    setDiffSelectedPath(activeSearchMatch.path);
+    diffFileRefs.current[activeSearchMatch.path]?.scrollIntoView({ block: "start", behavior: "auto" });
+  }, [active, activeSearchMatch]);
 
   if (!tour) {
     return (
@@ -101,6 +121,7 @@ export function StoryboardBody({ tab, layout }: StoryboardBodyProps): React.JSX.
         <Bot size={22} aria-hidden="true" className={auto.isGenerating ? "spin" : undefined} />
         <h2>{auto.isGenerating ? "Generating storyboard" : auto.hasFailed ? "Tour generation failed" : "Preparing storyboard"}</h2>
         <p>{auto.message ?? "Reading the diff and timeline to organize this PR into a dependency graph."}</p>
+        <AgentActivityFeed entries={auto.activity} active={auto.isGenerating} />
         <div className="tour-empty-actions">
           {auto.isGenerating && auto.operationId ? (
             <button type="button" className="secondary-button" onClick={auto.cancel}>
@@ -122,9 +143,9 @@ export function StoryboardBody({ tab, layout }: StoryboardBodyProps): React.JSX.
     return <StoryboardLoadingSkeleton message={isLayingOut ? "Preparing storyboard" : "Storyboard unavailable"} />;
   }
 
-  const reviewedCount = tour.chapters.filter((chapter) => reviewed[chapter.id]).length;
-  const toggleReviewed = (id: string): void =>
-    setReviewed((prev) => ({ ...prev, [id]: !prev[id] }));
+  const reviewedChapterIds = new Set(tab.reviewedTourChapterIds ?? []);
+  const reviewedCount = tour.chapters.filter((chapter) => reviewedChapterIds.has(chapter.id)).length;
+  const toggleReviewed = (id: string): void => toggleTourChapterReviewed(tab.key, id);
 
   const incomingFor = (id: string): typeof tour.graph.edges =>
     tour.graph.edges.filter((edge) => edge.to === id);
@@ -142,6 +163,18 @@ export function StoryboardBody({ tab, layout }: StoryboardBodyProps): React.JSX.
 
   return (
     <section className="storyboard-v2">
+      {watchingAgent && auto.isGenerating ? (
+        <AgentWorkingOverlay
+          title="Generating storyboard"
+          message={auto.message}
+          percent={auto.percent}
+          activity={auto.activity}
+          isGenerating={auto.isGenerating}
+          canCancel={Boolean(auto.operationId)}
+          onCancel={auto.cancel}
+          onClose={() => setWatchingAgent(false)}
+        />
+      ) : null}
       <header className="storyboard-v2-head">
         <Sparkles size={13} aria-hidden="true" className="storyboard-v2-head-icon" />
         <span className="storyboard-v2-head-title">Storyboard</span>
@@ -240,7 +273,7 @@ export function StoryboardBody({ tab, layout }: StoryboardBodyProps): React.JSX.
             const isSelected = selectedNodeId === node.id;
             const isPreviewed = previewNodeId === node.id;
             const isActive = activeId === node.id;
-            const isReviewed = Boolean(reviewed[node.id]);
+            const isReviewed = reviewedChapterIds.has(node.id);
             return (
               <article
                 key={node.id}
@@ -267,6 +300,7 @@ export function StoryboardBody({ tab, layout }: StoryboardBodyProps): React.JSX.
                     {kindMeta.label}
                   </span>
                   <span className="mono storyboard-v2-card-num">ch {String(index + 1).padStart(2, "0")}</span>
+                  {auto.isGenerating ? <span className="chapter-draft-pill">Draft</span> : null}
                   <span className="storyboard-v2-card-spacer" />
                   <button
                     type="button"
@@ -303,8 +337,18 @@ export function StoryboardBody({ tab, layout }: StoryboardBodyProps): React.JSX.
           })}
           {auto.isGenerating ? (
             <article
-              className="storyboard-v2-card is-loading"
-              aria-label="More chapters loading"
+              className="storyboard-v2-card is-loading is-clickable"
+              role="button"
+              tabIndex={0}
+              aria-label="Watch the agent work"
+              title="Watch the agent work"
+              onClick={() => setWatchingAgent(true)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" || event.key === " ") {
+                  event.preventDefault();
+                  setWatchingAgent(true);
+                }
+              }}
               style={{
                 left: graphLayout.width + 8,
                 top: 28,
@@ -338,7 +382,7 @@ export function StoryboardBody({ tab, layout }: StoryboardBodyProps): React.JSX.
               hoveredEdgeKey={hoveredEdgeKey}
               onHoverEdge={(key) => setHoveredEdgeKey(key)}
               onSelectNode={(id) => setSelectedNodeId(id)}
-              reviewed={Boolean(reviewed[activeChapter.id])}
+              reviewed={reviewedChapterIds.has(activeChapter.id)}
               onToggleReviewed={() => toggleReviewed(activeChapter.id)}
               onOpenFile={(path) => {
                 openFileInTab(tab.key, path);
@@ -367,6 +411,12 @@ export function StoryboardBody({ tab, layout }: StoryboardBodyProps): React.JSX.
               chapter {tour.chapters.findIndex((entry) => entry.id === activeChapter.id) + 1} · {stripMarkdown(activeChapter.title)}
             </span>
           </div>
+          <DiffSearchBar
+            pullRequest={tab.bundle.detail}
+            files={chapterFiles}
+            active={active}
+            onActiveMatch={setActiveSearchMatch}
+          />
           <div className="storyboard-v2-diff-body">
             {chapterFiles.length > 1 ? (
               <aside className="storyboard-v2-diff-tree" aria-label="Chapter files">
@@ -389,7 +439,7 @@ export function StoryboardBody({ tab, layout }: StoryboardBodyProps): React.JSX.
                     layout={layout}
                     reviewThreads={tab.bundle.reviewThreads}
                     tourChapters={[activeChapter]}
-                    cropToChapters
+                    searchTarget={searchTargetForFile(activeSearchMatch, file.path)}
                     enableLsp={tab.mode === "managed"}
                     onOpenDefinition={(path, line) => {
                       openFileInTab(tab.key, path, line);
@@ -404,6 +454,20 @@ export function StoryboardBody({ tab, layout }: StoryboardBodyProps): React.JSX.
       ) : null}
     </section>
   );
+}
+
+function searchTargetForFile(match: DiffSearchMatch | null, path: string) {
+  if (!match || match.path !== path || !match.lineNumber) {
+    return null;
+  }
+  return {
+    start: match.lineNumber,
+    end: match.lineNumber,
+    side: match.side === "left" ? "deletions" as const : "additions" as const,
+    matchId: match.id,
+    matchStart: match.matchStart,
+    matchLength: match.matchLength
+  };
 }
 
 interface ChapterDetailProps {
@@ -444,6 +508,7 @@ function ChapterDetail({
       <div className="storyboard-v2-detail-head">
         <span className="storyboard-v2-kind" style={{ background: meta.bg, color: meta.color }}>{meta.label}</span>
         <span className="mono storyboard-v2-detail-num">chapter {String(idx + 1).padStart(2, "0")}</span>
+        <RiskLevelPill level={chapter.riskLevel} />
         {isSensitive ? <AlertTriangle size={12} aria-hidden="true" className="storyboard-v2-detail-warning" /> : null}
       </div>
       <h3 className="storyboard-v2-detail-title" dangerouslySetInnerHTML={{ __html: renderInlineMarkdown(chapter.title) }} />
@@ -655,7 +720,23 @@ function cardClass({
   return classes.join(" ");
 }
 
-function assignKinds(graph: TourGraph): Map<string, Kind> {
+// The agent may classify a chapter explicitly; map that to a storyboard badge.
+// Kinds without a clean structural equivalent fall through to graph inference.
+const CHAPTER_KIND_TO_NODE_KIND: Partial<Record<ChapterKind, Kind>> = {
+  concept: "foundation",
+  replacement: "replace",
+  config: "gate",
+  verification: "verify"
+};
+
+function assignKinds(graph: TourGraph, chapters: TourChapter[]): Map<string, Kind> {
+  const explicit = new Map<string, Kind>();
+  for (const chapter of chapters) {
+    const mapped = chapter.kind ? CHAPTER_KIND_TO_NODE_KIND[chapter.kind] : undefined;
+    if (mapped) {
+      explicit.set(chapter.id, mapped);
+    }
+  }
   const incomingByTo = new Map<string, TourGraph["edges"]>();
   for (const edge of graph.edges) {
     const list = incomingByTo.get(edge.to) ?? [];
@@ -664,6 +745,11 @@ function assignKinds(graph: TourGraph): Map<string, Kind> {
   }
   const kinds = new Map<string, Kind>();
   for (const node of graph.nodes) {
+    const explicitKind = explicit.get(node.id);
+    if (explicitKind) {
+      kinds.set(node.id, explicitKind);
+      continue;
+    }
     const incoming = incomingByTo.get(node.id) ?? [];
     if (incoming.length === 0) {
       kinds.set(node.id, "foundation");

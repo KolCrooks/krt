@@ -24,6 +24,10 @@ import type { ExtensionService } from "./extensionService.js";
 
 const execFileAsync = promisify(execFile);
 
+// find-references can be slow on a freshly-opened workspace; cap it so blast-
+// radius computation degrades to "unknown" rather than hanging the agent.
+const REFERENCES_TIMEOUT_MS = 10_000;
+
 type LspCapability = LspSession["capabilities"][number];
 
 interface ProcessHandle {
@@ -433,6 +437,21 @@ export class LspService {
       : null;
   }
 
+  // Find the distinct worktree-relative files that reference the symbol at the
+  // given position. Used to compute blast radius. Best-effort: returns [] when
+  // no language server matches, the symbol is unknown, or the request times out
+  // (cross-file references are only complete once the server has indexed).
+  async getReferences(repository: RepositoryRef, headSha: string, path: string, position: LspPosition): Promise<string[]> {
+    const worktreePath = this.requireWorktree(repository, headSha);
+    const content = await this.repos.getLocalFileContent(repository, path, headSha);
+    if (!content) {
+      return [];
+    }
+
+    const session = await this.getOrStartSession(repository, headSha, [path]);
+    return session ? await this.getServerReferences(session, worktreePath, path, content.contents, position) : [];
+  }
+
   private requireWorktree(repository: RepositoryRef, headSha: string): string {
     const worktreePath = this.repos.getWorktreePath(repository, headSha);
     if (!worktreePath) {
@@ -534,6 +553,43 @@ export class LspService {
     } catch (error) {
       this.logLspRequestFailure(handle, "definition", error);
       return null;
+    }
+  }
+
+  private async getServerReferences(
+    session: InternalSession,
+    worktreePath: string,
+    path: string,
+    contents: string,
+    position: LspPosition
+  ): Promise<string[]> {
+    // References and definition are backed by the same servers (e.g. tsserver),
+    // so reuse the "definition" capability rather than adding a new feature flag.
+    const handle = this.handleForPath(session, path, "definition");
+    if (!handle) {
+      return [];
+    }
+
+    try {
+      const uri = this.ensureDocumentOpen(handle, worktreePath, path, contents);
+      const result = await handle.client.request(
+        "textDocument/references",
+        { textDocument: { uri }, position, context: { includeDeclaration: false } },
+        REFERENCES_TIMEOUT_MS
+      );
+      const locations = Array.isArray(result) ? result : [];
+      const paths = new Set<string>();
+      for (const location of locations) {
+        const refUri = stringValue(objectValue(location)?.uri);
+        const relativePath = refUri ? pathFromUri(worktreePath, refUri) : null;
+        if (relativePath) {
+          paths.add(relativePath);
+        }
+      }
+      return [...paths];
+    } catch (error) {
+      this.logLspRequestFailure(handle, "references", error);
+      return [];
     }
   }
 
@@ -755,6 +811,7 @@ class LspJsonRpcClient {
         textDocument: {
           hover: { contentFormat: ["markdown", "plaintext"] },
           definition: { linkSupport: true },
+          references: { dynamicRegistration: false },
           documentSymbol: { hierarchicalDocumentSymbolSupport: true }
         },
         workspace: {
