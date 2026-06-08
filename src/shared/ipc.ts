@@ -474,6 +474,19 @@ export const ipcContract = {
       cachedTour: reviewTourSchema.nullable()
     })
   },
+  "ai:listModels": {
+    input: z.object({ provider: aiProviderSchema.optional() }).optional(),
+    output: z.object({
+      provider: aiProviderSchema,
+      models: z.array(
+        z.object({
+          id: z.string(),
+          label: z.string().optional(),
+          toolCapable: z.boolean()
+        })
+      )
+    })
+  },
   "extensions:list": {
     input: noInput,
     output: z.array(extensionDescriptorSchema)

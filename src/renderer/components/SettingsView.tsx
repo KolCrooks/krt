@@ -14,10 +14,10 @@ import {
   Terminal,
   X,
 } from "lucide-react";
-import { useId, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { krtClient } from "../api/client.js";
 import { ModalBackdrop } from "./ExtensionsView.js";
-import type { IpcInput } from "../../shared/ipc.js";
+import type { IpcInput, IpcOutput } from "../../shared/ipc.js";
 import type {
   AiProvider,
   AiKeyProvider,
@@ -26,6 +26,7 @@ import type {
 } from "../../shared/schemas.js";
 
 type SettingsUpdateInput = IpcInput<"settings:update">;
+type DiscoveredModel = IpcOutput<"ai:listModels">["models"][number];
 
 interface SettingsSection {
   id:
@@ -89,6 +90,181 @@ const MODEL_SUGGESTIONS: Record<AiProvider, ModelSuggestion[]> = {
     { value: "mistral-nemo", label: "Requires tool support in local runtime" }
   ]
 };
+
+interface ModelOption {
+  /** Model id written into settings.ai.model. */
+  value: string;
+  /** Secondary text (display name / curated note); empty when the provider gives none. */
+  description: string;
+  /** Whether the model can do tool calling, which AI review requires. */
+  toolCapable: boolean;
+}
+
+// Discovered models lead the list; the static suggestions backfill anything the
+// provider didn't return (or when discovery is unavailable), so the field always
+// has something useful to autocomplete.
+function buildModelOptions(discovered: DiscoveredModel[], fallback: ModelSuggestion[]): ModelOption[] {
+  const seen = new Set<string>();
+  const options: ModelOption[] = [];
+  for (const model of discovered) {
+    if (!model.id || seen.has(model.id)) {
+      continue;
+    }
+    seen.add(model.id);
+    options.push({ value: model.id, description: model.label ?? "", toolCapable: model.toolCapable });
+  }
+  for (const suggestion of fallback) {
+    if (seen.has(suggestion.value)) {
+      continue;
+    }
+    seen.add(suggestion.value);
+    options.push({ value: suggestion.value, description: suggestion.label, toolCapable: true });
+  }
+  return options;
+}
+
+interface ModelComboboxProps {
+  value: string;
+  options: ModelOption[];
+  placeholder: string;
+  onChange: (value: string) => void;
+}
+
+// A styled typeahead matching the app's other comboboxes (see RepoCombobox in
+// SearchView): a text input that opens an absolutely-positioned listbox of model
+// ids with keyboard navigation, rather than the browser-default <datalist>.
+function ModelCombobox({ value, options, placeholder, onChange }: ModelComboboxProps): React.JSX.Element {
+  const wrapperRef = useRef<HTMLDivElement | null>(null);
+  const inputRef = useRef<HTMLInputElement | null>(null);
+  const [open, setOpen] = useState(false);
+  const [highlight, setHighlight] = useState(0);
+  const listId = useId();
+  const query = value.trim().toLowerCase();
+
+  // Filter as the user types, but keep the full list visible when the field is
+  // empty or already holds an exact model id, so the menu stays browsable.
+  const filtered = useMemo(() => {
+    const exact = options.some((option) => option.value.toLowerCase() === query);
+    const matches =
+      !query || exact
+        ? options
+        : options.filter(
+            (option) =>
+              option.value.toLowerCase().includes(query) || option.description.toLowerCase().includes(query),
+          );
+    return matches.slice(0, 50);
+  }, [options, query]);
+
+  useEffect(() => {
+    if (highlight >= filtered.length) {
+      setHighlight(0);
+    }
+  }, [filtered.length, highlight]);
+
+  useEffect(() => {
+    if (!open) {
+      return undefined;
+    }
+    const onPointer = (event: PointerEvent): void => {
+      if (wrapperRef.current && !wrapperRef.current.contains(event.target as Node)) {
+        setOpen(false);
+      }
+    };
+    window.addEventListener("pointerdown", onPointer);
+    return () => window.removeEventListener("pointerdown", onPointer);
+  }, [open]);
+
+  const onKeyDown = (event: React.KeyboardEvent<HTMLInputElement>): void => {
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      setOpen(true);
+      setHighlight((current) => (filtered.length ? (current + 1) % filtered.length : 0));
+      return;
+    }
+    if (event.key === "ArrowUp") {
+      event.preventDefault();
+      setOpen(true);
+      setHighlight((current) => (filtered.length ? (current - 1 + filtered.length) % filtered.length : 0));
+      return;
+    }
+    if (event.key === "Enter" && open && filtered[highlight]) {
+      event.preventDefault();
+      onChange(filtered[highlight].value);
+      setOpen(false);
+      return;
+    }
+    if (event.key === "Escape" && open) {
+      // Close the menu without also closing the Settings modal behind it.
+      event.preventDefault();
+      event.stopPropagation();
+      setOpen(false);
+    }
+  };
+
+  return (
+    <div className="settings-combobox" ref={wrapperRef}>
+      <input
+        ref={inputRef}
+        className="settings-input"
+        value={value}
+        placeholder={placeholder}
+        autoComplete="off"
+        spellCheck={false}
+        role="combobox"
+        aria-autocomplete="list"
+        aria-controls={open ? listId : undefined}
+        aria-expanded={open}
+        onChange={(event) => {
+          onChange(event.target.value);
+          setOpen(true);
+          setHighlight(0);
+        }}
+        onFocus={() => setOpen(true)}
+        onKeyDown={onKeyDown}
+      />
+      {open && filtered.length > 0 ? (
+        <ul className="settings-model-menu" role="listbox" id={listId}>
+          {filtered.map((option, index) => {
+            const isHighlighted = highlight === index;
+            return (
+              <li
+                key={option.value}
+                role="option"
+                aria-selected={isHighlighted}
+                className={isHighlighted ? "settings-model-option is-highlighted" : "settings-model-option"}
+                onMouseEnter={() => setHighlight(index)}
+                onMouseDown={(event) => event.preventDefault()}
+                onClick={() => {
+                  onChange(option.value);
+                  setOpen(false);
+                  inputRef.current?.focus();
+                }}
+              >
+                <span className="mono settings-model-option-id">{option.value}</span>
+                {option.description ? (
+                  <span className="settings-model-option-desc">{option.description}</span>
+                ) : null}
+                {!option.toolCapable ? <span className="settings-model-option-tag">no tools</span> : null}
+              </li>
+            );
+          })}
+        </ul>
+      ) : null}
+    </div>
+  );
+}
+
+function discoverErrorMessage(error: unknown): string {
+  const code = (error as { code?: string } | null)?.code;
+  if (code === "ai_models_no_key") {
+    return "Add an API key, then refresh to list models.";
+  }
+  if (code === "ai_models_no_base_url") {
+    return "Set a base URL to list deployments.";
+  }
+  const message = (error as { message?: string } | null)?.message;
+  return message ? `Couldn't list models: ${message}` : "Couldn't list models.";
+}
 
 interface SettingsViewProps {
   onClose: () => void;
@@ -460,9 +636,22 @@ function AiSection({
   updateSettings,
 }: AiSectionProps): React.JSX.Element {
   const queryClient = useQueryClient();
-  const modelListId = useId();
   const [aiKey, setAiKey] = useState("");
-  const modelSuggestions = MODEL_SUGGESTIONS[settings.ai.provider];
+  const provider = settings.ai.provider;
+  // Auto-discover once there's something to authenticate with; otherwise wait for
+  // a manual refresh so we don't fire a guaranteed-to-fail request prematurely.
+  const autoDiscover =
+    provider !== "disabled" && (provider === "ollama" || provider === "bedrock" || authConfigured);
+  const modelsQuery = useQuery({
+    queryKey: ["ai-models", provider, settings.ai.baseUrl ?? "", settings.ai.keyProvider, authConfigured],
+    queryFn: () => krtClient.ai.listModels({ provider }),
+    enabled: autoDiscover,
+    retry: false,
+    staleTime: 5 * 60_000,
+    gcTime: 5 * 60_000,
+  });
+  const discoveredModels = modelsQuery.data?.models ?? [];
+  const modelOptions = buildModelOptions(discoveredModels, MODEL_SUGGESTIONS[provider] ?? []);
   const aiKeyMutation = useMutation({
     mutationFn: (nextKey: string) => krtClient.auth.saveAiKey(nextKey),
     onSuccess: () => {
@@ -527,26 +716,44 @@ function AiSection({
           label="Model"
           hint="The specific model used for AI review. Must support tool calling — the reviewer agent explores the checked-out code with tools. Models without tool support are not allowed."
         >
-          <div className="settings-combobox">
-            <input
-              className="settings-input"
-              value={settings.ai.model}
-              list={modelListId}
-              placeholder={modelSuggestions[0]?.value ?? "Model ID"}
-              autoComplete="off"
-              onChange={(event) =>
-                updateSettings({
-                  ai: { ...settings.ai, model: event.target.value },
-                })
-              }
-            />
-            <datalist id={modelListId}>
-              {modelSuggestions.map((option) => (
-                <option key={option.value} value={option.value}>
-                  {option.label}
-                </option>
-              ))}
-            </datalist>
+          <div className="settings-model-control">
+            <div className="settings-model-field">
+              <ModelCombobox
+                value={settings.ai.model}
+                options={modelOptions}
+                placeholder={modelOptions[0]?.value ?? "Model ID"}
+                onChange={(model) => updateSettings({ ai: { ...settings.ai, model } })}
+              />
+              {provider !== "disabled" ? (
+                <button
+                  type="button"
+                  className="settings-icon-button"
+                  title="Discover available models"
+                  aria-label="Discover available models"
+                  disabled={modelsQuery.isFetching}
+                  onClick={() => void modelsQuery.refetch()}
+                >
+                  <RefreshCw
+                    size={13}
+                    aria-hidden="true"
+                    className={modelsQuery.isFetching ? "is-spinning" : undefined}
+                  />
+                </button>
+              ) : null}
+            </div>
+            {provider !== "disabled" ? (
+              <div className="settings-discover-status">
+                {modelsQuery.isFetching
+                  ? "Discovering available models…"
+                  : modelsQuery.isError
+                    ? discoverErrorMessage(modelsQuery.error)
+                    : discoveredModels.length > 0
+                      ? `${discoveredModels.length} model${discoveredModels.length === 1 ? "" : "s"} available`
+                      : autoDiscover
+                        ? "No models discovered — enter a model id."
+                        : "Add an API key, then refresh to list models."}
+              </div>
+            ) : null}
           </div>
         </SettingsRow>
         <SettingsRow

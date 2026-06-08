@@ -1,4 +1,4 @@
-import { app, autoUpdater, BrowserWindow, screen } from "electron";
+import { app, autoUpdater, BrowserWindow, nativeImage, screen } from "electron";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createAppPaths } from "./appPaths.js";
@@ -24,6 +24,13 @@ import { isAllowedAppNavigation, openExternalUrl } from "./externalLinks.js";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 const isDev = Boolean(process.env.VITE_DEV_SERVER_URL);
+
+// Set the app name explicitly. In dev, Electron is launched with the compiled
+// entry script and never reads the project package.json, so it falls back to
+// "Electron" for the name, menu, and userData dir. Must run before any
+// app.getPath("userData") call so the data dir resolves under "KRT". Packaged
+// builds get the name from electron-builder's productName.
+app.setName("KRT");
 
 let mainWindow: BrowserWindow | null = null;
 
@@ -111,8 +118,26 @@ async function createMainWindow(): Promise<void> {
   }
 }
 
+// In a packaged macOS build the dock/Finder icon comes from build/icon.icns (via
+// electron-builder). In dev, Electron shows its own default icon, so point the
+// dock at the app icon for parity. Best-effort and dev-only.
+function setDevDockIcon(): void {
+  if (!isDev || process.platform !== "darwin" || !app.dock) {
+    return;
+  }
+  try {
+    const image = nativeImage.createFromPath(join(process.cwd(), "public", "icon.png"));
+    if (!image.isEmpty()) {
+      app.dock.setIcon(image);
+    }
+  } catch {
+    // The dev dock icon is cosmetic — ignore any failure to load it.
+  }
+}
+
 app.whenReady().then(async () => {
   installApplicationMenu();
+  setDevDockIcon();
   await createMainWindow();
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) {

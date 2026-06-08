@@ -11,7 +11,7 @@ import { createAppPaths } from "../../src/main/appPaths.js";
 import { AppError } from "../../src/main/errors.js";
 import { openDatabase } from "../../src/main/services/database.js";
 import { OperationService } from "../../src/main/services/operationService.js";
-import { buildGitEnvironment, RepoService, worktreeAddArgs } from "../../src/main/services/repoService.js";
+import { buildGitEnvironment, formatGitCommandError, RepoService, worktreeAddArgs } from "../../src/main/services/repoService.js";
 import { defaultAppSettings } from "../../src/shared/schemas.js";
 import type { RepositoryRef } from "../../src/shared/schemas.js";
 
@@ -55,6 +55,40 @@ describe("RepoService managed worktree reads", () => {
       "/tmp/worktree",
       "abc123"
     ]);
+  });
+
+  it("formats git clone timeouts without surfacing progress output as the failure", () => {
+    const error = Object.assign(
+      new Error("Command failed: git clone --bare --no-progress https://github.com/DataDog/dd-go.git /tmp/mirror.git\nCloning into bare repository '/tmp/mirror.git'..."),
+      {
+        killed: true,
+        signal: "SIGTERM",
+        stderr: "Cloning into bare repository '/tmp/mirror.git'...\n"
+      }
+    );
+
+    expect(
+      formatGitCommandError(
+        ["clone", "--bare", "--no-progress", "https://github.com/DataDog/dd-go.git", "/tmp/mirror.git"],
+        error,
+        10 * 60_000
+      )
+    ).toBe("Git clone timed out after 10 minutes.");
+  });
+
+  it("formats git command failures with the actionable fatal line", () => {
+    const error = Object.assign(new Error("Command failed: git clone"), {
+      code: 128,
+      stderr: [
+        "Cloning into bare repository '/tmp/mirror.git'...",
+        "remote: Repository not found.",
+        "fatal: Authentication failed for 'https://github.com/kol/repo.git/'"
+      ].join("\n")
+    });
+
+    expect(formatGitCommandError(["clone", "--bare", "https://github.com/kol/repo.git", "/tmp/mirror.git"], error, 120_000)).toBe(
+      "Git clone failed: Authentication failed for 'https://github.com/kol/repo.git/'"
+    );
   });
 
   it("returns a checkout operation immediately and completes the worktree mapping in the background", async () => {

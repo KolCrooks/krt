@@ -8,6 +8,7 @@ import { krtClient } from "../../api/client.js";
 import { useLspCodeInteractions } from "../../hooks/useLspCodeInteractions.js";
 import { renderInlineMarkdown, renderMarkdown } from "../../lib/markdown.js";
 import { buildDiffAnnotations, type DiffAnnotation } from "../../../shared/diffAnnotations.js";
+import { cropPatchToFocusRanges, type FocusRange } from "./cropPatch.js";
 import type { ChangedFile, ChangedFileStatus, PullRequestDetail, ReviewDraftComment, ReviewThread, TourChapter } from "../../../shared/schemas.js";
 import { ThreadCard, threadItemFromReviewThread } from "../PullRequestOverview.js";
 import { useUiStore } from "../../store/uiStore.js";
@@ -24,6 +25,10 @@ interface DiffPanelProps {
   layout?: "inline" | "split";
   reviewThreads?: ReviewThread[];
   tourChapters?: TourChapter[];
+  // When provided (tour/storyboard "focus" mode), the diff is cropped to just the
+  // hunks overlapping these ranges and rendered patch-only, so the reviewer sees
+  // only the chapter's relevant code instead of the whole file.
+  focusRanges?: FocusRange[] | null;
   searchTarget?: DiffSearchTarget | null;
   headerless?: boolean;
   enableLsp?: boolean;
@@ -54,12 +59,17 @@ export const DiffPanel = memo(function DiffPanel({
   layout = "inline",
   reviewThreads = [],
   tourChapters = [],
+  focusRanges = null,
   searchTarget = null,
   headerless = false,
   enableLsp = false,
   tabKey,
   onOpenDefinition
 }: DiffPanelProps): React.JSX.Element {
+  const isFocused = focusRanges != null;
+  // Stable serialization so the focus ranges can key memos/caches without
+  // re-running on every render due to a fresh array identity.
+  const focusKey = focusRanges ? focusRanges.map((range) => `${range.side}:${range.start}-${range.end}`).join(",") : "";
   const [largeLoadPath, setLargeLoadPath] = useState<string | null>(null);
   const [selectionTarget, setSelectionTarget] = useState<SelectedLineRange | null>(null);
   const [draftTarget, setDraftTarget] = useState<SelectedLineRange | null>(null);
@@ -107,8 +117,9 @@ export const DiffPanel = memo(function DiffPanel({
     ],
     // Load full file context eagerly (for non-large files) so the diff library
     // can collapse unchanged regions into natively-expandable separators rather
-    // than leaving gaps the user cannot open.
-    enabled: Boolean(file && !file.isLarge),
+    // than leaving gaps the user cannot open. Skipped in focus mode, where we
+    // intentionally show only the chapter's cropped hunks.
+    enabled: Boolean(file && !file.isLarge && !isFocused),
     queryFn: () => loadFullDiffContext(pullRequest, file)
   });
   useEffect(() => {
@@ -117,12 +128,21 @@ export const DiffPanel = memo(function DiffPanel({
     setDraftBody("");
   }, [file?.path, pullRequest.headSha]);
   const patch = patchQuery.data?.patch ?? file?.patch ?? "";
-  const renderablePatch = useMemo(() => (file && patch ? buildRenderablePatch(file, patch) : ""), [file, patch]);
+  const renderablePatch = useMemo(() => {
+    if (!file || !patch) {
+      return "";
+    }
+    const built = buildRenderablePatch(file, patch);
+    return focusRanges && focusRanges.length > 0 ? cropPatchToFocusRanges(built, focusRanges) : built;
+    // focusKey is the stable signature of focusRanges.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [file, patch, focusKey]);
   const patchDiffCacheKey = useMemo(
-    () => (file && patch ? makePatchDiffCacheKey(pullRequest, file, patch) : ""),
+    () => (file && patch ? `${makePatchDiffCacheKey(pullRequest, file, patch)}${focusKey ? `:focus:${focusKey}` : ""}` : ""),
     [
       file,
       patch,
+      focusKey,
       pullRequest.baseRef,
       pullRequest.baseSha,
       pullRequest.headSha,
@@ -245,6 +265,22 @@ export const DiffPanel = memo(function DiffPanel({
       : [];
     return [...sourceAnnotations, ...composerAnnotation];
   }, [activeFileDiff, annotations, draftBody, draftTarget, file]);
+  // The underlying diff component renders into a worker-cached structure keyed by
+  // the diff itself, so it does not re-apply AI annotations when they arrive
+  // (e.g. inline comments stream in at the end of tour generation) — only a
+  // remount picks them up. Fold a signature of the AI annotations into the view
+  // key so the diff remounts exactly when they change. Review/draft annotations
+  // already re-render via line-selection changes, so they are excluded here to
+  // preserve scroll position when adding a comment.
+  const aiAnnotationKey = useMemo(() => {
+    let signature = "";
+    for (const annotation of annotations) {
+      if (annotation.kind === "ai") {
+        signature += `${annotation.id}#${annotation.line ?? ""}#${annotation.body.length};`;
+      }
+    }
+    return signature;
+  }, [annotations]);
   const searchScrollKey = searchTarget && file
     ? `${file.path}:${searchTarget.side ?? "additions"}:${searchTarget.start}:${searchTarget.end}:${searchTarget.matchId ?? ""}:${searchTarget.matchStart ?? ""}:${searchTarget.matchLength ?? ""}`
     : null;
@@ -303,7 +339,7 @@ export const DiffPanel = memo(function DiffPanel({
       diffContainerRef.current = node;
       scheduleSearchTargetApplication(node, searchScrollKey);
     };
-    const viewKey = `${fileDiff.cacheKey ?? file.path}:${diffRenderVersion}`;
+    const viewKey = `${fileDiff.cacheKey ?? file.path}:${diffRenderVersion}:${aiAnnotationKey}`;
     const commonOptions = {
       diffStyle: layout === "split" ? "split" as const : "unified" as const,
       overflow: "scroll" as const,
@@ -332,7 +368,7 @@ export const DiffPanel = memo(function DiffPanel({
         selectedLines={activeSelectedLines}
         renderAnnotation={renderAnnotation}
         renderHeaderPrefix={() => <StatusBadge status={file.status} />}
-        renderHeaderMetadata={() => <ChangeCounts additions={file.additions} deletions={file.deletions} />}
+        renderHeaderMetadata={() => null}
         options={{
           ...commonOptions,
           expandUnchanged: false,
@@ -342,6 +378,7 @@ export const DiffPanel = memo(function DiffPanel({
     );
   }, [
     activeFileDiff,
+    aiAnnotationKey,
     diffRenderVersion,
     draftTarget,
     file,

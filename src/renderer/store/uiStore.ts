@@ -57,6 +57,10 @@ export interface PrTab {
   // switching tabs or views (the view components mount/unmount freely).
   tourOperationId: string | null;
   tourProgress: OperationProgress | null;
+  // Epoch ms when the current generation began, used to show elapsed "thinking"
+  // time (there is no turn cap, so progress can't be expressed as a percentage).
+  // Stamped when the operation starts, cleared when it finishes or resets.
+  tourStartedAt?: number | null;
   // A running transcript of what the agent is doing (thinking, exploration, tool
   // calls), shown as a live chat feed while the tour generates. Reset on a new run.
   tourActivity?: AgentActivity[];
@@ -148,6 +152,7 @@ export const useUiStore = create<UiState>((set) => ({
         tour: null,
         tourOperationId: null,
         tourProgress: null,
+        tourStartedAt: null,
         tourActivity: [],
         reviewedTourChapterIds: [],
         viewMode: "overview",
@@ -161,7 +166,7 @@ export const useUiStore = create<UiState>((set) => ({
         tabs: existing
           ? state.tabs.map((candidate) =>
               candidate.key === key
-                ? { ...candidate, ...tab, tour: candidate.tour, tourOperationId: candidate.tourOperationId, tourProgress: candidate.tourProgress, tourActivity: candidate.tourActivity, reviewedTourChapterIds: candidate.reviewedTourChapterIds ?? [], viewMode: candidate.viewMode, reviewSubMode: candidate.reviewSubMode, checkout: candidate.checkout, finish: candidate.finish, editorNavigationTarget: candidate.editorNavigationTarget ?? null }
+                ? { ...candidate, ...tab, tour: candidate.tour, tourOperationId: candidate.tourOperationId, tourProgress: candidate.tourProgress, tourStartedAt: candidate.tourStartedAt, tourActivity: candidate.tourActivity, reviewedTourChapterIds: candidate.reviewedTourChapterIds ?? [], viewMode: candidate.viewMode, reviewSubMode: candidate.reviewSubMode, checkout: candidate.checkout, finish: candidate.finish, editorNavigationTarget: candidate.editorNavigationTarget ?? null }
                 : candidate
             )
           : [...state.tabs, tab],
@@ -241,6 +246,7 @@ export const useUiStore = create<UiState>((set) => ({
             tour: headShaChanged ? null : tab.tour,
             tourOperationId: headShaChanged ? null : tab.tourOperationId,
             tourProgress: headShaChanged ? null : tab.tourProgress,
+            tourStartedAt: headShaChanged ? null : tab.tourStartedAt,
             tourActivity: headShaChanged ? [] : tab.tourActivity,
             reviewedTourChapterIds: headShaChanged ? [] : tab.reviewedTourChapterIds,
             editorNavigationTarget: headShaChanged ? null : tab.editorNavigationTarget
@@ -327,13 +333,31 @@ export const useUiStore = create<UiState>((set) => ({
     })),
   setTourOperation: (tabKeyToUpdate, operationId) =>
     set((state) => ({
-      tabs: state.tabs.map((tab) => (tab.key === tabKeyToUpdate ? { ...tab, tourOperationId: operationId } : tab))
+      tabs: state.tabs.map((tab) =>
+        tab.key === tabKeyToUpdate
+          ? {
+              ...tab,
+              tourOperationId: operationId,
+              // Stamp the start when an operation begins (kept if already set);
+              // clearing is handled when progress completes or resets.
+              tourStartedAt: operationId ? tab.tourStartedAt ?? Date.now() : tab.tourStartedAt
+            }
+          : tab
+      )
     })),
   setTourProgress: (tabKeyToUpdate, progress) =>
     set((state) => ({
-      // A null progress marks a fresh start (or reset) — clear the activity feed too.
+      // A null or done progress marks a fresh start/reset or completion — clear the
+      // activity feed and the elapsed-time anchor.
       tabs: state.tabs.map((tab) =>
-        tab.key === tabKeyToUpdate ? { ...tab, tourProgress: progress, tourActivity: progress ? tab.tourActivity : [] } : tab
+        tab.key === tabKeyToUpdate
+          ? {
+              ...tab,
+              tourProgress: progress,
+              tourActivity: progress ? tab.tourActivity : [],
+              tourStartedAt: progress && !progress.done ? tab.tourStartedAt : null
+            }
+          : tab
       )
     })),
   appendTourActivity: (tabKeyToUpdate, entry) =>

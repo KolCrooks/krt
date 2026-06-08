@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import type {
   ActivityEvent,
+  AiProvider,
   AppSettings,
   ChangedFile,
   CheckRun,
@@ -14,6 +15,7 @@ import type { SqliteDatabase } from "./database.js";
 import type { Keychain } from "./keychain.js";
 import { AppError } from "../errors.js";
 import { getProviderAdapter, modelLikelyLacksToolSupport } from "./ai/adapters.js";
+import { discoverModels, type DiscoveredModel } from "./ai/modelCatalog.js";
 import { createReviewToolset, type ReviewRepoAccess } from "./ai/reviewTools.js";
 import { assertNotAborted, runReviewAgent } from "./ai/agentRuntime.js";
 import { buildReviewSystemPrompt, buildReviewUserMessage } from "./ai/reviewPrompt.js";
@@ -24,7 +26,11 @@ import type { ChangeMapService } from "./changeMapService.js";
 // should invalidate previously cached tours. Folded into the cache key so a
 // stale tour (incl. old single-shot tours, whose settings_hash is empty) is
 // treated as a miss and regenerated.
-const AGENT_VERSION = "agent-1";
+// Bumped to agent-3: prompt now requires a connected storyboard (every chapter
+// beyond the first links to another) and finer chapter-splitting (tests, config,
+// gates, setup), so prior edge-less tours must regenerate rather than be cached.
+// (agent-2 added required per-chapter inline comments + a higher turn cap.)
+const AGENT_VERSION = "agent-3";
 
 const GENERATION_ATTEMPTS = 2;
 
@@ -289,6 +295,18 @@ export class AiService {
       return true;
     }
     return Boolean(await this.resolveApiKey(settings));
+  }
+
+  // Discover the models the configured credentials can actually reach, so the
+  // settings panel can autocomplete real model ids instead of a static list.
+  async listModels(provider?: AiProvider): Promise<DiscoveredModel[]> {
+    const settings = this.getSettings();
+    const target = provider ?? settings.ai.provider;
+    if (target === "disabled") {
+      return [];
+    }
+    const apiKey = await this.resolveApiKey(settings);
+    return discoverModels({ provider: target, settings, apiKey });
   }
 
   private async resolveApiKey(settings: AppSettings): Promise<string | null> {

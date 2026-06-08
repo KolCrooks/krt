@@ -27,6 +27,25 @@ describe("useAutoTour", () => {
     expect(screen.getByTestId("auto-tour-state")).toHaveTextContent("failed");
   });
 
+  it("defers generation and asks for checkout when the PR is not checked out", async () => {
+    const tab: PrTab = {
+      ...createIdleTab(),
+      mode: "light",
+      checkout: { state: "idle", dismissed: false, message: null, percent: null, operationId: null }
+    };
+    const startSpy = vi.fn(async () => ({ operationId: "should-not-run", cachedTour: null }));
+    window.krt.ai.startTourGeneration = startSpy;
+    useUiStore.setState({ activeView: "review", modal: null, tabs: [tab], activeTabKey: tab.key, selectedSearchResult: null });
+
+    renderWithClient(<CheckoutProbe tabKey={tab.key} />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("auto-tour-needs-checkout")).toHaveTextContent("yes");
+    });
+    expect(screen.getByTestId("auto-tour-state")).toHaveTextContent("idle");
+    expect(startSpy).not.toHaveBeenCalled();
+  });
+
   it("stops reporting generation after a cached tour is loaded", async () => {
     const tab = createIdleTab();
     window.krt.ai.startTourGeneration = vi.fn(async () => ({
@@ -65,6 +84,20 @@ function StoreAutoTourProbe({ tabKey: key }: { tabKey: string }): React.JSX.Elem
     <>
       <span data-testid="auto-tour-state">{auto.isGenerating ? "spinning" : auto.hasFailed ? "failed" : "idle"}</span>
       <span data-testid="auto-tour-tab">{tab.tour?.id ?? "no-tour"}</span>
+    </>
+  );
+}
+
+function CheckoutProbe({ tabKey: key }: { tabKey: string }): React.JSX.Element | null {
+  const tab = useUiStore((state) => state.tabs.find((candidate) => candidate.key === key) ?? null);
+  if (!tab) {
+    return null;
+  }
+  const auto = useAutoTour(tab);
+  return (
+    <>
+      <span data-testid="auto-tour-state">{auto.isGenerating ? "spinning" : auto.hasFailed ? "failed" : "idle"}</span>
+      <span data-testid="auto-tour-needs-checkout">{auto.needsCheckout ? "yes" : "no"}</span>
     </>
   );
 }

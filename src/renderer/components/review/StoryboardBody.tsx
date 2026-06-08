@@ -1,6 +1,7 @@
-import { AlertTriangle, Ban, Bot, Check, FileIcon, RefreshCw, Sparkles } from "lucide-react";
+import { AlertTriangle, Ban, Bot, Check, FileIcon, GitBranch, RefreshCw, Sparkles } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useAutoTour } from "../../hooks/useAutoTour.js";
+import { formatThinkingTime, useThinkingSeconds } from "../../hooks/useThinkingTime.js";
 import { useStoryboardLayout } from "../../hooks/useStoryboardLayout.js";
 import { DiffPanel } from "../diffs/DiffPanel.js";
 import { DiffSearchBar, type DiffSearchMatch } from "../diffs/DiffSearchBar.js";
@@ -11,7 +12,7 @@ import { useUiStore } from "../../store/uiStore.js";
 import type { ChapterKind, TourChapter, TourGraph } from "../../../shared/schemas.js";
 import { AgentActivityFeed } from "./AgentActivityFeed.js";
 import { AgentWorkingOverlay } from "./AgentWorkingOverlay.js";
-import { resolveChapterFiles } from "./chapterFiles.js";
+import { chapterFocusRanges, computeFocusedChangeStats, resolveChapterFiles } from "./chapterFiles.js";
 import { RiskLevelPill } from "./RiskLevelPill.js";
 
 type Relation = TourGraph["edges"][number]["relation"];
@@ -56,6 +57,7 @@ interface StoryboardBodyProps {
 export function StoryboardBody({ tab, layout, active = true }: StoryboardBodyProps): React.JSX.Element {
   const tour = tab.tour;
   const auto = useAutoTour(tab);
+  const thinkingSeconds = useThinkingSeconds(auto.startedAt, auto.isGenerating);
   const { layout: graphLayout, isLayingOut } = useStoryboardLayout(tour);
   const openFileInTab = useUiStore((state) => state.openFileInTab);
   const setTabViewMode = useUiStore((state) => state.setTabViewMode);
@@ -97,6 +99,13 @@ export function StoryboardBody({ tab, layout, active = true }: StoryboardBodyPro
     [activeChapter, tab.bundle.changedFiles]
   );
   const kindByNode = useMemo(() => (tour ? assignKinds(tour.graph, tour.chapters) : new Map<string, Kind>()), [tour]);
+  const focusedStatsByChapterId = useMemo(() => {
+    const map = new Map<string, { additions: number; deletions: number; files: number }>();
+    for (const chapter of tour?.chapters ?? []) {
+      map.set(chapter.id, computeFocusedChangeStats(chapter, tab.bundle.changedFiles));
+    }
+    return map;
+  }, [tour?.chapters, tab.bundle.changedFiles]);
 
   const diffFileRefs = useRef<Record<string, HTMLElement | null>>({});
   const [diffSelectedPath, setDiffSelectedPath] = useState<string | null>(null);
@@ -115,6 +124,28 @@ export function StoryboardBody({ tab, layout, active = true }: StoryboardBodyPro
     diffFileRefs.current[activeSearchMatch.path]?.scrollIntoView({ block: "start", behavior: "auto" });
   }, [active, activeSearchMatch]);
 
+  if (!tour && auto.needsCheckout) {
+    return (
+      <section className="tour-empty">
+        <Bot size={22} aria-hidden="true" className={auto.isCheckingOut ? "spin" : undefined} />
+        <h2>{auto.isCheckingOut ? "Checking out the branch…" : "Check out to generate the storyboard"}</h2>
+        <p>
+          {auto.isCheckingOut
+            ? tab.checkout.message ?? "Preparing the managed checkout…"
+            : "AI review reads the checked-out code. Check out this pull request and the storyboard generates automatically."}
+        </p>
+        <div className="tour-empty-actions">
+          <button type="button" className="primary-button" disabled={auto.isCheckingOut} onClick={auto.checkout}>
+            {auto.isCheckingOut ? <RefreshCw className="spin" size={14} aria-hidden="true" /> : <GitBranch size={14} aria-hidden="true" />}
+            {auto.isCheckingOut ? "Checking out…" : "Check out & generate storyboard"}
+          </button>
+        </div>
+        {typeof tab.checkout.percent === "number" && auto.isCheckingOut ? (
+          <span className="tour-empty-status">{Math.round(tab.checkout.percent)}%</span>
+        ) : null}
+      </section>
+    );
+  }
   if (!tour) {
     return (
       <section className="tour-empty">
@@ -135,7 +166,7 @@ export function StoryboardBody({ tab, layout, active = true }: StoryboardBodyPro
             </button>
           )}
         </div>
-        {typeof auto.percent === "number" ? <span className="tour-empty-status">{Math.round(auto.percent)}%</span> : null}
+        {thinkingSeconds !== null ? <span className="tour-empty-status">Thinking {formatThinkingTime(thinkingSeconds)}</span> : null}
       </section>
     );
   }
@@ -167,7 +198,7 @@ export function StoryboardBody({ tab, layout, active = true }: StoryboardBodyPro
         <AgentWorkingOverlay
           title="Generating storyboard"
           message={auto.message}
-          percent={auto.percent}
+          startedAt={auto.startedAt}
           activity={auto.activity}
           isGenerating={auto.isGenerating}
           canCancel={Boolean(auto.operationId)}
@@ -327,8 +358,13 @@ export function StoryboardBody({ tab, layout, active = true }: StoryboardBodyPro
                   <span className="mono storyboard-v2-card-files">{node.files.length}f</span>
                   {chapter ? (
                     <>
-                      <span className="mono diff-counts-add">+{chapter.changeStats.additions}</span>
-                      <span className="mono diff-counts-del">−{chapter.changeStats.deletions}</span>
+                      {(() => {
+                        const stats = focusedStatsByChapterId.get(chapter.id) ?? chapter.changeStats;
+                        return <>
+                          <span className="mono diff-counts-add">+{stats.additions}</span>
+                          <span className="mono diff-counts-del">−{stats.deletions}</span>
+                        </>;
+                      })()}
                     </>
                   ) : null}
                 </div>
@@ -403,8 +439,13 @@ export function StoryboardBody({ tab, layout, active = true }: StoryboardBodyPro
               {chapterFiles.length} {chapterFiles.length === 1 ? "file" : "files"}
             </span>
             <span className="mono storyboard-v2-diff-counts">
-              <span className="diff-counts-add">+{activeChapter.changeStats.additions}</span>{" "}
-              <span className="diff-counts-del">−{activeChapter.changeStats.deletions}</span>
+              {(() => {
+                const stats = focusedStatsByChapterId.get(activeChapter.id) ?? activeChapter.changeStats;
+                return <>
+                  <span className="diff-counts-add">+{stats.additions}</span>{" "}
+                  <span className="diff-counts-del">−{stats.deletions}</span>
+                </>;
+              })()}
             </span>
             <span className="storyboard-v2-diff-spacer" />
             <span className="storyboard-v2-diff-caption">
@@ -439,6 +480,7 @@ export function StoryboardBody({ tab, layout, active = true }: StoryboardBodyPro
                     layout={layout}
                     reviewThreads={tab.bundle.reviewThreads}
                     tourChapters={[activeChapter]}
+                    focusRanges={chapterFocusRanges(activeChapter, file.path)}
                     searchTarget={searchTargetForFile(activeSearchMatch, file.path)}
                     enableLsp={tab.mode === "managed"}
                     onOpenDefinition={(path, line) => {

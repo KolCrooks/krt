@@ -3,7 +3,11 @@ import { AppError } from "../../errors.js";
 import type { AgentMessage, ProviderAdapter, ToolResult } from "./types.js";
 import { describeToolCall, type ReviewToolset } from "./reviewTools.js";
 
-export const DEFAULT_MAX_TURNS = 20;
+// Generation runs without a turn cap so the agent can fully cover, comment, and
+// connect a PR of any size rather than being cut off mid-tour. It stops when it
+// calls finish, stops emitting tool calls, or is aborted. The output-token budget
+// below stays as a backstop against a model that never terminates; a turn cap can
+// still be passed explicitly (e.g. in tests).
 export const DEFAULT_TOKEN_BUDGET = 200_000;
 
 export interface RunReviewAgentArgs {
@@ -36,7 +40,7 @@ export function assertNotAborted(signal?: AbortSignal): void {
 
 export async function runReviewAgent(args: RunReviewAgentArgs): Promise<AgentRunResult> {
   const { adapter, settings, apiKey, system, userMessage, toolset, signal } = args;
-  const maxTurns = args.maxTurns ?? DEFAULT_MAX_TURNS;
+  const maxTurns = args.maxTurns ?? Number.POSITIVE_INFINITY;
   const tokenBudget = args.tokenBudget ?? DEFAULT_TOKEN_BUDGET;
   const messages: AgentMessage[] = [{ role: "user", content: userMessage }];
   let outputTokens = 0;

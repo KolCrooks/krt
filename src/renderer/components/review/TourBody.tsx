@@ -1,5 +1,5 @@
-import { Ban, Bot, RefreshCw } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { Ban, Bot, GitBranch, RefreshCw } from "lucide-react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useAutoTour } from "../../hooks/useAutoTour.js";
 import { DiffPanel } from "../diffs/DiffPanel.js";
 import { DiffSearchBar, type DiffSearchMatch } from "../diffs/DiffSearchBar.js";
@@ -7,7 +7,8 @@ import { renderMarkdown, renderInlineMarkdown } from "../../lib/markdown.js";
 import { AgentActivityFeed } from "./AgentActivityFeed.js";
 import { AgentWorkingOverlay } from "./AgentWorkingOverlay.js";
 import { RiskLevelPill } from "./RiskLevelPill.js";
-import { resolveChapterFiles } from "./chapterFiles.js";
+import { chapterFocusRanges, computeFocusedChangeStats, resolveChapterFiles } from "./chapterFiles.js";
+import { formatThinkingTime, useThinkingSeconds } from "../../hooks/useThinkingTime.js";
 import type { PrTab } from "../../store/uiStore.js";
 import { useUiStore } from "../../store/uiStore.js";
 
@@ -25,7 +26,9 @@ export function TourBody({ tab, layout, active = true }: TourBodyProps): React.J
   const [activeSearchMatch, setActiveSearchMatch] = useState<DiffSearchMatch | null>(null);
   const [watchingAgent, setWatchingAgent] = useState(false);
   const diffFileRefs = useRef<Record<string, HTMLElement | null>>({});
+  const tourDetailRef = useRef<HTMLElement | null>(null);
   const auto = useAutoTour(tab);
+  const thinkingSeconds = useThinkingSeconds(auto.startedAt, auto.isGenerating);
   // Close the "watch the agent" overlay once generation finishes.
   useEffect(() => {
     if (!auto.isGenerating) {
@@ -52,6 +55,13 @@ export function TourBody({ tab, layout, active = true }: TourBodyProps): React.J
     () => resolveChapterFiles(selectedChapter, tab.bundle.changedFiles),
     [selectedChapter, tab.bundle.changedFiles]
   );
+  const focusedStatsByChapterId = useMemo(() => {
+    const map = new Map<string, { additions: number; deletions: number; files: number }>();
+    for (const chapter of tour?.chapters ?? []) {
+      map.set(chapter.id, computeFocusedChangeStats(chapter, tab.bundle.changedFiles));
+    }
+    return map;
+  }, [tour?.chapters, tab.bundle.changedFiles]);
   const reviewedChapterIds = useMemo(() => new Set(tab.reviewedTourChapterIds ?? []), [tab.reviewedTourChapterIds]);
   const reviewedCount = tour ? tour.chapters.filter((chapter) => reviewedChapterIds.has(chapter.id)).length : 0;
   const toggleReviewed = (id: string): void => toggleTourChapterReviewed(tab.key, id);
@@ -61,21 +71,42 @@ export function TourBody({ tab, layout, active = true }: TourBodyProps): React.J
     }
     diffFileRefs.current[activeSearchMatch.path]?.scrollIntoView({ block: "start", behavior: "auto" });
   }, [active, activeSearchMatch]);
-  // When the reviewer picks a chapter, jump the diff to that chapter's first
-  // anchored region so the tour leads them straight to the relevant code.
-  const firstAnchorPath = selectedChapter?.diffAnchors[0]?.path ?? chapterFiles[0]?.path ?? null;
-  useEffect(() => {
-    if (!active || auto.isGenerating || !firstAnchorPath) {
+  // When the reviewer picks a chapter, scroll back to the top so the chapter
+  // title, summary and checklist are visible before the diff. The element that
+  // actually scrolls depends on layout/content height, so zero every scrollable
+  // ancestor of the detail pane rather than assuming one. useLayoutEffect runs
+  // before paint to avoid a flash at the previous chapter's scroll position.
+  useLayoutEffect(() => {
+    if (!active) {
       return;
     }
-    const handle = requestAnimationFrame(() => {
-      diffFileRefs.current[firstAnchorPath]?.scrollIntoView({ block: "start", behavior: "auto" });
-    });
-    return () => cancelAnimationFrame(handle);
+    scrollAncestorsToTop(tourDetailRef.current);
     // Re-run only when the chapter selection changes, not on every render.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedChapterId, active]);
 
+  if (!tour && auto.needsCheckout) {
+    return (
+      <section className="tour-empty">
+        <Bot size={22} aria-hidden="true" className={auto.isCheckingOut ? "spin" : undefined} />
+        <h2>{auto.isCheckingOut ? "Checking out the branch…" : "Check out to generate the tour"}</h2>
+        <p>
+          {auto.isCheckingOut
+            ? tab.checkout.message ?? "Preparing the managed checkout…"
+            : "AI review reads the checked-out code. Check out this pull request and the guided tour generates automatically."}
+        </p>
+        <div className="tour-empty-actions">
+          <button type="button" className="primary-button" disabled={auto.isCheckingOut} onClick={auto.checkout}>
+            {auto.isCheckingOut ? <RefreshCw className="spin" size={14} aria-hidden="true" /> : <GitBranch size={14} aria-hidden="true" />}
+            {auto.isCheckingOut ? "Checking out…" : "Check out & generate tour"}
+          </button>
+        </div>
+        {typeof tab.checkout.percent === "number" && auto.isCheckingOut ? (
+          <span className="tour-empty-status">{Math.round(tab.checkout.percent)}%</span>
+        ) : null}
+      </section>
+    );
+  }
   if (!tour) {
     return (
       <section className="tour-empty">
@@ -96,7 +127,7 @@ export function TourBody({ tab, layout, active = true }: TourBodyProps): React.J
             </button>
           )}
         </div>
-        {typeof auto.percent === "number" ? <span className="tour-empty-status">{Math.round(auto.percent)}%</span> : null}
+        {thinkingSeconds !== null ? <span className="tour-empty-status">Thinking {formatThinkingTime(thinkingSeconds)}</span> : null}
       </section>
     );
   }
@@ -107,7 +138,7 @@ export function TourBody({ tab, layout, active = true }: TourBodyProps): React.J
         <AgentWorkingOverlay
           title="Generating AI tour"
           message={auto.message}
-          percent={auto.percent}
+          startedAt={auto.startedAt}
           activity={auto.activity}
           isGenerating={auto.isGenerating}
           canCancel={Boolean(auto.operationId)}
@@ -150,9 +181,14 @@ export function TourBody({ tab, layout, active = true }: TourBodyProps): React.J
                   />
                   <span>
                     {auto.isGenerating ? <span className="chapter-draft-pill">Draft</span> : null}
-                    <span className="mono">{String(index + 1).padStart(2, "0")}</span> · {chapter.changeStats.files} files ·{" "}
-                    <span className="diff-counts-add">+{chapter.changeStats.additions}</span>{" "}
-                    <span className="diff-counts-del">−{chapter.changeStats.deletions}</span>
+                    {(() => {
+                      const stats = focusedStatsByChapterId.get(chapter.id) ?? chapter.changeStats;
+                      return <>
+                        <span className="mono">{String(index + 1).padStart(2, "0")}</span> · {stats.files} files ·{" "}
+                        <span className="diff-counts-add">+{stats.additions}</span>{" "}
+                        <span className="diff-counts-del">−{stats.deletions}</span>
+                      </>;
+                    })()}
                   </span>
                 </div>
               </button>
@@ -218,7 +254,7 @@ export function TourBody({ tab, layout, active = true }: TourBodyProps): React.J
           </button>
         </div>
       </aside>
-      <section className="tour-detail">
+      <section className="tour-detail" ref={tourDetailRef}>
         {selectedChapter ? (
           <article className="tour-detail-card">
             <div className="tour-detail-eyebrow">
@@ -273,6 +309,7 @@ export function TourBody({ tab, layout, active = true }: TourBodyProps): React.J
                 layout={layout}
                 reviewThreads={tab.bundle.reviewThreads}
                 tourChapters={selectedChapter ? [selectedChapter] : []}
+                focusRanges={chapterFocusRanges(selectedChapter, file.path)}
                 searchTarget={searchTargetForFile(activeSearchMatch, file.path)}
                 enableLsp={tab.mode === "managed"}
                 onOpenDefinition={(path, line) => {
@@ -286,6 +323,22 @@ export function TourBody({ tab, layout, active = true }: TourBodyProps): React.J
       </section>
     </section>
   );
+}
+
+// Walk up from `start` and reset scrollTop on every scrollable ancestor (and
+// the element itself). Which element scrolls the tour depends on content
+// height, so this resets whichever one is actually scrolled without guessing.
+// Bounded to the review-workspace subtree so it never touches document scroll.
+function scrollAncestorsToTop(start: HTMLElement | null): void {
+  for (let el: HTMLElement | null = start; el; el = el.parentElement) {
+    const overflowY = window.getComputedStyle(el).overflowY;
+    if (overflowY === "auto" || overflowY === "scroll") {
+      el.scrollTop = 0;
+    }
+    if (el.classList.contains("review-workspace")) {
+      break;
+    }
+  }
 }
 
 function searchTargetForFile(match: DiffSearchMatch | null, path: string) {

@@ -558,7 +558,8 @@ export function createBrowserPreviewApi(): KrtApi {
     ai: {
       getCachedTour: async () => tour,
       generateTour: async () => tour,
-      startTourGeneration: async () => ({ operationId: "preview-ai-tour-operation", cachedTour: tour })
+      startTourGeneration: async () => ({ operationId: "preview-ai-tour-operation", cachedTour: tour }),
+      listModels: async (input) => ({ provider: input?.provider ?? settings.ai.provider, models: [] })
     },
     extensions: {
       list: async () => [

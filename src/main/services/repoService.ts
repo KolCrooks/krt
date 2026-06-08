@@ -44,12 +44,21 @@ const DEFAULT_TEXT_SEARCH_MAX_RESULTS = 25;
 const DEFAULT_TEXT_SEARCH_MAX_FILES = 2_000;
 const DEFAULT_TEXT_SEARCH_MAX_FILE_BYTES = 200_000;
 const TEXT_SEARCH_MAX_SNIPPET_LENGTH = 180;
+const DEFAULT_GIT_TIMEOUT_MS = 120_000;
+const GIT_NETWORK_TIMEOUT_MS = 10 * 60_000;
 
 type WatchEventType = "rename" | "change";
 type WatchFactory = (
   path: string,
   listener: (eventType: WatchEventType, filename: string | Buffer | null) => void
 ) => Pick<FSWatcher, "close" | "on">;
+
+interface GitCommandOptions {
+  allowFailure?: boolean;
+  operationId?: string;
+  env?: NodeJS.ProcessEnv;
+  timeoutMs?: number;
+}
 
 export class RepoService {
   private readonly watchers = new Map<string, Pick<FSWatcher, "close" | "on">>();
@@ -157,6 +166,10 @@ export class RepoService {
       await mkdir(this.worktreeRoot(input.repository), { recursive: true });
       const gitEnv = await this.gitNetworkEnvironment(input.repository);
 
+      if (!existsSync(worktreePath) && existsSync(mirrorPath) && !(await this.isUsableMirror(mirrorPath))) {
+        await rm(mirrorPath, { recursive: true, force: true });
+      }
+
       if (!existsSync(mirrorPath)) {
         this.operations.update({
           operationId,
@@ -166,10 +179,16 @@ export class RepoService {
           done: false,
           cancelled: false
         });
-        await this.runGit(["clone", "--bare", this.cloneUrl(input.repository), mirrorPath], {
-          operationId,
-          env: gitEnv
-        });
+        try {
+          await this.runGit(["clone", "--bare", "--no-progress", this.cloneUrl(input.repository), mirrorPath], {
+            operationId,
+            env: gitEnv,
+            timeoutMs: GIT_NETWORK_TIMEOUT_MS
+          });
+        } catch (error) {
+          await rm(mirrorPath, { recursive: true, force: true });
+          throw error;
+        }
       }
 
       this.operations.assertNotCancelled(operationId);
@@ -187,7 +206,8 @@ export class RepoService {
         {
           allowFailure: true,
           operationId,
-          env: gitEnv
+          env: gitEnv,
+          timeoutMs: GIT_NETWORK_TIMEOUT_MS
         }
       );
       await this.runGit(
@@ -195,13 +215,15 @@ export class RepoService {
         {
           allowFailure: true,
           operationId,
-          env: gitEnv
+          env: gitEnv,
+          timeoutMs: GIT_NETWORK_TIMEOUT_MS
         }
       );
       await this.runGit(["--git-dir", mirrorPath, "fetch", "origin", input.headSha], {
         allowFailure: true,
         operationId,
-        env: gitEnv
+        env: gitEnv,
+        timeoutMs: GIT_NETWORK_TIMEOUT_MS
       });
 
       if (!existsSync(worktreePath)) {
@@ -798,12 +820,13 @@ export class RepoService {
 
   private async runGit(
     args: string[],
-    options: { allowFailure?: boolean; operationId?: string; env?: NodeJS.ProcessEnv } = {}
+    options: GitCommandOptions = {}
   ): Promise<void> {
     const signal = options.operationId ? this.operations.signal(options.operationId) : undefined;
+    const timeoutMs = options.timeoutMs ?? DEFAULT_GIT_TIMEOUT_MS;
     try {
       await execFileAsync("git", args, {
-        timeout: 120_000,
+        timeout: timeoutMs,
         maxBuffer: 1024 * 1024 * 10,
         signal,
         env: options.env
@@ -813,18 +836,22 @@ export class RepoService {
         throw new AppError("operation_cancelled", "The git operation was cancelled.", { retryable: true });
       }
       if (!options.allowFailure) {
-        throw error;
+        throw new AppError("git_command_failed", formatGitCommandError(args, error, timeoutMs), {
+          retryable: isRetryableGitError(error)
+        });
       }
     }
   }
 
-  private async runGitForOutput(args: string[], options: { allowFailure?: boolean; operationId?: string } = {}): Promise<string> {
+  private async runGitForOutput(args: string[], options: GitCommandOptions = {}): Promise<string> {
     const signal = options.operationId ? this.operations.signal(options.operationId) : undefined;
+    const timeoutMs = options.timeoutMs ?? DEFAULT_GIT_TIMEOUT_MS;
     try {
       const result = await execFileAsync("git", args, {
-        timeout: 120_000,
+        timeout: timeoutMs,
         maxBuffer: 1024 * 1024 * 20,
-        signal
+        signal,
+        env: options.env
       });
       return result.stdout;
     } catch (error) {
@@ -834,7 +861,18 @@ export class RepoService {
       if (options.allowFailure) {
         return "";
       }
-      throw error;
+      throw new AppError("git_command_failed", formatGitCommandError(args, error, timeoutMs), {
+        retryable: isRetryableGitError(error)
+      });
+    }
+  }
+
+  private async isUsableMirror(mirrorPath: string): Promise<boolean> {
+    try {
+      await this.runGitForOutput(["--git-dir", mirrorPath, "rev-parse", "--git-dir"]);
+      return true;
+    } catch {
+      return false;
     }
   }
 }
@@ -863,6 +901,85 @@ export function buildGitEnvironment(
 
 export function worktreeAddArgs(mirrorPath: string, worktreePath: string, headSha: string): string[] {
   return ["--git-dir", mirrorPath, "worktree", "add", "--force", "--detach", worktreePath, headSha];
+}
+
+interface GitExecError {
+  message?: string;
+  stderr?: string;
+  stdout?: string;
+  code?: number | string | null;
+  killed?: boolean;
+  signal?: string | null;
+}
+
+export function formatGitCommandError(args: readonly string[], error: unknown, timeoutMs: number): string {
+  const execError = error as GitExecError;
+  const action = gitActionLabel(args);
+  if (execError.killed && execError.signal === "SIGTERM") {
+    return `Git ${action} timed out after ${formatDuration(timeoutMs)}.`;
+  }
+
+  const detail = actionableGitErrorLine(execError);
+  if (detail) {
+    return `Git ${action} failed: ${detail}`;
+  }
+
+  if (execError.code != null) {
+    return `Git ${action} failed with exit code ${execError.code}.`;
+  }
+
+  return `Git ${action} failed.`;
+}
+
+function actionableGitErrorLine(error: GitExecError): string | null {
+  const lines = `${error.stderr ?? ""}\n${error.stdout ?? ""}\n${error.message ?? ""}`
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  const actionable = lines
+    .filter((line) => !isGitProgressLine(line))
+    .filter((line) => !/^Command failed:/i.test(line));
+  const preferred = actionable.findLast((line) =>
+    /^(fatal|error):|authentication failed|could not read|permission denied|repository not found|not found|timed out|operation timed out|could not resolve|connection/i.test(line)
+  );
+  const line = preferred ?? actionable.at(-1) ?? null;
+  return line?.replace(/^(fatal|error):\s*/i, "") ?? null;
+}
+
+function isGitProgressLine(line: string): boolean {
+  return (
+    /^Cloning into /i.test(line) ||
+    /^remote: /i.test(line) ||
+    /^(Receiving objects|Resolving deltas|Updating files|Compressing objects|Counting objects):/i.test(line) ||
+    /^From https?:\/\//i.test(line)
+  );
+}
+
+function isRetryableGitError(error: unknown): boolean {
+  const execError = error as GitExecError;
+  if (execError.killed && execError.signal === "SIGTERM") {
+    return true;
+  }
+  const text = `${execError.stderr ?? ""}\n${execError.stdout ?? ""}\n${execError.message ?? ""}`;
+  return /timed out|operation timed out|connection reset|connection refused|could not resolve|network/i.test(text);
+}
+
+function gitActionLabel(args: readonly string[]): string {
+  const offset = args[0] === "--git-dir" ? 2 : 0;
+  const command = args[offset] ?? "command";
+  if (command === "worktree" && args[offset + 1]) {
+    return `worktree ${args[offset + 1]}`;
+  }
+  return command;
+}
+
+function formatDuration(milliseconds: number): string {
+  if (milliseconds % 60_000 === 0) {
+    const minutes = milliseconds / 60_000;
+    return `${minutes} ${minutes === 1 ? "minute" : "minutes"}`;
+  }
+  const seconds = Math.round(milliseconds / 1_000);
+  return `${seconds} ${seconds === 1 ? "second" : "seconds"}`;
 }
 
 function parseGitConfigCount(value: string | undefined): number {

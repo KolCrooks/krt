@@ -108,6 +108,25 @@ export function createReviewToolset(ctx: ReviewToolContext): ReviewToolset {
 
   function buildTour(): ReviewTour {
     const rawChapters: TourChapter[] = chapterOrder.map((id) => finalizeChapter(chapters.get(id)!, ctx, changedByPath));
+    // Mechanically enforce full coverage: any non-generated changed file that the
+    // agent didn't assign to a chapter gets folded into the best-matching one.
+    // This runs on the already-finalized chapters (after stats are computed) so
+    // it doesn't corrupt the working state that the finish-tool coverage check
+    // reads. The stats for auto-assigned files are absent from changeStats, but
+    // the renderer computes them from the patch anyway.
+    if (rawChapters.length > 0) {
+      const coveredPaths = new Set(rawChapters.flatMap((ch) => ch.files));
+      for (const file of ctx.changedFiles) {
+        if (!file.isGenerated && !coveredPaths.has(file.path)) {
+          const bestIndex = bestMatchingChapterIndex(rawChapters, file.path);
+          if (bestIndex >= 0) {
+            const chapter = rawChapters[bestIndex]!;
+            rawChapters[bestIndex] = { ...chapter, files: [...chapter.files, file.path] };
+            coveredPaths.add(file.path);
+          }
+        }
+      }
+    }
     const chapterIds = new Set(rawChapters.map((chapter) => chapter.id));
     // Drop dependency ids that don't correspond to a real chapter so the tour
     // never carries dangling references.
@@ -181,9 +200,20 @@ export function createReviewToolset(ctx: ReviewToolContext): ReviewToolset {
         return addEdge(args);
       case "add_risk_signal":
         return addRiskSignal(args);
-      case "finish":
+      case "finish": {
+        const coveredFiles = new Set(chapterOrder.flatMap((id) => chapters.get(id)?.files ?? []));
+        const uncovered = ctx.changedFiles
+          .filter((file) => !file.isGenerated && !coveredFiles.has(file.path))
+          .map((file) => file.path);
+        if (uncovered.length > 0) {
+          return {
+            content: `Cannot finish: the following changed files are not covered by any chapter. Add chapters for them before calling finish:\n${uncovered.join("\n")}`,
+            isError: true
+          };
+        }
         finished = true;
         return { content: `Review tour finished with ${chapterOrder.length} chapter(s).` };
+      }
       default:
         return { content: `Unknown tool "${call.name}".`, isError: true };
     }
@@ -601,6 +631,33 @@ export function describeToolCall(call: ToolCall): string {
     default:
       return `Running ${call.name}`;
   }
+}
+
+// --- Internal helpers -------------------------------------------------------
+
+// Return the index of the chapter whose files share the longest directory
+// prefix with `filePath`. Falls back to the last chapter index.
+function bestMatchingChapterIndex(chapters: TourChapter[], filePath: string): number {
+  if (chapters.length === 0) {
+    return -1;
+  }
+  const dir = filePath.includes("/") ? filePath.slice(0, filePath.lastIndexOf("/")) : "";
+  let bestIndex = chapters.length - 1;
+  let bestScore = -1;
+  for (let i = 0; i < chapters.length; i++) {
+    for (const existing of chapters[i]!.files) {
+      const existingDir = existing.includes("/") ? existing.slice(0, existing.lastIndexOf("/")) : "";
+      let score = 0;
+      while (score < dir.length && score < existingDir.length && dir[score] === existingDir[score]) {
+        score++;
+      }
+      if (score > bestScore) {
+        bestScore = score;
+        bestIndex = i;
+      }
+    }
+  }
+  return bestIndex;
 }
 
 // --- Coercion helpers -------------------------------------------------------

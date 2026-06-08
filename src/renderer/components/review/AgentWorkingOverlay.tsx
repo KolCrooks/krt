@@ -1,12 +1,13 @@
 import { Ban, Bot, X } from "lucide-react";
 import { useEffect } from "react";
 import type { AgentActivity } from "../../../shared/schemas.js";
+import { formatThinkingTime, useThinkingSeconds } from "../../hooks/useThinkingTime.js";
 import { AgentActivityFeed } from "./AgentActivityFeed.js";
 
 interface AgentWorkingOverlayProps {
   title: string;
   message: string | null;
-  percent: number | null;
+  startedAt: number | null;
   activity: AgentActivity[];
   isGenerating: boolean;
   canCancel: boolean;
@@ -22,13 +23,14 @@ interface AgentWorkingOverlayProps {
 export function AgentWorkingOverlay({
   title,
   message,
-  percent,
+  startedAt,
   activity,
   isGenerating,
   canCancel,
   onCancel,
   onClose
 }: AgentWorkingOverlayProps): React.JSX.Element {
+  const thinkingSeconds = useThinkingSeconds(startedAt, isGenerating);
   useEffect(() => {
     const onKey = (event: KeyboardEvent): void => {
       if (event.key === "Escape") {
@@ -56,7 +58,7 @@ export function AgentWorkingOverlay({
               Cancel
             </button>
           ) : null}
-          {typeof percent === "number" ? <span className="tour-empty-status">{Math.round(percent)}%</span> : null}
+          {thinkingSeconds !== null ? <span className="tour-empty-status">Thinking {formatThinkingTime(thinkingSeconds)}</span> : null}
         </div>
       </div>
     </div>

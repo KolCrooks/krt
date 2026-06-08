@@ -132,7 +132,8 @@ const api = {
   ai: {
     getCachedTour: (input: IpcInput<"ai:getCachedTour">) => invoke("ai:getCachedTour", input),
     generateTour: (input: IpcInput<"ai:generateTour">) => invoke("ai:generateTour", input),
-    startTourGeneration: (input: IpcInput<"ai:startTourGeneration">) => invoke("ai:startTourGeneration", input)
+    startTourGeneration: (input: IpcInput<"ai:startTourGeneration">) => invoke("ai:startTourGeneration", input),
+    listModels: (input?: IpcInput<"ai:listModels">) => invoke("ai:listModels", input)
   },
   extensions: {
     list: () => invoke("extensions:list"),

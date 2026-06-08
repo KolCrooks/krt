@@ -121,12 +121,65 @@ describe("review toolset accumulator", () => {
     expect(describeToolCall({ id: "4", name: "finish", arguments: {} })).toBe("Wrapping up the tour");
   });
 
-  it("marks finish and counts chapters", async () => {
+  it("marks finish and counts chapters when all files are covered", async () => {
     const toolset = makeToolset();
-    await toolset.execute({ id: "1", name: "add_chapter", arguments: { id: "chapter-1", title: "A", summary: "x", files: ["src/App.tsx"], riskLevel: "low" } });
+    await toolset.execute({ id: "1", name: "add_chapter", arguments: { id: "chapter-1", title: "A", summary: "x", files: ["src/App.tsx", "src/main.tsx"], riskLevel: "low" } });
     expect(toolset.chapterCount).toBe(1);
     expect(toolset.finishRequested).toBe(false);
-    await toolset.execute({ id: "2", name: "finish", arguments: {} });
+    const result = await toolset.execute({ id: "2", name: "finish", arguments: {} });
+    expect(result.isError).toBeFalsy();
+    expect(toolset.finishRequested).toBe(true);
+  });
+
+  it("rejects finish when changed files are not covered by any chapter", async () => {
+    const toolset = makeToolset();
+    await toolset.execute({ id: "1", name: "add_chapter", arguments: { id: "chapter-1", title: "A", summary: "x", files: ["src/App.tsx"], riskLevel: "low" } });
+    const result = await toolset.execute({ id: "2", name: "finish", arguments: {} });
+    expect(result.isError).toBe(true);
+    expect(result.content).toContain("src/main.tsx");
+    expect(toolset.finishRequested).toBe(false);
+  });
+
+  it("buildTour auto-assigns uncovered non-generated files to the best-matching chapter", async () => {
+    const toolset = makeToolset();
+    // chapter-1 only covers App.tsx; main.tsx is left uncovered
+    await toolset.execute({ id: "1", name: "add_chapter", arguments: { id: "chapter-1", title: "A", summary: "x", files: ["src/App.tsx"], riskLevel: "low" } });
+    const tour = toolset.build();
+    // main.tsx shares the "src/" prefix — should be folded into chapter-1
+    expect(tour.chapters[0]?.files).toContain("src/main.tsx");
+  });
+
+  it("buildTour prefers the chapter with the longest shared directory prefix", async () => {
+    const deepChangedFiles: ChangedFile[] = [
+      { path: "src/utils/math.ts", status: "modified", additions: 5, deletions: 0, changes: 5, isLarge: false, isGenerated: false, reviewStatus: "unreviewed", annotations: 0, diagnostics: 0 },
+      { path: "src/utils/string.ts", status: "modified", additions: 3, deletions: 0, changes: 3, isLarge: false, isGenerated: false, reviewStatus: "unreviewed", annotations: 0, diagnostics: 0 },
+      { path: "src/api/routes.ts", status: "modified", additions: 8, deletions: 0, changes: 8, isLarge: false, isGenerated: false, reviewStatus: "unreviewed", annotations: 0, diagnostics: 0 }
+    ];
+    const repos = { getWorktreePath: () => "/tmp/wt", getLocalFileContent: vi.fn(), getLocalFilePatch: vi.fn(), searchWorkspaceText: vi.fn(), loadWorkspaceTree: vi.fn() } as unknown as ReviewRepoAccess;
+    const ctx: ReviewToolContext = { repos, repository, pullProvider: "github", pullNumber: 42, headSha: "abc", model: "test-model", generatedAt: "2026-06-08T00:00:00.000Z", changedFiles: deepChangedFiles, onUpdate: () => {} };
+    const toolset = createReviewToolset(ctx);
+    // chapter-1 covers utils/math.ts; chapter-2 covers api/routes.ts; utils/string.ts is uncovered
+    await toolset.execute({ id: "1", name: "add_chapter", arguments: { id: "chapter-1", title: "Utils", summary: "x", files: ["src/utils/math.ts"], riskLevel: "low" } });
+    await toolset.execute({ id: "2", name: "add_chapter", arguments: { id: "chapter-2", title: "API", summary: "y", files: ["src/api/routes.ts"], riskLevel: "low" } });
+    const tour = toolset.build();
+    // utils/string.ts shares "src/utils" with chapter-1, which is longer than "src" shared with chapter-2
+    const utilsChapter = tour.chapters.find((ch) => ch.id === "chapter-1");
+    expect(utilsChapter?.files).toContain("src/utils/string.ts");
+    const apiChapter = tour.chapters.find((ch) => ch.id === "chapter-2");
+    expect(apiChapter?.files).not.toContain("src/utils/string.ts");
+  });
+
+  it("allows finish when uncovered files are generated", async () => {
+    const generatedChangedFiles: ChangedFile[] = [
+      { path: "src/App.tsx", status: "modified", additions: 10, deletions: 2, changes: 12, isLarge: false, isGenerated: false, reviewStatus: "unreviewed", annotations: 0, diagnostics: 0 },
+      { path: "src/generated/schema.ts", status: "modified", additions: 50, deletions: 0, changes: 50, isLarge: false, isGenerated: true, reviewStatus: "unreviewed", annotations: 0, diagnostics: 0 }
+    ];
+    const repos = { getWorktreePath: () => "/tmp/wt", getLocalFileContent: vi.fn(), getLocalFilePatch: vi.fn(), searchWorkspaceText: vi.fn(), loadWorkspaceTree: vi.fn() } as unknown as ReviewRepoAccess;
+    const ctx: ReviewToolContext = { repos, repository, pullProvider: "github", pullNumber: 42, headSha: "abc", model: "test-model", generatedAt: "2026-06-08T00:00:00.000Z", changedFiles: generatedChangedFiles, onUpdate: () => {} };
+    const toolset = createReviewToolset(ctx);
+    await toolset.execute({ id: "1", name: "add_chapter", arguments: { id: "chapter-1", title: "A", summary: "x", files: ["src/App.tsx"], riskLevel: "low" } });
+    const result = await toolset.execute({ id: "2", name: "finish", arguments: {} });
+    expect(result.isError).toBeFalsy();
     expect(toolset.finishRequested).toBe(true);
   });
 });

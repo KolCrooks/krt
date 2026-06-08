@@ -3334,6 +3334,73 @@ button:focus-visible {
   padding: 0;
 }
 
+/* Anchor the AI processing chip to the review pane's bottom-right corner. */
+.review-workspace {
+  position: relative;
+}
+
+.ai-chip {
+  align-items: center;
+  animation: ai-chip-glow 2.1s ease-in-out infinite;
+  background: var(--bg-elev, var(--surface-strong));
+  border: 1px solid var(--accent);
+  border-radius: 999px;
+  bottom: 16px;
+  color: var(--ink);
+  cursor: pointer;
+  display: flex;
+  font-size: 12px;
+  gap: 7px;
+  max-width: 340px;
+  padding: 7px 13px;
+  position: absolute;
+  right: 16px;
+  z-index: 40;
+}
+
+.ai-chip:hover {
+  border-color: var(--accent);
+  filter: brightness(1.03);
+}
+
+.ai-chip-spinner {
+  align-items: center;
+  animation: ai-chip-spin 1.5s linear infinite;
+  color: var(--accent);
+  display: inline-flex;
+  flex: none;
+}
+
+.ai-chip-label {
+  color: var(--ink-2, var(--ink));
+  max-width: 240px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ai-chip-elapsed {
+  color: var(--ink-4);
+  flex: none;
+  font-variant-numeric: tabular-nums;
+}
+
+@keyframes ai-chip-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes ai-chip-glow {
+  0%,
+  100% {
+    box-shadow: 0 6px 18px rgba(0, 0, 0, 0.16), 0 0 0 0 color-mix(in srgb, var(--accent) 38%, transparent);
+  }
+  50% {
+    box-shadow: 0 6px 18px rgba(0, 0, 0, 0.16), 0 0 0 5px color-mix(in srgb, var(--accent) 14%, transparent);
+  }
+}
+
 .review-body {
   display: flex;
   flex: 1;
@@ -4787,22 +4854,30 @@ button.rev-tab {
   border-left-color: var(--warning);
 }
 
-/* Compact single-line AI note that reads like an inline code comment. */
+/* AI note that reads like an inline code comment; wraps onto multiple lines
+   rather than truncating. */
 .diff-anno-note {
-  align-items: center;
+  align-items: flex-start;
   color: var(--text-secondary);
   display: flex;
-  font-size: 11.5px;
+  font-size: 13px;
   gap: 6px;
   grid-template-columns: none;
   margin: 3px 10px;
-  padding: 4px 9px;
+  padding: 5px 9px;
+}
+
+/* Keep the leading sparkle aligned with the first line of wrapped text. */
+.diff-anno-note > svg {
+  flex: none;
+  margin-top: 2px;
 }
 
 .diff-anno-note .diff-anno-note-text {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  line-height: 1.5;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  white-space: normal;
 }
 
 .diff-anno-note .diff-anno-note-text code {
@@ -5260,7 +5335,6 @@ button.rev-tab {
 .risk-help-tooltip {
   background: var(--ink);
   border-radius: 6px;
-  bottom: calc(100% + 8px);
   box-shadow: 0 10px 24px -14px rgb(0 0 0 / 45%);
   color: var(--bg);
   font-size: 11px;
@@ -5274,7 +5348,8 @@ button.rev-tab {
   pointer-events: none;
   position: absolute;
   text-transform: none;
-  transform: translateX(-50%) translateY(3px);
+  top: calc(100% + 8px);
+  transform: translateX(-50%) translateY(-3px);
   transition:
     opacity 120ms ease,
     transform 120ms ease;
@@ -5284,11 +5359,11 @@ button.rev-tab {
 
 .risk-help-tooltip::after {
   border: 5px solid transparent;
-  border-top-color: var(--ink);
+  border-bottom-color: var(--ink);
+  bottom: 100%;
   content: "";
   left: 50%;
   position: absolute;
-  top: 100%;
   transform: translateX(-50%);
 }
 
@@ -6595,6 +6670,124 @@ button.rev-tab {
 
 .settings-combobox .settings-input {
   padding-right: 28px;
+}
+
+.settings-model-control {
+  align-items: flex-end;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.settings-model-field {
+  align-items: center;
+  display: flex;
+  gap: 6px;
+}
+
+.settings-icon-button {
+  align-items: center;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--ink-2, var(--ink));
+  cursor: pointer;
+  display: inline-flex;
+  flex: none;
+  height: 28px;
+  justify-content: center;
+  padding: 0;
+  transition: border-color 120ms, color 120ms;
+  width: 28px;
+}
+
+.settings-icon-button:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.settings-icon-button:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
+.settings-icon-button .is-spinning {
+  animation: spin 1s linear infinite;
+}
+
+.settings-discover-status {
+  color: var(--ink-3);
+  font-size: 11px;
+  line-height: 1.4;
+  max-width: 234px;
+  text-align: right;
+}
+
+.settings-model-menu {
+  background: var(--bg-elev);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px -12px rgb(0 0 0 / 18%), 0 2px 8px -4px rgb(0 0 0 / 8%);
+  display: flex;
+  flex-direction: column;
+  list-style: none;
+  margin: 0;
+  max-height: 280px;
+  max-width: 340px;
+  min-width: 100%;
+  overflow-y: auto;
+  padding: 4px;
+  position: absolute;
+  right: 0;
+  top: calc(100% + 4px);
+  width: max-content;
+  z-index: 30;
+}
+
+.settings-model-option {
+  align-items: baseline;
+  border-radius: 5px;
+  cursor: pointer;
+  display: flex;
+  gap: 8px;
+  padding: 6px 8px;
+}
+
+.settings-model-option.is-highlighted {
+  background: var(--accent-soft);
+}
+
+.settings-model-option-id {
+  color: var(--ink);
+  flex: 0 1 auto;
+  font-size: 11.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.settings-model-option.is-highlighted .settings-model-option-id {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.settings-model-option-desc {
+  color: var(--ink-3);
+  flex: 1;
+  font-size: 11.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.settings-model-option-tag {
+  color: var(--ink-4);
+  flex-shrink: 0;
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  letter-spacing: 0.04em;
+  margin-left: auto;
+  text-transform: uppercase;
 }
 
 .settings-row-stack {

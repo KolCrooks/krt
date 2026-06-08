@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { AiProcessingChip } from "./review/AiProcessingChip.js";
 import { CheckoutBanner } from "./review/CheckoutBanner.js";
 import { DiffReviewBody } from "./review/DiffReviewBody.js";
 import { StoryboardBody } from "./review/StoryboardBody.js";
@@ -33,6 +34,7 @@ export function ReviewWorkspace({ tab, active = true }: ReviewWorkspaceProps): R
         {tab.reviewSubMode === "tour" ? <TourBody tab={tab} layout={layout} active={active} /> : null}
         {tab.reviewSubMode === "storyboard" ? <StoryboardBody tab={tab} layout={layout} active={active} /> : null}
       </div>
+      <AiProcessingChip tab={tab} />
       {tab.finish.open ? <FinishReviewPopover tab={tab} onClose={() => setFinishOpen(tab.key, false)} /> : null}
     </main>
   );

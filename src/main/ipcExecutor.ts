@@ -510,6 +510,10 @@ function createIpcHandlers(context: IpcHandlerContext): HandlerMap {
     "repos:listManagedWorktrees": (input) => context.repos.listManagedWorktrees(input?.repository),
     "repos:cleanupWorktrees": (input) => context.repos.cleanupWorktrees(input),
 
+    "ai:listModels": async (input) => {
+      const provider = input?.provider ?? context.settings.get().ai.provider;
+      return { provider, models: await context.ai.listModels(provider) };
+    },
     "ai:getCachedTour": (input) => context.ai.getCachedTour(input.repository, input.number, input.headSha),
     "ai:generateTour": (input) =>
       measureHandler(
