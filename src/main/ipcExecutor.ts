@@ -146,7 +146,15 @@ function createIpcHandlers(context: IpcHandlerContext): HandlerMap {
     },
 
     "settings:get": () => context.settings.get(),
-    "settings:update": (input) => context.settings.update(input),
+    "settings:update": (input) => {
+      const updated = context.settings.update(input);
+      if (input.updates?.enabled) {
+        void context.updates.checkForUpdates().catch(() => {
+          // Saving the setting should not fail just because the updater cannot check immediately.
+        });
+      }
+      return updated;
+    },
     "updates:getStatus": () => context.updates.getStatus(),
     "updates:check": () => context.updates.checkForUpdates(),
     "updates:installDownloaded": () => context.updates.installDownloadedUpdate(),

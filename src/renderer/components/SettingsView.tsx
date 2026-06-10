@@ -23,6 +23,7 @@ import type {
   AiKeyProvider,
   AppSettings,
   GitHubKeyProvider,
+  UpdateStatus,
 } from "../../shared/schemas.js";
 
 type SettingsUpdateInput = IpcInput<"settings:update">;
@@ -110,6 +111,10 @@ export function SettingsView({
   const updatesQuery = useQuery({
     queryKey: ["updates-status"],
     queryFn: () => krtClient.updates.getStatus(),
+    refetchInterval: (query) => {
+      const state = (query.state.data as UpdateStatus | undefined)?.state;
+      return state === "checking" || state === "available" ? 1_000 : false;
+    },
   });
 
   const updateMutation = useMutation({
@@ -208,10 +213,7 @@ export function SettingsView({
             {settings && section === "updates" ? (
               <UpdatesSection
                 settings={settings}
-                statusMessage={
-                  updateStatus?.message ?? updateStatus?.state ?? "Not checked"
-                }
-                stateReady={updateStatus?.state === "downloaded"}
+                updateStatus={updateStatus}
                 updateSettings={updateSettings}
               />
             ) : null}
@@ -883,30 +885,34 @@ function KeybindingsSection(): React.JSX.Element {
 }
 
 interface UpdatesSectionProps extends SettingsSectionProps {
-  statusMessage: string;
-  stateReady: boolean;
+  updateStatus: UpdateStatus | undefined;
 }
 
 function UpdatesSection({
   settings,
-  statusMessage,
-  stateReady,
+  updateStatus,
   updateSettings,
 }: UpdatesSectionProps): React.JSX.Element {
   const queryClient = useQueryClient();
-  const checkMutation = useMutation({
-    mutationFn: () => krtClient.updates.check(),
-    onSuccess: (status) => queryClient.setQueryData(["updates-status"], status),
-  });
-  const installMutation = useMutation({
-    mutationFn: () => krtClient.updates.installDownloaded(),
+  const stateReady = updateStatus?.state === "downloaded";
+  const statusMessage = updateStatus?.message ?? updateStatus?.state ?? "Not checked";
+  const hasUpdateVersion =
+    Boolean(updateStatus?.availableVersion) &&
+    (updateStatus?.state === "available" ||
+      updateStatus?.state === "downloaded" ||
+      updateStatus?.state === "installing");
+  const updateMutation = useMutation({
+    mutationFn: () =>
+      stateReady
+        ? krtClient.updates.installDownloaded()
+        : krtClient.updates.check(),
     onSuccess: (status) => queryClient.setQueryData(["updates-status"], status),
   });
 
   return (
     <>
       <SettingsGroup title="Updates">
-        <SettingsRow label="Enable updates">
+        <SettingsRow label="Auto update">
           <Toggle
             on={settings.updates.enabled}
             onChange={(value) =>
@@ -916,64 +922,36 @@ function UpdatesSection({
             }
           />
         </SettingsRow>
-        <SettingsRow label="Channel">
-          <select
-            className="settings-select"
-            value={settings.updates.channel}
-            onChange={(event) =>
-              updateSettings({
-                updates: {
-                  ...settings.updates,
-                  channel: event.target.value as "stable" | "beta",
-                },
-              })
-            }
-          >
-            <option value="stable">Stable</option>
-            <option value="beta">Beta</option>
-          </select>
-        </SettingsRow>
-        <SettingsRow last label="Feed URL" hint="Custom update feed.">
-          <input
-            className="settings-input"
-            value={settings.updates.feedUrl ?? ""}
-            onChange={(event) =>
-              updateSettings({
-                updates: {
-                  ...settings.updates,
-                  feedUrl: event.target.value.trim() || null,
-                },
-              })
-            }
-          />
-        </SettingsRow>
-      </SettingsGroup>
-      <SettingsGroup title="Status">
-        <SettingsRow label="Last status">
-          <span className="settings-status-text">
-            <RefreshCw size={12} aria-hidden="true" />
-            {statusMessage}
-          </span>
-        </SettingsRow>
-        <SettingsRow last label="Actions">
+        <SettingsRow
+          last
+          label="Status"
+          hint="Downloads and installs the latest KRT release in the app."
+        >
           <div className="settings-row-actions">
-            <button
-              type="button"
-              className="secondary-button"
-              disabled={checkMutation.isPending}
-              onClick={() => checkMutation.mutate()}
-            >
-              <RefreshCw size={12} aria-hidden="true" />
-              Check now
-            </button>
+            <div className="settings-update-status">
+              <span className="settings-status-text">
+                <RefreshCw size={12} aria-hidden="true" />
+                {statusMessage}
+              </span>
+              {hasUpdateVersion ? (
+                <div className="settings-version-pair">
+                  <span>
+                    <span>Current</span> <span className="mono">{updateStatus?.currentVersion}</span>
+                  </span>
+                  <span>
+                    <span>Latest</span> <span className="mono">{updateStatus?.availableVersion}</span>
+                  </span>
+                </div>
+              ) : null}
+            </div>
             <button
               type="button"
               className="primary-button"
-              disabled={!stateReady || installMutation.isPending}
-              onClick={() => installMutation.mutate()}
+              disabled={updateMutation.isPending}
+              onClick={() => updateMutation.mutate()}
             >
               <Download size={12} aria-hidden="true" />
-              Install
+              Update
             </button>
           </div>
         </SettingsRow>

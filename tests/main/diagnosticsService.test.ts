@@ -75,7 +75,7 @@ describe("DiagnosticsService", () => {
         enabledExtensionCount: 1
       },
       worktrees: { count: 2, activeCount: 1, totalBytes: 350 },
-      updates: { state: "disabled" }
+      updates: { state: "idle", message: "Ready to check for updates." }
     });
     expect(snapshot.recentPerformance[0]).toMatchObject({
       name: "path.index",

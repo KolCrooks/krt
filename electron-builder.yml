@@ -1,7 +1,7 @@
 appId: com.kolcrooks.krt
 productName: KRT
 copyright: Copyright (c) 2026 Kol Crooks
-artifactName: ${productName}-${version}-${arch}.${ext}
+artifactName: ${productName}-${version}-mac-${arch}.${ext}
 
 directories:
   output: release
@@ -26,6 +26,6 @@ mac:
   notarize: false
 
 dmg:
-  artifactName: ${productName}-${version}-${arch}.${ext}
+  artifactName: ${productName}-${version}-mac-${arch}.${ext}
 
 afterSign: build/notarize.cjs
