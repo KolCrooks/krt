@@ -8,10 +8,14 @@ import {
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AppShell } from "../../src/renderer/components/AppShell.js";
 import { useUiStore } from "../../src/renderer/store/uiStore.js";
+import { krtUpdateFeedUrl } from "../../src/shared/releases.js";
 import type {
   ManagedWorktree,
   PullRequestBundle,
+  UpdateStatus,
 } from "../../src/shared/schemas.js";
+
+const testUpdateFeedUrl = krtUpdateFeedUrl("darwin", "arm64", "0.1.0");
 
 const originalListManagedWorktrees = window.krt.repos.listManagedWorktrees;
 const originalOpenPullRequest = window.krt.pullRequests.open;
@@ -20,6 +24,9 @@ const originalStartLsp = window.krt.lsp.startForWorktree;
 const originalStopLsp = window.krt.lsp.stopForWorktree;
 const originalOnCloseSubTab = window.krt.app.onCloseSubTab;
 const originalOnOpenPreferences = window.krt.app.onOpenPreferences;
+const originalGetUpdateStatus = window.krt.updates.getStatus;
+const originalCheckUpdates = window.krt.updates.check;
+const originalInstallDownloaded = window.krt.updates.installDownloaded;
 const originalScrollTo = HTMLElement.prototype.scrollTo;
 
 afterEach(() => {
@@ -30,6 +37,9 @@ afterEach(() => {
   window.krt.pullRequests.filePatch = originalFilePatch;
   window.krt.lsp.startForWorktree = originalStartLsp;
   window.krt.lsp.stopForWorktree = originalStopLsp;
+  window.krt.updates.getStatus = originalGetUpdateStatus;
+  window.krt.updates.check = originalCheckUpdates;
+  window.krt.updates.installDownloaded = originalInstallDownloaded;
   HTMLElement.prototype.scrollTo = originalScrollTo;
   useUiStore.setState({
     activeView: "search",
@@ -206,6 +216,80 @@ describe("AppShell", () => {
 
     expect(await screen.findByRole("dialog", { name: "Settings" })).toBeInTheDocument();
     expect(useUiStore.getState().modal).toBe("settings");
+  });
+
+  it("starts the in-app updater from preferences updates", async () => {
+    window.krt.updates.check = vi.fn(async (): Promise<UpdateStatus> => ({
+      enabled: false,
+      configured: true,
+      channel: "stable",
+      state: "available",
+      currentVersion: "0.1.0",
+      availableVersion: "0.2.0",
+      feedUrl: testUpdateFeedUrl,
+      message: "Update available.",
+    }));
+    render(<AppShell />);
+
+    await act(async () => {
+      fireEvent.keyDown(window, { key: ",", metaKey: true });
+      await Promise.resolve();
+    });
+
+    fireEvent.click(await screen.findByRole("button", { name: "Updates" }));
+    expect(await screen.findByText("Update available.")).toBeInTheDocument();
+    expect(screen.getByText("Current")).toBeInTheDocument();
+    expect(screen.getByText("Latest")).toBeInTheDocument();
+    expect(screen.getByText("0.1.0")).toBeInTheDocument();
+    expect(screen.getByText("0.2.0")).toBeInTheDocument();
+    expect(screen.queryByText("Channel")).not.toBeInTheDocument();
+    expect(screen.queryByText("Feed URL")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Check now" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Install" })).not.toBeInTheDocument();
+
+    fireEvent.click(await screen.findByRole("button", { name: "Update" }));
+
+    await waitFor(() => {
+      expect(window.krt.updates.check).toHaveBeenCalledOnce();
+    });
+  });
+
+  it("installs a downloaded update from preferences updates", async () => {
+    window.krt.updates.getStatus = vi.fn(async (): Promise<UpdateStatus> => ({
+      enabled: true,
+      configured: true,
+      channel: "stable",
+      state: "downloaded",
+      currentVersion: "0.1.0",
+      feedUrl: testUpdateFeedUrl,
+      availableVersion: "0.2.0",
+      message: "Update downloaded and ready to install.",
+    }));
+    window.krt.updates.installDownloaded = vi.fn(async (): Promise<UpdateStatus> => ({
+      enabled: true,
+      configured: true,
+      channel: "stable",
+      state: "installing",
+      currentVersion: "0.1.0",
+      feedUrl: testUpdateFeedUrl,
+      availableVersion: "0.2.0",
+      message: "Installing downloaded update.",
+    }));
+    render(<AppShell />);
+
+    await act(async () => {
+      fireEvent.keyDown(window, { key: ",", metaKey: true });
+      await Promise.resolve();
+    });
+
+    fireEvent.click(await screen.findByRole("button", { name: "Updates" }));
+    expect(await screen.findByText("Current")).toBeInTheDocument();
+    expect(screen.getByText("Latest")).toBeInTheDocument();
+    fireEvent.click(await screen.findByRole("button", { name: "Update" }));
+
+    await waitFor(() => {
+      expect(window.krt.updates.installDownloaded).toHaveBeenCalledOnce();
+    });
   });
 
   it("keeps a managed tab language server running across review submodes", async () => {

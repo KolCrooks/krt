@@ -57,6 +57,11 @@ async function createMainWindow(): Promise<void> {
   const maintenance = new MaintenanceService(db);
   const diagnostics = new DiagnosticsService(appPaths, app.getVersion(), settings, maintenance, repos, perf, operations, updates);
   app.once("before-quit", () => lsp.dispose());
+  if (settings.get().updates.enabled) {
+    void updates.checkForUpdates().catch(() => {
+      // Startup should continue even if the updater cannot reach the release service.
+    });
+  }
 
   registerIpcHandlers({
     providers,

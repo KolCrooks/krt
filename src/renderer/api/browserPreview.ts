@@ -1,4 +1,5 @@
 import type { KrtApi } from "../../preload/index.js";
+import { krtUpdateFeedUrl } from "../../shared/releases.js";
 import type { AppSettings, PullRequestBundle, PullRequestDetail, PullRequestSummary, ReviewTour } from "../../shared/schemas.js";
 
 const repository = {
@@ -9,6 +10,7 @@ const repository = {
   defaultBranch: "main",
   url: "https://github.com/kol/review-tool"
 };
+const previewUpdateFeedUrl = krtUpdateFeedUrl("darwin", "arm64", "0.1.0");
 
 const pullRequest: PullRequestDetail = {
   provider: "github",
@@ -286,30 +288,33 @@ export function createBrowserPreviewApi(): KrtApi {
     updates: {
       getStatus: async () => ({
         enabled: false,
-        configured: false,
+        configured: true,
         channel: "stable",
-        state: "disabled",
+        state: "available",
         currentVersion: "0.1.0",
-        feedUrl: null,
-        message: "Updates are disabled."
+        availableVersion: "0.2.0",
+        feedUrl: previewUpdateFeedUrl,
+        message: "Update available."
       }),
       check: async () => ({
         enabled: false,
-        configured: false,
+        configured: true,
         channel: "stable",
-        state: "disabled",
+        state: "available",
         currentVersion: "0.1.0",
-        feedUrl: null,
-        message: "Updates are disabled."
+        availableVersion: "0.2.0",
+        feedUrl: previewUpdateFeedUrl,
+        message: "Update available."
       }),
       installDownloaded: async () => ({
         enabled: false,
-        configured: false,
+        configured: true,
         channel: "stable",
-        state: "disabled",
+        state: "available",
         currentVersion: "0.1.0",
-        feedUrl: null,
-        message: "Updates are disabled."
+        availableVersion: "0.2.0",
+        feedUrl: previewUpdateFeedUrl,
+        message: "Update available."
       })
     },
     cache: {
@@ -364,12 +369,13 @@ export function createBrowserPreviewApi(): KrtApi {
         operations: [],
         updates: {
           enabled: false,
-          configured: false,
+          configured: true,
           channel: "stable",
-          state: "disabled",
+          state: "available",
           currentVersion: "0.1.0",
-          feedUrl: null,
-          message: "Updates are disabled."
+          availableVersion: "0.2.0",
+          feedUrl: previewUpdateFeedUrl,
+          message: "Update available."
         }
       })
     },

@@ -1,5 +1,5 @@
 import { BrowserWindow, Menu, app, type MenuItemConstructorOptions } from "electron";
-import { openExternalUrl } from "./externalLinks.js";
+import { KRT_LATEST_RELEASE_URL, openExternalUrl } from "./externalLinks.js";
 import { closeSubTabEvent, openPreferencesEvent } from "../shared/ipc.js";
 
 export function installApplicationMenu(): void {
@@ -73,9 +73,9 @@ export function createApplicationMenuTemplate(): MenuItemConstructorOptions[] {
       label: "Help",
       submenu: [
         {
-          label: "GitHub",
+          label: "Latest Release",
           click: () => {
-            void openExternalUrl("https://github.com/");
+            void openExternalUrl(KRT_LATEST_RELEASE_URL);
           }
         }
       ]

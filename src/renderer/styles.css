@@ -6797,8 +6797,23 @@ button.rev-tab {
 }
 
 .settings-row-actions {
+  align-items: center;
   display: flex;
   gap: 6px;
+}
+
+.settings-update-status {
+  align-items: flex-start;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.settings-version-pair {
+  color: var(--ink-3);
+  display: flex;
+  font-size: 11px;
+  gap: 10px;
 }
 
 .settings-input,

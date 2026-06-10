@@ -3,6 +3,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { ipcMain } from "electron";
 import { describe, expect, it, vi } from "vitest";
 import { ipcContract } from "../../src/shared/ipc.js";
+import { krtUpdateFeedUrl } from "../../src/shared/releases.js";
 import { defaultAppSettings, type ChangedFile, type PullRequestDetail, type ReviewTour } from "../../src/shared/schemas.js";
 import { AppError } from "../../src/main/errors.js";
 import { createIpcExecutor, type IpcHandlerContext } from "../../src/main/ipcExecutor.js";
@@ -110,6 +111,33 @@ describe("createIpcExecutor", () => {
     if (result.ok) {
       expect(result.data.github).toMatchObject({ configured: false, login: null, tokenProvider: "gh-cli" });
     }
+  });
+
+  it("starts an updater check when auto update is enabled", async () => {
+    const update = vi.fn((input) => ({
+      ...defaultAppSettings,
+      updates: { ...defaultAppSettings.updates, ...input.updates }
+    }));
+    const checkForUpdates = vi.fn(async () => ({
+      enabled: true,
+      configured: true,
+      channel: "stable" as const,
+      state: "checking" as const,
+      currentVersion: "0.1.0",
+      feedUrl: krtUpdateFeedUrl("darwin", "arm64", "0.1.0")
+    }));
+    const executor = createIpcExecutor(
+      createContext({
+        settings: { get: vi.fn(() => defaultAppSettings), update } as unknown as IpcHandlerContext["settings"],
+        updates: { checkForUpdates } as unknown as IpcHandlerContext["updates"]
+      })
+    );
+
+    const result = await executor("settings:update", undefined, { updates: { enabled: true } });
+
+    expect(result.ok).toBe(true);
+    expect(update).toHaveBeenCalledWith({ updates: { enabled: true } });
+    expect(checkForUpdates).toHaveBeenCalledOnce();
   });
 
   it("restarts active language server sessions when an LSP extension enablement changes", async () => {

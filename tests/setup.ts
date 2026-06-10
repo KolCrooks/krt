@@ -1,6 +1,8 @@
 import "@testing-library/jest-dom/vitest";
+import { krtUpdateFeedUrl } from "../src/shared/releases.js";
 
 const emptyAsync = async () => undefined;
+const testUpdateFeedUrl = krtUpdateFeedUrl("darwin", "arm64", "0.1.0");
 
 if (typeof window !== "undefined") {
   Object.defineProperty(window, "krt", {
@@ -30,30 +32,33 @@ if (typeof window !== "undefined") {
     updates: {
       getStatus: async () => ({
         enabled: false,
-        configured: false,
+        configured: true,
         channel: "stable",
-        state: "disabled",
+        state: "available",
         currentVersion: "0.1.0",
-        feedUrl: null,
-        message: "Updates are disabled."
+        availableVersion: "0.2.0",
+        feedUrl: testUpdateFeedUrl,
+        message: "Update available."
       }),
       check: async () => ({
         enabled: false,
-        configured: false,
+        configured: true,
         channel: "stable",
-        state: "disabled",
+        state: "available",
         currentVersion: "0.1.0",
-        feedUrl: null,
-        message: "Updates are disabled."
+        availableVersion: "0.2.0",
+        feedUrl: testUpdateFeedUrl,
+        message: "Update available."
       }),
       installDownloaded: async () => ({
         enabled: false,
-        configured: false,
+        configured: true,
         channel: "stable",
-        state: "disabled",
+        state: "available",
         currentVersion: "0.1.0",
-        feedUrl: null,
-        message: "Updates are disabled."
+        availableVersion: "0.2.0",
+        feedUrl: testUpdateFeedUrl,
+        message: "Update available."
       })
     },
     cache: {
@@ -96,12 +101,13 @@ if (typeof window !== "undefined") {
         operations: [],
         updates: {
           enabled: false,
-          configured: false,
+          configured: true,
           channel: "stable",
-          state: "disabled",
+          state: "available",
           currentVersion: "0.1.0",
-          feedUrl: null,
-          message: "Updates are disabled."
+          availableVersion: "0.2.0",
+          feedUrl: testUpdateFeedUrl,
+          message: "Update available."
         }
       })
     },

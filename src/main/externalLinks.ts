@@ -1,4 +1,5 @@
 import { shell } from "electron";
+export { KRT_LATEST_RELEASE_URL } from "../shared/releases.js";
 
 const allowedExternalProtocols = new Set(["https:", "http:"]);
 

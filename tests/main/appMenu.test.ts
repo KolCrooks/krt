@@ -1,7 +1,8 @@
 // @vitest-environment node
-import { Menu } from "electron";
+import { Menu, shell } from "electron";
 import { describe, expect, it, vi } from "vitest";
 import { createApplicationMenuTemplate, installApplicationMenu } from "../../src/main/appMenu.js";
+import { KRT_LATEST_RELEASE_URL } from "../../src/main/externalLinks.js";
 import { closeSubTabEvent } from "../../src/shared/ipc.js";
 
 vi.mock("electron", () => ({
@@ -25,8 +26,28 @@ describe("application menu", () => {
 
     expect(labels).toEqual(expect.arrayContaining(["File", "Edit", "View", "Window", "Help"]));
     expect(template.find((item) => item.label === "Help")?.submenu).toEqual(
-      expect.arrayContaining([expect.objectContaining({ label: "GitHub" })])
+      expect.arrayContaining([expect.objectContaining({ label: "Latest Release" })])
     );
+  });
+
+  it("opens the latest GitHub release from Help", () => {
+    const template = createApplicationMenuTemplate();
+    const helpSubmenu = getSubmenu(template, "Help");
+    const releaseItem = helpSubmenu.find((item) => item.label === "Latest Release");
+
+    expect(releaseItem).toBeDefined();
+    const click = releaseItem?.click;
+    if (!click) {
+      throw new Error("Latest Release menu item is missing a click handler.");
+    }
+
+    click(
+      {} as Parameters<typeof click>[0],
+      undefined as Parameters<typeof click>[1],
+      {} as Parameters<typeof click>[2]
+    );
+
+    expect(shell.openExternal).toHaveBeenCalledWith(KRT_LATEST_RELEASE_URL);
   });
 
   it("routes Cmd+W to the renderer file sub-tab close command", () => {

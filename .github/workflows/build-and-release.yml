@@ -55,6 +55,23 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Set release version
+        shell: bash
+        env:
+          COMMIT_SHA: ${{ matrix.commit }}
+        run: |
+          set -euo pipefail
+
+          base_version="$(node -p "require('./package.json').version")"
+          major="${base_version%%.*}"
+          remainder="${base_version#*.}"
+          minor="${remainder%%.*}"
+          patch="$(git rev-list --count "${COMMIT_SHA}")"
+          release_version="${major}.${minor}.${patch}"
+
+          npm version "${release_version}" --no-git-tag-version --allow-same-version
+          echo "KRT_RELEASE_VERSION=${release_version}" >> "$GITHUB_ENV"
+
       - name: Build macOS release artifacts
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: "false"
@@ -69,12 +86,10 @@ jobs:
           set -euo pipefail
 
           short_sha="${COMMIT_SHA:0:7}"
-          version="$(node -p "require('./package.json').version")"
-          tag="main-${COMMIT_SHA}"
+          version="${KRT_RELEASE_VERSION:-$(node -p "require('./package.json').version")}"
+          tag="v${version}"
           title="KRT ${version} (${short_sha})"
           notes="Automated build for commit ${COMMIT_SHA} on main."
-          latest_title="KRT ${version} latest (${short_sha})"
-          latest_notes="Latest automated build for commit ${COMMIT_SHA} on main."
 
           shopt -s nullglob
           artifacts=(release/*.dmg release/*.zip)
@@ -105,44 +120,12 @@ jobs:
 
           if gh release view "$tag" >/dev/null 2>&1; then
             delete_release_assets "$tag"
-            gh release edit "$tag" --title "$title" --notes "$notes"
+            gh release edit "$tag" --title "$title" --notes "$notes" --latest
             gh release upload "$tag" "${artifacts[@]}"
           else
             gh release create "$tag" "${artifacts[@]}" \
               --target "$COMMIT_SHA" \
               --title "$title" \
               --notes "$notes" \
-              --latest=false
-          fi
-
-          if gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/latest" >/dev/null 2>&1; then
-            gh api \
-              -X PATCH \
-              "repos/${GITHUB_REPOSITORY}/git/refs/tags/latest" \
-              -f sha="$COMMIT_SHA" \
-              -F force=true \
-              >/dev/null
-          else
-            gh api \
-              -X POST \
-              "repos/${GITHUB_REPOSITORY}/git/refs" \
-              -f ref="refs/tags/latest" \
-              -f sha="$COMMIT_SHA" \
-              >/dev/null
-          fi
-
-          if gh release view latest >/dev/null 2>&1; then
-            delete_release_assets latest
-            gh release edit latest \
-              --target "$COMMIT_SHA" \
-              --title "$latest_title" \
-              --notes "$latest_notes" \
-              --latest
-            gh release upload latest "${artifacts[@]}"
-          else
-            gh release create latest "${artifacts[@]}" \
-              --target "$COMMIT_SHA" \
-              --title "$latest_title" \
-              --notes "$latest_notes" \
               --latest
           fi
