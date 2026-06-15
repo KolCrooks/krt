@@ -47,4 +47,5 @@ export interface Provider {
   getRepository(repository: RepositoryRef): Promise<RepositoryRef>;
   getCloneInfo(repository: RepositoryRef): Promise<RepositoryCloneInfo>;
   openPullRequest(repository: RepositoryRef, number: number, mode: "light" | "managed"): Promise<PullRequestBundle>;
+  searchRepositories(query: string): Promise<Array<{ fullName: string }>>;
 }

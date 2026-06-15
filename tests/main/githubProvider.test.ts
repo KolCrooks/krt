@@ -495,6 +495,88 @@ describe("GitHubProvider response caching", () => {
   });
 });
 
+describe("GitHubProvider.searchRepositories", () => {
+  it("returns an empty array when no token is configured", async () => {
+    const cache = new ProviderResponseCache(openDatabase(":memory:"));
+    const provider = providerWithOctokit(cache, {
+      repos: { listForAuthenticatedUser: vi.fn().mockResolvedValue({ data: [] }) },
+      search: { repos: vi.fn() },
+    }, null);
+
+    const results = await provider.searchRepositories("kol");
+    expect(results).toEqual([]);
+  });
+
+  it("filters repos by query substring case-insensitively and caps at 10", async () => {
+    const cache = new ProviderResponseCache(openDatabase(":memory:"));
+    const repos = Array.from({ length: 20 }, (_, i) => ({ full_name: `kol/kol-repo-${i}` }));
+    const provider = providerWithOctokit(cache, {
+      repos: { listForAuthenticatedUser: vi.fn().mockResolvedValue({ data: repos }) },
+      search: { repos: vi.fn().mockResolvedValue({ data: { items: [] } }) },
+    }, "token");
+
+    const results = await provider.searchRepositories("kol-repo");
+    expect(results).toHaveLength(10);
+    expect(results.every((r) => r.fullName.includes("kol-repo"))).toBe(true);
+  });
+
+  it("falls back to search.repos when list yields fewer than 3 matches", async () => {
+    const cache = new ProviderResponseCache(openDatabase(":memory:"));
+    const listRepos = [{ full_name: "kol/recent-match" }];
+    const searchRepos = [
+      { full_name: "kol/recent-match" }, // duplicate — should be deduped
+      { full_name: "kol/old-match" },
+    ];
+    const provider = providerWithOctokit(cache, {
+      repos: { listForAuthenticatedUser: vi.fn().mockResolvedValue({ data: listRepos }) },
+      search: { repos: vi.fn().mockResolvedValue({ data: { items: searchRepos } }) },
+    }, "token");
+
+    const results = await provider.searchRepositories("match");
+    expect(results.map((r) => r.fullName)).toEqual(["kol/recent-match", "kol/old-match"]);
+  });
+
+  it("re-throws 401 authentication errors instead of swallowing them", async () => {
+    const cache = new ProviderResponseCache(openDatabase(":memory:"));
+    const authError = Object.assign(new Error("Bad credentials"), { status: 401 });
+    const provider = providerWithOctokit(cache, {
+      repos: { listForAuthenticatedUser: vi.fn().mockRejectedValue(authError) },
+      search: { repos: vi.fn() },
+    }, "token");
+
+    await expect(provider.searchRepositories("kol")).rejects.toThrow("Bad credentials");
+  });
+
+  it("re-throws 403 forbidden errors instead of swallowing them", async () => {
+    const cache = new ProviderResponseCache(openDatabase(":memory:"));
+    const forbiddenError = Object.assign(new Error("Forbidden"), { status: 403 });
+    const provider = providerWithOctokit(cache, {
+      repos: { listForAuthenticatedUser: vi.fn().mockRejectedValue(forbiddenError) },
+      search: { repos: vi.fn() },
+    }, "token");
+
+    await expect(provider.searchRepositories("kol")).rejects.toThrow("Forbidden");
+  });
+
+  it("returns empty array and logs for non-auth network failures", async () => {
+    const cache = new ProviderResponseCache(openDatabase(":memory:"));
+    const networkError = new Error("Network timeout");
+    const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const provider = providerWithOctokit(cache, {
+      repos: { listForAuthenticatedUser: vi.fn().mockRejectedValue(networkError) },
+      search: { repos: vi.fn() },
+    }, "token");
+
+    const results = await provider.searchRepositories("kol");
+    expect(results).toEqual([]);
+    expect(consoleSpy).toHaveBeenCalledWith(
+      expect.stringContaining("searchRepositories failed"),
+      expect.any(Error)
+    );
+    consoleSpy.mockRestore();
+  });
+});
+
 function providerWithOctokit(cache: ProviderResponseCache, octokit: object, token: string | null = null): GitHubProvider {
   const provider = new GitHubProvider(token, cache);
   Object.defineProperty(provider, "octokit", { value: octokit });

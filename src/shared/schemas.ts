@@ -542,7 +542,8 @@ export const appSettingsSchema = z.object({
   data: z.object({
     preferredMode: preferredDataModeSchema.default("auto"),
     managedRepoStorage: z.string().nullable().default(null),
-    worktreeCacheSizeGb: z.number().positive().default(20)
+    worktreeCacheSizeGb: z.number().positive().default(20),
+    localRepos: z.array(z.object({ fullName: z.string(), path: z.string() })).default([])
   }),
   ai: z.object({
     enabled: z.boolean().default(false),
@@ -673,7 +674,8 @@ export const managedWorktreeSchema = z.object({
   sizeBytes: z.number().int().nonnegative().default(0),
   title: z.string().optional(),
   headRef: z.string().optional(),
-  baseRef: z.string().optional()
+  baseRef: z.string().optional(),
+  gitDir: z.string().nullable().optional()
 });
 export type ManagedWorktree = z.infer<typeof managedWorktreeSchema>;
 
