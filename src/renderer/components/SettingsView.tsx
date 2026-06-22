@@ -1,9 +1,12 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Bot,
+  Check,
   Cog,
   Download,
+  Eraser,
   FileCode2,
+  Folder,
   Github,
   Info,
   KeyRound,
@@ -12,9 +15,11 @@ import {
   Plug,
   RefreshCw,
   Terminal,
+  Trash2,
   X,
 } from "lucide-react";
-import { useEffect, useId, useMemo, useRef, useState } from "react";
+import React, { forwardRef, useEffect, useId, useImperativeHandle, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { krtClient } from "../api/client.js";
 import { ModalBackdrop } from "./ExtensionsView.js";
 import type { IpcInput, IpcOutput } from "../../shared/ipc.js";
@@ -362,7 +367,7 @@ export function SettingsView({
               <GeneralSection
                 settings={settings}
                 updateSettings={updateSettings}
-              />
+                />
             ) : null}
             {settings && section === "appearance" ? (
               <AppearanceSection
@@ -509,6 +514,453 @@ interface SettingsSectionProps {
   updateSettings: (input: SettingsUpdateInput) => void;
 }
 
+interface SuggestionListHandle {
+  navigate: (dir: 1 | -1) => void;
+  selectHighlighted: () => boolean;
+}
+
+function IconTooltip({ label, children }: { label: string; children: React.ReactElement<React.ButtonHTMLAttributes<HTMLButtonElement>> }): React.JSX.Element {
+  const [rect, setRect] = useState<DOMRect | null>(null);
+  const child = React.cloneElement(children, {
+    onMouseEnter: (e: React.MouseEvent<HTMLButtonElement>) => {
+      setRect((e.currentTarget as HTMLButtonElement).getBoundingClientRect());
+      children.props.onMouseEnter?.(e);
+    },
+    onMouseLeave: (e: React.MouseEvent<HTMLButtonElement>) => {
+      setRect(null);
+      children.props.onMouseLeave?.(e);
+    },
+  });
+  return (
+    <>
+      {child}
+      {rect
+        ? createPortal(
+            <span
+              className="settings-icon-tooltip"
+              style={{ top: rect.top - 6, left: rect.left + rect.width / 2 }}
+            >
+              {label}
+            </span>,
+            document.body
+          )
+        : null}
+    </>
+  );
+}
+
+function anchorStyle(el: HTMLElement | null): React.CSSProperties | null {
+  if (!el) return null;
+  const r = el.getBoundingClientRect();
+  return { position: "fixed", top: r.bottom + 2, left: r.left, width: r.width, zIndex: 9999 };
+}
+
+function useAnchorStyle(anchorEl: HTMLElement | null): React.CSSProperties | null {
+  const [style, setStyle] = useState<React.CSSProperties | null>(() => anchorStyle(anchorEl));
+
+  useEffect(() => {
+    setStyle(anchorStyle(anchorEl));
+    if (!anchorEl) return;
+    const update = () => setStyle(anchorStyle(anchorEl));
+    window.addEventListener("scroll", update, { capture: true, passive: true });
+    window.addEventListener("resize", update, { passive: true });
+    return () => {
+      window.removeEventListener("scroll", update, { capture: true });
+      window.removeEventListener("resize", update);
+    };
+  }, [anchorEl]);
+
+  return style;
+}
+
+const RepoSuggestions = forwardRef<
+  SuggestionListHandle,
+  { query: string; onSelect: (fullName: string) => void; anchorEl: HTMLElement | null }
+>(function RepoSuggestions({ query, onSelect, anchorEl }, ref) {
+  const queryClient = useQueryClient();
+  const [highlighted, setHighlighted] = useState(-1);
+  const { data, isFetching, isError } = useQuery({
+    queryKey: ["repo-search", query],
+    queryFn: () => krtClient.repos.searchRepositories({ query }),
+    enabled: query.length >= 2,
+    staleTime: 30_000,
+    retry: false,
+  });
+
+  useEffect(() => {
+    if (isError) {
+      void queryClient.invalidateQueries({ queryKey: ["auth-status"] });
+    }
+  }, [isError, queryClient]);
+  const results = data ?? [];
+
+  useEffect(() => { setHighlighted(-1); }, [query]);
+
+  useImperativeHandle(ref, () => ({
+    navigate(dir) {
+      if (results.length === 0) return;
+      setHighlighted((i) => Math.max(-1, Math.min(i + dir, results.length - 1)));
+    },
+    selectHighlighted() {
+      if (highlighted < 0 || highlighted >= results.length) return false;
+      onSelect(results[highlighted].fullName);
+      return true;
+    },
+  }), [results, highlighted, onSelect]);
+
+  const style = useAnchorStyle(anchorEl);
+  if (!style || isError || (!isFetching && results.length === 0)) return null;
+
+  return createPortal(
+    <ul className="settings-repo-suggestions" role="listbox" style={style}>
+      {isFetching && results.length === 0 ? (
+        <li className="settings-repo-suggestion settings-repo-suggestion-loading">Searching…</li>
+      ) : (
+        results.map((r, i) => (
+          <li
+            key={r.fullName}
+            role="option"
+            aria-selected={i === highlighted}
+            className={`settings-repo-suggestion${i === highlighted ? " is-highlighted" : ""}`}
+            onMouseEnter={() => setHighlighted(i)}
+            onMouseDown={(e) => { e.preventDefault(); onSelect(r.fullName); }}
+          >
+            {r.fullName}
+          </li>
+        ))
+      )}
+    </ul>,
+    document.body
+  );
+});
+
+const PathSuggestions = forwardRef<
+  SuggestionListHandle,
+  { path: string; onSelect: (path: string) => void; anchorEl: HTMLElement | null }
+>(function PathSuggestions({ path, onSelect, anchorEl }, ref) {
+  const [highlighted, setHighlighted] = useState(-1);
+  const { data, isFetching } = useQuery({
+    queryKey: ["dir-list", path],
+    queryFn: () => krtClient.ui.listDirectory({ path }),
+    enabled: path.length >= 1,
+    staleTime: 5_000,
+    retry: false,
+  });
+  const results = data ?? [];
+
+  useEffect(() => { setHighlighted(-1); }, [path]);
+
+  useImperativeHandle(ref, () => ({
+    navigate(dir) {
+      if (results.length === 0) return;
+      setHighlighted((i) => Math.max(-1, Math.min(i + dir, results.length - 1)));
+    },
+    selectHighlighted() {
+      if (highlighted < 0 || highlighted >= results.length) return false;
+      onSelect(results[highlighted] + "/");
+      return true;
+    },
+  }), [results, highlighted, onSelect]);
+
+  const style = useAnchorStyle(anchorEl);
+  if (!style || (!isFetching && results.length === 0)) return null;
+
+  return createPortal(
+    <ul className="settings-repo-suggestions" role="listbox" style={style}>
+      {isFetching && results.length === 0 ? (
+        <li className="settings-repo-suggestion settings-repo-suggestion-loading">Searching…</li>
+      ) : (
+        results.map((p, i) => (
+          <li
+            key={p}
+            role="option"
+            aria-selected={i === highlighted}
+            className={`settings-repo-suggestion${i === highlighted ? " is-highlighted" : ""}`}
+            onMouseEnter={() => setHighlighted(i)}
+            onMouseDown={(e) => { e.preventDefault(); onSelect(p + "/"); }}
+          >
+            {p}
+          </li>
+        ))
+      )}
+    </ul>,
+    document.body
+  );
+});
+
+function LocalRepoList({ settings, updateSettings }: SettingsSectionProps): React.JSX.Element {
+  const queryClient = useQueryClient();
+  const githubConfigured = settings.github.configured;
+  const [repoQuery, setRepoQuery] = useState<Record<number, string>>({});
+  const [openRepoIdx, setOpenRepoIdx] = useState<number | null>(null);
+  const [openPathIdx, setOpenPathIdx] = useState<number | null>(null);
+  const [autoDetected, setAutoDetected] = useState<Record<number, boolean>>({});
+  const [cleaningUp, setCleaningUp] = useState<Record<number, "idle" | "running" | "done">>({});
+  const detectTimers = useRef<Record<number, ReturnType<typeof setTimeout>>>({});
+  const repoSugRefs = useRef(new Map<number, SuggestionListHandle>());
+  const pathSugRefs = useRef(new Map<number, SuggestionListHandle>());
+  const pathInputRefs = useRef(new Map<number, HTMLInputElement>());
+  const nameInputRefs = useRef(new Map<number, HTMLInputElement>());
+
+  function updateEntry(index: number, patch: Partial<{ fullName: string; path: string }>): void {
+    const next = [...(settings.data.localRepos ?? [])];
+    next[index] = { ...next[index], ...patch };
+    updateSettings({ data: { ...settings.data, localRepos: next } });
+  }
+
+  async function removeEntry(index: number): Promise<void> {
+    const entry = (settings.data.localRepos ?? [])[index];
+    if (entry?.fullName.includes("/")) {
+      const [owner, name] = entry.fullName.split("/");
+      try {
+        await krtClient.repos.cleanupWorktrees({
+          repository: { provider: "github", owner, name, fullName: entry.fullName },
+          maxEntries: 0,
+        });
+      } catch { /* best effort */ }
+    }
+    updateSettings({
+      data: { ...settings.data, localRepos: (settings.data.localRepos ?? []).filter((_, i) => i !== index) },
+    });
+  }
+
+  function scheduleDetect(index: number, path: string): void {
+    clearTimeout(detectTimers.current[index]);
+    if (!path) return;
+    detectTimers.current[index] = setTimeout(() => {
+      void krtClient.ui.detectLocalRepo({ path }).then((result) => {
+        if (!result.fullName) return;
+        // Read fresh settings from the cache — the closure's `settings` is stale
+        // by the time the timer fires (e.g. the user just clicked a suggestion).
+        const fresh = queryClient.getQueryData<AppSettings>(["settings"]);
+        const entries = fresh?.data.localRepos ?? [];
+        const current = entries[index];
+        if (!current) return;
+        if (!current.fullName || autoDetected[index]) {
+          updateSettings({
+            data: {
+              ...fresh!.data,
+              localRepos: entries.map((e: { fullName: string; path: string }, i: number) =>
+                i === index ? { ...e, fullName: result.fullName! } : e
+              ),
+            },
+          });
+          setAutoDetected((prev) => ({ ...prev, [index]: true }));
+        }
+      });
+    }, 500);
+  }
+
+  async function browse(index: number): Promise<void> {
+    try {
+      const current = settings.data.localRepos?.[index]?.path;
+      const result = await krtClient.ui.browseDirectory(current ? { defaultPath: current } : undefined);
+      if (result.path) {
+        updateEntry(index, { path: result.path });
+        scheduleDetect(index, result.path);
+      }
+    } catch { /* ignore */ }
+  }
+
+  async function cleanupRepo(index: number, fullName: string): Promise<void> {
+    const [owner, name] = fullName.split("/");
+    if (!owner || !name) return;
+    setCleaningUp((prev) => ({ ...prev, [index]: "running" }));
+    try {
+      await krtClient.repos.cleanupWorktrees({
+        repository: { provider: "github", owner, name, fullName },
+        maxEntries: 0,
+      });
+      setCleaningUp((prev) => ({ ...prev, [index]: "done" }));
+      setTimeout(() => setCleaningUp((prev) => ({ ...prev, [index]: "idle" })), 2000);
+    } catch {
+      setCleaningUp((prev) => ({ ...prev, [index]: "idle" }));
+    }
+  }
+
+  function scrollPathToEnd(index: number): void {
+    setTimeout(() => {
+      const input = pathInputRefs.current.get(index);
+      if (input) {
+        input.focus();
+        const len = input.value.length;
+        input.setSelectionRange(len, len);
+        input.scrollLeft = input.scrollWidth;
+      }
+    }, 0);
+  }
+
+  function handleRepoKeyDown(event: React.KeyboardEvent, index: number): void {
+    const ref = repoSugRefs.current.get(index);
+    if (!ref) return;
+    if (event.key === "ArrowDown") { event.preventDefault(); ref.navigate(1); }
+    else if (event.key === "ArrowUp") { event.preventDefault(); ref.navigate(-1); }
+    else if (event.key === "Enter") { if (ref.selectHighlighted()) event.preventDefault(); }
+    else if (event.key === "Escape") { setOpenRepoIdx(null); }
+  }
+
+  function handlePathKeyDown(event: React.KeyboardEvent, index: number): void {
+    const ref = pathSugRefs.current.get(index);
+    if (!ref) return;
+    if (event.key === "ArrowDown") { event.preventDefault(); ref.navigate(1); }
+    else if (event.key === "ArrowUp") { event.preventDefault(); ref.navigate(-1); }
+    else if (event.key === "Tab" || event.key === "Enter") {
+      if (ref.selectHighlighted()) {
+        event.preventDefault();
+        scrollPathToEnd(index);
+      }
+    }
+    else if (event.key === "Escape") { setOpenPathIdx(null); }
+  }
+
+  return (
+    <SettingsGroup
+      title="Local repositories"
+      hint="Map a GitHub repo to a local clone so KRT uses it instead of fetching its own mirror."
+    >
+      {(settings.data.localRepos ?? []).map((entry, index) => (
+        <div key={index} className="settings-row">
+          <div className="settings-local-repo-fields">
+            {/* Path first */}
+            <div className="settings-local-repo-path-wrap">
+              <input
+                ref={(el) => {
+                  if (el) pathInputRefs.current.set(index, el);
+                  else pathInputRefs.current.delete(index);
+                }}
+                className="settings-input"
+                value={entry.path}
+                placeholder="/path/to/local/repo"
+                autoComplete="off"
+                onChange={(event) => {
+                  updateEntry(index, { path: event.target.value });
+                  setOpenPathIdx(index);
+                  scheduleDetect(index, event.target.value);
+                }}
+                onFocus={() => setOpenPathIdx(index)}
+                onBlur={() => setTimeout(() => setOpenPathIdx(null), 150)}
+                onKeyDown={(e) => handlePathKeyDown(e, index)}
+              />
+              {openPathIdx === index && entry.path.length >= 1 ? (
+                <PathSuggestions
+                  ref={(handle) => {
+                    if (handle) pathSugRefs.current.set(index, handle);
+                    else pathSugRefs.current.delete(index);
+                  }}
+                  anchorEl={pathInputRefs.current.get(index) ?? null}
+                  path={entry.path}
+                  onSelect={(p) => {
+                    updateEntry(index, { path: p });
+                    setOpenPathIdx(index);
+                    scrollPathToEnd(index);
+                    scheduleDetect(index, p);
+                  }}
+                />
+              ) : null}
+            </div>
+            {/* owner/repo second */}
+            <div className="settings-local-repo-name-wrap">
+              <input
+                ref={(el) => {
+                  if (el) nameInputRefs.current.set(index, el);
+                  else nameInputRefs.current.delete(index);
+                }}
+                className="settings-input"
+                value={entry.fullName}
+                placeholder="owner/repo"
+                autoComplete="off"
+                onChange={(event) => {
+                  updateEntry(index, { fullName: event.target.value });
+                  setAutoDetected((prev) => ({ ...prev, [index]: false }));
+                  setRepoQuery((q) => ({ ...q, [index]: event.target.value }));
+                  setOpenRepoIdx(index);
+                }}
+                onFocus={() => {
+                  if (entry.fullName) setRepoQuery((q) => ({ ...q, [index]: entry.fullName }));
+                  setOpenRepoIdx(index);
+                }}
+                onBlur={() => setTimeout(() => setOpenRepoIdx(null), 150)}
+                onKeyDown={(e) => handleRepoKeyDown(e, index)}
+              />
+              {autoDetected[index] ? (
+                <span className="settings-local-repo-detected">autodetected</span>
+              ) : null}
+              {openRepoIdx === index && githubConfigured && (repoQuery[index]?.length ?? 0) >= 2 ? (
+                <RepoSuggestions
+                  ref={(handle) => {
+                    if (handle) repoSugRefs.current.set(index, handle);
+                    else repoSugRefs.current.delete(index);
+                  }}
+                  anchorEl={nameInputRefs.current.get(index) ?? null}
+                  query={repoQuery[index]}
+                  onSelect={(fullName) => {
+                    updateEntry(index, { fullName });
+                    setAutoDetected((prev) => ({ ...prev, [index]: false }));
+                    setOpenRepoIdx(null);
+                  }}
+                />
+              ) : null}
+            </div>
+          </div>
+          <div className="settings-local-repo-actions">
+            <IconTooltip label="Browse for local directory">
+              <button
+                type="button"
+                className="settings-icon-button"
+                aria-label="Browse for local directory"
+                onClick={() => void browse(index)}
+              >
+                <Folder size={13} aria-hidden="true" />
+              </button>
+            </IconTooltip>
+            <IconTooltip label="Clean up inactive worktrees created by KRT for this repo">
+              <button
+                type="button"
+                className="settings-icon-button"
+                aria-label="Clean up worktrees"
+                disabled={!entry.fullName.includes("/") || cleaningUp[index] === "running"}
+                onClick={() => void cleanupRepo(index, entry.fullName)}
+              >
+                {cleaningUp[index] === "done" ? (
+                  <Check size={13} aria-hidden="true" />
+                ) : (
+                  <Eraser size={13} aria-hidden="true" />
+                )}
+              </button>
+            </IconTooltip>
+            <IconTooltip label="Remove this repository mapping">
+              <button
+                type="button"
+                className="settings-icon-button"
+                aria-label="Remove repository mapping"
+                onClick={() => void removeEntry(index)}
+              >
+                <Trash2 size={13} aria-hidden="true" />
+              </button>
+            </IconTooltip>
+          </div>
+        </div>
+      ))}
+      <div className="settings-row is-last">
+        <button
+          type="button"
+          className="settings-local-repo-add"
+          onClick={() =>
+            updateSettings({
+              data: {
+                ...settings.data,
+                localRepos: [...(settings.data.localRepos ?? []), { fullName: "", path: "" }],
+              },
+            })
+          }
+        >
+          + Add repository
+        </button>
+      </div>
+    </SettingsGroup>
+  );
+}
+
 function GeneralSection({
   settings,
   updateSettings,
@@ -580,11 +1032,13 @@ function GeneralSection({
           />
         </SettingsRow>
       </SettingsGroup>
+      <LocalRepoList settings={settings} updateSettings={updateSettings} />
     </>
   );
 }
 
 function AppearanceSection({
+
   settings,
   updateSettings,
 }: SettingsSectionProps): React.JSX.Element {

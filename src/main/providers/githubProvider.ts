@@ -873,6 +873,52 @@ export class GitHubProvider implements Provider {
     }
   }
 
+  async searchRepositories(query: string): Promise<Array<{ fullName: string }>> {
+    if (!this.token) {
+      return [];
+    }
+    const lower = query.toLowerCase();
+    try {
+      // listForAuthenticatedUser returns private repos; search.repos indexes
+      // are eventually-consistent and may miss recent private repos, so prefer
+      // the list endpoint. Fall back to search when the list yields few results
+      // (e.g. the repo is beyond the first 100 by recency).
+      const { data } = await this.octokit.repos.listForAuthenticatedUser({
+        per_page: 100,
+        sort: "pushed",
+        affiliation: "owner,collaborator,organization_member",
+      });
+      const fromList = data
+        .filter((r) => r.full_name.toLowerCase().includes(lower))
+        .slice(0, 10)
+        .map((r) => ({ fullName: r.full_name }));
+
+      if (fromList.length >= 3) return fromList;
+
+      // Supplement with search.repos to catch repos not in the first page.
+      try {
+        const { data: searchData } = await this.octokit.search.repos({
+          q: `${query} in:name`,
+          per_page: 10,
+        });
+        const seen = new Set(fromList.map((r) => r.fullName));
+        const fromSearch = searchData.items
+          .map((r) => ({ fullName: r.full_name }))
+          .filter((r) => !seen.has(r.fullName));
+        return [...fromList, ...fromSearch].slice(0, 10);
+      } catch {
+        return fromList;
+      }
+    } catch (error) {
+      const status = (error as { status?: number }).status;
+      if (status === 401 || status === 403) {
+        throw error; // auth failure — propagate so the renderer knows to re-authenticate
+      }
+      console.error("[GitHubProvider] searchRepositories failed:", error);
+      return [];
+    }
+  }
+
   async openPullRequest(repository: RepositoryRef, number: number, mode: "light" | "managed"): Promise<PullRequestBundle> {
     const detail = await this.getPullRequest(repository, number);
     const [changedFiles, timeline, reviewThreads, checks] = await Promise.all([

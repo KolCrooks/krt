@@ -1,4 +1,8 @@
-import { isAbsolute } from "node:path";
+import { isAbsolute, join } from "node:path";
+import { existsSync } from "node:fs";
+import { readdir, readFile, stat } from "node:fs/promises";
+import { homedir } from "node:os";
+import { dialog } from "electron";
 import { ZodError } from "zod";
 import { ipcContract, type IpcChannel, type IpcOutput, type IpcParsedInput } from "../shared/ipc.js";
 import type { ProviderRegistry } from "./providers/providerRegistry.js";
@@ -676,7 +680,63 @@ function createIpcHandlers(context: IpcHandlerContext): HandlerMap {
     },
     "perf:record": (input) => context.perf.record(input),
     "operations:progressSnapshot": (input) => context.operations.get(input.operationId),
-    "operations:cancel": (input) => context.operations.cancel(input.operationId)
+    "operations:cancel": (input) => context.operations.cancel(input.operationId),
+
+    "ui:browseDirectory": async (input) => {
+      const result = await dialog.showOpenDialog({
+        properties: ["openDirectory"],
+        ...(input?.defaultPath ? { defaultPath: input.defaultPath } : {})
+      });
+      return { path: result.canceled || result.filePaths.length === 0 ? null : result.filePaths[0] };
+    },
+
+    "repos:searchRepositories": async (input) => {
+      const token = await context.providers.getGitHubToken();
+      if (!token) return [];
+      const provider = await context.providers.get("github");
+      return provider.searchRepositories(input.query);
+    },
+
+    "ui:detectLocalRepo": async (input) => {
+      try {
+        const p = input.path.replace(/^~/, homedir());
+        for (const configPath of [join(p, ".git", "config"), join(p, "config")]) {
+          if (!existsSync(configPath)) continue;
+          const text = await readFile(configPath, "utf8");
+          const match = text.match(/url\s*=\s*(?:https?:\/\/github\.com\/|git@github\.com:)([^/\s]+\/[^/\s]+?)(?:\.git)?\s*$/m);
+          if (match) return { fullName: match[1] };
+        }
+      } catch { /* ignore */ }
+      return { fullName: null };
+    },
+
+    "ui:listDirectory": async (input) => {
+      const partialPath = input.path.replace(/^~/, homedir());
+      const lastSlash = partialPath.lastIndexOf("/");
+      const dir = lastSlash > 0 ? partialPath.slice(0, lastSlash) : lastSlash === 0 ? "/" : ".";
+      const prefix = lastSlash >= 0 ? partialPath.slice(lastSlash + 1) : partialPath;
+      try {
+        const entries = await readdir(dir, { withFileTypes: true });
+        const candidates = entries.filter(
+          (e) => (e.isDirectory() || e.isSymbolicLink()) && (prefix === "" || e.name.startsWith(prefix))
+        );
+        const results: string[] = [];
+        for (const e of candidates) {
+          if (results.length >= 12) break;
+          if (e.isDirectory()) {
+            results.push(join(dir, e.name));
+          } else {
+            try {
+              const s = await stat(join(dir, e.name));
+              if (s.isDirectory()) results.push(join(dir, e.name));
+            } catch { /* broken symlink */ }
+          }
+        }
+        return results;
+      } catch {
+        return [];
+      }
+    }
   };
 }
 

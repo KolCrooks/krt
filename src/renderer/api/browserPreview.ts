@@ -209,7 +209,7 @@ const tour: ReviewTour = {
 export function createBrowserPreviewApi(): KrtApi {
   const settings: AppSettings = {
     appearance: { accentColor: "#4f46e5", density: "compact" },
-    data: { preferredMode: "auto", managedRepoStorage: null, worktreeCacheSizeGb: 20 },
+    data: { preferredMode: "auto", managedRepoStorage: null, worktreeCacheSizeGb: 20, localRepos: [] },
     ai: {
       enabled: false,
       provider: "disabled",
@@ -403,7 +403,13 @@ export function createBrowserPreviewApi(): KrtApi {
         freedBytes: 0,
         dryRun: input.dryRun ?? false
       }),
-      onWorkspaceFileChange: () => () => undefined
+      onWorkspaceFileChange: () => () => undefined,
+      searchRepositories: async () => []
+    },
+    ui: {
+      browseDirectory: async () => ({ path: null }),
+      listDirectory: async () => [],
+      detectLocalRepo: async () => ({ fullName: null })
     },
     pullRequests: {
       search: async () => [summaryFromBundle(bundle)],

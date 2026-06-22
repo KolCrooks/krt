@@ -80,6 +80,7 @@ const api = {
     deleteWorktree: (input: IpcInput<"repos:deleteWorktree">) => invoke("repos:deleteWorktree", input),
     listManagedWorktrees: (input?: IpcInput<"repos:listManagedWorktrees">) => invoke("repos:listManagedWorktrees", input),
     cleanupWorktrees: (input: IpcInput<"repos:cleanupWorktrees">) => invoke("repos:cleanupWorktrees", input),
+    searchRepositories: (input: IpcInput<"repos:searchRepositories">) => invoke("repos:searchRepositories", input),
     onWorkspaceFileChange: (listener: (change: WorkspaceFileChange) => void) => {
       const handler = (_event: Electron.IpcRendererEvent, rawChange: WorkspaceFileChange) =>
         listener(rawChange);
@@ -139,6 +140,11 @@ const api = {
     list: () => invoke("extensions:list"),
     logs: (input?: IpcInput<"extensions:logs">) => invoke("extensions:logs", input),
     setEnabled: (input: IpcInput<"extensions:setEnabled">) => invoke("extensions:setEnabled", input)
+  },
+  ui: {
+    browseDirectory: (input?: IpcInput<"ui:browseDirectory">) => invoke("ui:browseDirectory", input),
+    listDirectory: (input: IpcInput<"ui:listDirectory">) => invoke("ui:listDirectory", input),
+    detectLocalRepo: (input: IpcInput<"ui:detectLocalRepo">) => invoke("ui:detectLocalRepo", input)
   },
   perf: {
     record: (input: IpcInput<"perf:record">) => invoke("perf:record", input)

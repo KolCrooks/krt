@@ -148,6 +148,42 @@ export class RepoService {
     return Promise.resolve({ operationId, mode: "managed", worktreePath });
   }
 
+  private localRepoDirs(repository: RepositoryRef): { gitDir: string; workDir: string } | null {
+    const settings = this.getSettings?.();
+    if (!settings) return null;
+    const fullName = `${repository.owner}/${repository.name}`;
+    const entry = settings.data.localRepos.find((r) => r.fullName === fullName);
+    if (!entry?.path) return null;
+    // Regular repo: path/.git exists → workDir is path, gitDir is path/.git.
+    // Bare repo: no .git subdir → both workDir and gitDir are path.
+    const dotGit = join(entry.path, ".git");
+    if (existsSync(dotGit)) return { gitDir: dotGit, workDir: entry.path };
+    return { gitDir: entry.path, workDir: entry.path };
+  }
+
+  private localGitDir(repository: RepositoryRef): string | null {
+    return this.localRepoDirs(repository)?.gitDir ?? null;
+  }
+
+  private async resolveRemoteName(gitDir: string, repository: RepositoryRef): Promise<string> {
+    const candidates = [
+      `https://github.com/${repository.owner}/${repository.name}.git`,
+      `https://github.com/${repository.owner}/${repository.name}`,
+      `git@github.com:${repository.owner}/${repository.name}.git`,
+      `git@github.com:${repository.owner}/${repository.name}`,
+    ];
+    try {
+      const output = await this.runGitForOutput(["--git-dir", gitDir, "remote", "-v"], { allowFailure: true });
+      for (const line of output.split("\n")) {
+        const m = line.match(/^(\S+)\s+(\S+)\s+\(fetch\)/);
+        if (m && candidates.includes(m[2])) return m[1];
+      }
+    } catch { /* fall through */ }
+    return "origin";
+  }
+
+
+
   private async runCheckout(
     input: {
       repository: RepositoryRef;
@@ -166,11 +202,17 @@ export class RepoService {
       await mkdir(this.worktreeRoot(input.repository), { recursive: true });
       const gitEnv = await this.gitNetworkEnvironment(input.repository);
 
-      if (!existsSync(worktreePath) && existsSync(mirrorPath) && !(await this.isUsableMirror(mirrorPath))) {
+      // If the user has configured a local repo for this repository, use its git
+      // dir instead of the managed bare clone — skipping the clone step entirely.
+      const localRepoDirs = this.localRepoDirs(input.repository);
+      const localGitDir = localRepoDirs?.gitDir ?? null;
+      const effectiveGitDir = localGitDir ?? mirrorPath;
+
+      if (!localGitDir && !existsSync(worktreePath) && existsSync(mirrorPath) && !(await this.isUsableMirror(mirrorPath))) {
         await rm(mirrorPath, { recursive: true, force: true });
       }
 
-      if (!existsSync(mirrorPath)) {
+      if (!localGitDir && !existsSync(mirrorPath)) {
         this.operations.update({
           operationId,
           phase: "clone",
@@ -201,8 +243,12 @@ export class RepoService {
         cancelled: false
       });
 
+      const remote = localGitDir
+        ? await this.resolveRemoteName(localGitDir, input.repository)
+        : "origin";
+
       await this.runGit(
-        ["--git-dir", mirrorPath, "fetch", "origin", `refs/heads/${input.baseRef}:refs/krt/base/${input.number}`],
+        ["--git-dir", effectiveGitDir, "fetch", remote, `refs/heads/${input.baseRef}:refs/krt/base/${input.number}`],
         {
           allowFailure: true,
           operationId,
@@ -211,7 +257,7 @@ export class RepoService {
         }
       );
       await this.runGit(
-        ["--git-dir", mirrorPath, "fetch", "origin", `pull/${input.number}/head:refs/krt/head/${input.number}`],
+        ["--git-dir", effectiveGitDir, "fetch", remote, `pull/${input.number}/head:refs/krt/head/${input.number}`],
         {
           allowFailure: true,
           operationId,
@@ -219,7 +265,7 @@ export class RepoService {
           timeoutMs: GIT_NETWORK_TIMEOUT_MS
         }
       );
-      await this.runGit(["--git-dir", mirrorPath, "fetch", "origin", input.headSha], {
+      await this.runGit(["--git-dir", effectiveGitDir, "fetch", remote, input.headSha], {
         allowFailure: true,
         operationId,
         env: gitEnv,
@@ -236,7 +282,8 @@ export class RepoService {
           done: false,
           cancelled: false
         });
-        await this.runGit(worktreeAddArgs(mirrorPath, worktreePath, input.headSha), {
+
+        await this.runGit(worktreeAddArgs(effectiveGitDir, worktreePath, input.headSha), {
           operationId
         });
       }
@@ -244,10 +291,10 @@ export class RepoService {
       this.operations.assertNotCancelled(operationId);
       this.db
         .prepare(
-          `INSERT INTO worktrees (provider, owner, repo, number, head_sha, head_ref, base_ref, worktree_path, last_used_at, active)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+          `INSERT INTO worktrees (provider, owner, repo, number, head_sha, head_ref, base_ref, worktree_path, git_dir, last_used_at, active)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
            ON CONFLICT(provider, owner, repo, number, head_sha)
-           DO UPDATE SET head_ref = excluded.head_ref, base_ref = excluded.base_ref, worktree_path = excluded.worktree_path, last_used_at = excluded.last_used_at, active = 1`
+           DO UPDATE SET head_ref = excluded.head_ref, base_ref = excluded.base_ref, worktree_path = excluded.worktree_path, git_dir = excluded.git_dir, last_used_at = excluded.last_used_at, active = 1`
         )
         .run(
           input.repository.provider,
@@ -258,6 +305,7 @@ export class RepoService {
           input.headRef,
           input.baseRef,
           worktreePath,
+          localGitDir ?? null,
           new Date().toISOString()
         );
 
@@ -306,8 +354,11 @@ export class RepoService {
   }
 
   async getLocalFilePatch(repository: RepositoryRef, number: number, path: string, headSha: string): Promise<FilePatch | null> {
+    const localGitDir = this.localGitDir(repository);
     const mirrorPath = this.mirrorPath(repository);
-    if (!existsSync(mirrorPath)) {
+    const effectiveGitDir = localGitDir ?? mirrorPath;
+
+    if (!localGitDir && !existsSync(mirrorPath)) {
       return null;
     }
 
@@ -317,7 +368,7 @@ export class RepoService {
     const patch = await this.runGitForOutput(
       [
         "--git-dir",
-        mirrorPath,
+        effectiveGitDir,
         "diff",
         "--no-ext-diff",
         "--no-color",
@@ -470,6 +521,35 @@ export class RepoService {
     return { released: result.changes > 0 };
   }
 
+  private async removeWorktreeFiles(worktree: ManagedWorktree): Promise<void> {
+    // When a worktree was created from a user-managed local repo we must tell
+    // git to unregister it first; a plain rm -rf leaves stale entries in the
+    // local repo's worktree list.
+    if (worktree.gitDir) {
+      if (existsSync(worktree.worktreePath)) {
+        await this.runGitForOutput(
+          ["--git-dir", worktree.gitDir, "worktree", "remove", "--force", worktree.worktreePath],
+          { allowFailure: true }
+        );
+        // If the git dir was moved or deleted the command fails silently.
+        // Fall back to a plain recursive delete so the directory is never
+        // left orphaned with no way for later cleanup to find it.
+        if (existsSync(worktree.worktreePath)) {
+          await rm(worktree.worktreePath, { recursive: true, force: true });
+        }
+      } else {
+        // Path already gone — prune stale worktree entry from the git index.
+        await this.runGitForOutput(
+          ["--git-dir", worktree.gitDir, "worktree", "prune"],
+          { allowFailure: true }
+        );
+      }
+    } else if (this.isInsideWorktreeRoot(worktree.worktreePath)) {
+      await rm(worktree.worktreePath, { recursive: true, force: true });
+    }
+  }
+
+
   async deleteWorktree(input: {
     repository: RepositoryRef;
     number: number;
@@ -483,9 +563,7 @@ export class RepoService {
       return { deleted: false, worktree: null };
     }
 
-    if (this.isInsideWorktreeRoot(worktree.worktreePath)) {
-      await rm(worktree.worktreePath, { recursive: true, force: true });
-    }
+    await this.removeWorktreeFiles(worktree);
 
     const result = this.db
       .prepare(
@@ -531,7 +609,7 @@ export class RepoService {
     const rows = repository
       ? (this.db
           .prepare(
-            `SELECT provider, owner, repo, number, head_sha, head_ref, base_ref, worktree_path, last_used_at, active
+            `SELECT provider, owner, repo, number, head_sha, head_ref, base_ref, worktree_path, git_dir, last_used_at, active
              FROM worktrees
              WHERE provider = ? AND owner = ? AND repo = ?
              ORDER BY last_used_at DESC`
@@ -539,7 +617,7 @@ export class RepoService {
           .all(repository.provider, repository.owner, repository.name) as WorktreeRow[])
       : (this.db
           .prepare(
-            `SELECT provider, owner, repo, number, head_sha, head_ref, base_ref, worktree_path, last_used_at, active
+            `SELECT provider, owner, repo, number, head_sha, head_ref, base_ref, worktree_path, git_dir, last_used_at, active
              FROM worktrees
              ORDER BY last_used_at DESC`
           )
@@ -585,9 +663,7 @@ export class RepoService {
 
     if (!dryRun) {
       for (const worktree of deleted) {
-        if (this.isInsideWorktreeRoot(worktree.worktreePath)) {
-          await rm(worktree.worktreePath, { recursive: true, force: true });
-        }
+        await this.removeWorktreeFiles(worktree);
         this.db
           .prepare(
             `DELETE FROM worktrees
@@ -709,7 +785,8 @@ export class RepoService {
       sizeBytes: await this.directorySize(row.worktree_path),
       title: cachedMetadata.title,
       headRef: stringValue(row.head_ref) ?? cachedMetadata.headRef,
-      baseRef: stringValue(row.base_ref) ?? cachedMetadata.baseRef
+      baseRef: stringValue(row.base_ref) ?? cachedMetadata.baseRef,
+      gitDir: stringValue(row.git_dir) ?? null
     };
   }
 
@@ -1040,6 +1117,7 @@ type WorktreeRow = {
   head_ref: string | null;
   base_ref: string | null;
   worktree_path: string;
+  git_dir: string | null;
   last_used_at: string;
   active: number;
 };

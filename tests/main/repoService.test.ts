@@ -447,21 +447,154 @@ describe("RepoService managed worktree reads", () => {
   });
 });
 
+describe("RepoService local repo support", () => {
+  it("localGitDir returns null when getSettings is not provided", async () => {
+    const root = await mkdtemp(join(tmpdir(), "krt2-local-repo-"));
+    const paths = createAppPaths(root);
+    const db = openDatabase(":memory:");
+    const service = new RepoService(paths, db, new OperationService());
+
+    // No getSettings injected — should silently return null (falls back to bare clone).
+    const worktrees = await service.listManagedWorktrees(repository);
+    expect(worktrees).toHaveLength(0);
+    // The public observable effect: selectMode treats repository as unmanaged.
+    expect(service.selectMode(repository, "auto", "abc123")).toMatchObject({ mode: "light" });
+  });
+
+  it("localGitDir resolves to path/.git for a regular cloned repo", async () => {
+    const root = await mkdtemp(join(tmpdir(), "krt2-local-repo-"));
+    const paths = createAppPaths(root);
+    const db = openDatabase(":memory:");
+    const operations = new OperationService();
+    const repoPath = join(root, "my-repo");
+    const dotGit = join(repoPath, ".git");
+    await mkdir(dotGit, { recursive: true });
+
+    const service = new RepoService(paths, db, operations, {
+      getSettings: () => ({
+        ...defaultAppSettings,
+        data: {
+          ...defaultAppSettings.data,
+          localRepos: [{ fullName: "kol/repo", path: repoPath }],
+        },
+      }),
+    });
+
+    // Verify via checkout that it picks up the local git dir and stores it in the DB.
+    const mirrorPath = join(paths.repos, "github", "kol", "repo", "mirror.git");
+    const worktreePath = join(paths.worktrees, "github", "kol", "repo", "12-abc123");
+    await mkdir(mirrorPath, { recursive: true });
+    await mkdir(worktreePath, { recursive: true });
+
+    const result = await service.checkoutPullRequest({
+      repository,
+      number: 12,
+      headRef: "feature",
+      baseRef: "main",
+      headSha: "abc123",
+    });
+    await waitForOperationDone(operations, result.operationId);
+
+    const worktrees = await service.listManagedWorktrees(repository);
+    // The git_dir stored in DB should be path/.git, not the mirror path.
+    expect(worktrees[0]?.gitDir).toBe(dotGit);
+  });
+
+  it("localGitDir treats a path with no .git subdir as a bare repo and uses the path itself", async () => {
+    const root = await mkdtemp(join(tmpdir(), "krt2-bare-repo-"));
+    const paths = createAppPaths(root);
+    const db = openDatabase(":memory:");
+    const operations = new OperationService();
+    const bareRepoPath = join(root, "bare.git");
+    // Bare repo: the path itself is the git dir (no .git subdir).
+    await mkdir(bareRepoPath, { recursive: true });
+
+    const service = new RepoService(paths, db, operations, {
+      getSettings: () => ({
+        ...defaultAppSettings,
+        data: {
+          ...defaultAppSettings.data,
+          localRepos: [{ fullName: "kol/repo", path: bareRepoPath }],
+        },
+      }),
+    });
+
+    const mirrorPath = join(paths.repos, "github", "kol", "repo", "mirror.git");
+    const worktreePath = join(paths.worktrees, "github", "kol", "repo", "12-abc123");
+    await mkdir(mirrorPath, { recursive: true });
+    await mkdir(worktreePath, { recursive: true });
+
+    const result = await service.checkoutPullRequest({
+      repository,
+      number: 12,
+      headRef: "feature",
+      baseRef: "main",
+      headSha: "abc123",
+    });
+    await waitForOperationDone(operations, result.operationId);
+
+    const worktrees = await service.listManagedWorktrees(repository);
+    // For a bare repo the gitDir should be the path itself, not path/.git.
+    expect(worktrees[0]?.gitDir).toBe(bareRepoPath);
+  });
+
+
+  it("removeWorktreeFiles uses git worktree prune when gitDir is set but path is already gone", async () => {
+    const root = await mkdtemp(join(tmpdir(), "krt2-prune-"));
+    const paths = createAppPaths(root);
+    const db = openDatabase(":memory:");
+    const gitCommands: string[][] = [];
+    const service = new RepoService(paths, db, new OperationService());
+
+    const gitDir = join(root, "repo.git");
+    const worktreePath = join(root, "worktree-already-gone");
+    // worktreePath intentionally NOT created — simulates already-deleted path.
+    await mkdir(gitDir, { recursive: true });
+
+    db.prepare(
+      `INSERT INTO worktrees (provider, owner, repo, number, head_sha, worktree_path, last_used_at, active, git_dir)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?)`
+    ).run("github", "kol", "repo", 12, "abc123", worktreePath, new Date().toISOString(), gitDir);
+
+    // Spy on the private runGitForOutput to capture git calls.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const spy = vi.spyOn(service as any, "runGitForOutput").mockResolvedValue("");
+    const result = await service.deleteWorktree({ repository, number: 12, headSha: "abc123" });
+
+    expect(result.deleted).toBe(true);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const pruneCall = spy.mock.calls.find((call: any[]) =>
+      (call[0] as string[]).includes("prune")
+    );
+    expect(pruneCall).toBeDefined();
+    expect(pruneCall![0]).toContain("--git-dir");
+    expect(pruneCall![0]).toContain(gitDir);
+  });
+});
+
 function insertWorktree(
   db: ReturnType<typeof openDatabase>,
   headSha: string,
   worktreePath: string,
   lastUsedAt: string,
-  active: 0 | 1
+  active: 0 | 1,
+  gitDir?: string
 ): void {
-  db.prepare(
-    `INSERT INTO worktrees (provider, owner, repo, number, head_sha, worktree_path, last_used_at, active)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
-  ).run("github", "kol", "repo", 12, headSha, worktreePath, lastUsedAt, active);
+  if (gitDir !== undefined) {
+    db.prepare(
+      `INSERT INTO worktrees (provider, owner, repo, number, head_sha, worktree_path, last_used_at, active, git_dir)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).run("github", "kol", "repo", 12, headSha, worktreePath, lastUsedAt, active, gitDir);
+  } else {
+    db.prepare(
+      `INSERT INTO worktrees (provider, owner, repo, number, head_sha, worktree_path, last_used_at, active)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+    ).run("github", "kol", "repo", 12, headSha, worktreePath, lastUsedAt, active);
+  }
 }
 
-async function waitForOperationDone(operations: OperationService, operationId: string): Promise<void> {
-  for (let attempt = 0; attempt < 20; attempt += 1) {
+async function waitForOperationDone(operations: OperationService, operationId: string, maxAttempts = 20): Promise<void> {
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
     if (operations.get(operationId)?.done) {
       return;
     }

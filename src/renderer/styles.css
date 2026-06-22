@@ -6715,6 +6715,19 @@ button.rev-tab {
   animation: spin 1s linear infinite;
 }
 
+.settings-icon-tooltip {
+  background: var(--ink);
+  border-radius: 5px;
+  color: var(--bg);
+  font-size: 11px;
+  padding: 4px 8px;
+  pointer-events: none;
+  position: fixed;
+  transform: translate(-50%, -100%) translateY(-6px);
+  white-space: nowrap;
+  z-index: 9999;
+}
+
 .settings-discover-status {
   color: var(--ink-3);
   font-size: 11px;
@@ -7245,6 +7258,96 @@ button.rev-tab {
   .modal-list {
     border-bottom: 1px solid var(--line);
   }
+}
+
+/* Local repo mapping rows */
+.settings-local-repo-fields {
+  display: flex;
+  flex: 1;
+  gap: 8px;
+  min-width: 0;
+}
+
+.settings-local-repo-name-wrap {
+  flex: 0 0 190px;
+  position: relative;
+}
+
+.settings-local-repo-path-wrap {
+  flex: 1;
+  min-width: 0;
+  position: relative;
+}
+
+.settings-local-repo-detected {
+  color: var(--ink-3);
+  font-size: 10px;
+  pointer-events: none;
+  position: absolute;
+  right: 8px;
+  top: 50%;
+  transform: translateY(-50%);
+}
+
+.settings-local-repo-name-wrap .settings-input,
+.settings-local-repo-path-wrap .settings-input {
+  width: 100%;
+}
+
+.settings-local-repo-name-wrap:has(.settings-local-repo-detected) .settings-input {
+  padding-right: 88px;
+}
+
+.settings-local-repo-actions {
+  display: flex;
+  flex-shrink: 0;
+  gap: 4px;
+}
+
+.settings-local-repo-add {
+  background: none;
+  border: none;
+  color: var(--accent);
+  cursor: pointer;
+  font-family: var(--font-sans);
+  font-size: 12px;
+  padding: 0;
+}
+
+.settings-local-repo-add:hover {
+  text-decoration: underline;
+}
+
+.settings-repo-suggestions {
+  background: var(--bg-elev);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  box-shadow: 0 4px 12px rgb(0 0 0 / 12%);
+  list-style: none;
+  margin: 0;
+  max-height: 180px;
+  overflow-y: auto;
+  padding: 4px;
+  position: fixed;
+  z-index: 9999;
+}
+
+.settings-repo-suggestion {
+  border-radius: 4px;
+  color: var(--ink);
+  cursor: pointer;
+  font-size: 12px;
+  padding: 5px 8px;
+}
+
+.settings-repo-suggestion.is-highlighted,
+.settings-repo-suggestion:hover {
+  background: var(--bg-soft);
+}
+
+.settings-repo-suggestion-loading {
+  color: var(--ink-3);
+  cursor: default;
 }
 
 @media (prefers-reduced-motion: reduce) {

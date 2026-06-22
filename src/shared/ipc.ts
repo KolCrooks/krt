@@ -77,7 +77,8 @@ const settingsUpdateInput = z.object({
     .object({
       preferredMode: preferredDataModeSchema,
       managedRepoStorage: z.string().nullable(),
-      worktreeCacheSizeGb: z.number().positive()
+      worktreeCacheSizeGb: z.number().positive(),
+      localRepos: z.array(z.object({ fullName: z.string(), path: z.string() }))
     })
     .partial()
     .optional(),
@@ -517,6 +518,22 @@ export const ipcContract = {
   "operations:cancel": {
     input: z.object({ operationId: z.string() }),
     output: operationProgressSchema.nullable()
+  },
+  "repos:searchRepositories": {
+    input: z.object({ query: z.string() }),
+    output: z.array(z.object({ fullName: z.string() }))
+  },
+  "ui:browseDirectory": {
+    input: z.object({ defaultPath: z.string().optional() }).optional(),
+    output: z.object({ path: z.string().nullable() })
+  },
+  "ui:listDirectory": {
+    input: z.object({ path: z.string() }),
+    output: z.array(z.string())
+  },
+  "ui:detectLocalRepo": {
+    input: z.object({ path: z.string() }),
+    output: z.object({ fullName: z.string().nullable() })
   }
 } as const;
 
