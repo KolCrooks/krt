@@ -1,3 +1,4 @@
+import { DEFAULT_AI_MODELS } from "../../../shared/aiModels.js";
 import type { AiProvider, AppSettings } from "../../../shared/schemas.js";
 import type { AssistantTurn, BuildRequestArgs, ProviderAdapter, ToolCall, ToolDef } from "./types.js";
 import {
@@ -36,7 +37,7 @@ const anthropicAdapter: ProviderAdapter = {
     if (!apiKey) {
       return null;
     }
-    const model = settings.ai.model || "claude-sonnet-4-5";
+    const model = settings.ai.model || DEFAULT_AI_MODELS.anthropic;
     const thinking = settings.ai.thinkingEnabled && modelSupportsThinking(model);
     const nativeMessages = messages.map((message) => {
       if (message.role === "user") {
@@ -163,7 +164,7 @@ const openAiAdapter: ProviderAdapter = {
         method: "POST",
         headers: { ...JSON_HEADERS, authorization: `Bearer ${apiKey}` },
         body: JSON.stringify({
-          model: settings.ai.model || "gpt-5-mini",
+          model: settings.ai.model || DEFAULT_AI_MODELS.openai,
           messages: openAiNativeMessages(system, messages),
           tools: tools.map(toOpenAiTool),
           tool_choice: "auto",
@@ -210,7 +211,7 @@ const googleAdapter: ProviderAdapter = {
     if (!apiKey) {
       return null;
     }
-    const model = encodeURIComponent(settings.ai.model || "gemini-2.5-flash");
+    const model = encodeURIComponent(settings.ai.model || DEFAULT_AI_MODELS.google);
     const endpoint = new URL(
       appendEndpoint(settings.ai.baseUrl ?? "https://generativelanguage.googleapis.com/v1beta", `/models/${model}:generateContent`)
     );
@@ -300,7 +301,7 @@ const ollamaAdapter: ProviderAdapter = {
         method: "POST",
         headers: { ...JSON_HEADERS },
         body: JSON.stringify({
-          model: settings.ai.model || "llama3.1",
+          model: settings.ai.model || DEFAULT_AI_MODELS.ollama,
           messages: native,
           tools: tools.map(toOpenAiTool),
           stream: false,
@@ -345,7 +346,7 @@ const bedrockAdapter: ProviderAdapter = {
     }
     const region = credentials.region ?? inferBedrockRegion(settings.ai.baseUrl) ?? "us-east-1";
     const baseUrl = settings.ai.baseUrl ?? `https://bedrock-runtime.${region}.amazonaws.com`;
-    const modelId = settings.ai.model || "anthropic.claude-3-5-sonnet-20241022-v2:0";
+    const modelId = settings.ai.model || DEFAULT_AI_MODELS.bedrock;
     const endpoint = new URL(`${baseUrl.replace(/\/+$/, "")}/model/${encodeURIComponent(modelId)}/converse`);
     const thinking = settings.ai.thinkingEnabled && modelSupportsThinking(modelId);
 

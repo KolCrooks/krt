@@ -1,4 +1,5 @@
 import { createHash, createHmac } from "node:crypto";
+import { DEFAULT_AI_MODELS } from "../../../shared/aiModels.js";
 import type { AppSettings } from "../../../shared/schemas.js";
 
 export const ANTHROPIC_VERSION = "2023-06-01";
@@ -143,17 +144,21 @@ export function thinkingBudgetFor(settings: AppSettings): number {
 
 export function modelSupportsThinking(model: string): boolean {
   if (!model) {
-    // Default Anthropic model (claude-sonnet-4-5) supports extended thinking.
+    // The default Anthropic model supports the extended thinking request shape.
     return true;
   }
   const normalized = model.toLowerCase();
+  const usesAdaptiveThinkingOnly = /claude-(fable-5|opus-4-[78])/.test(normalized);
+  if (usesAdaptiveThinkingOnly) {
+    return false;
+  }
   const isLegacyClaude =
     /(claude-3-5|claude-3-opus|claude-3-sonnet|claude-3-haiku|claude-2|claude-instant)/.test(normalized) &&
     !/claude-3-7/.test(normalized);
   if (isLegacyClaude) {
     return false;
   }
-  return /claude/.test(normalized);
+  return normalized.includes(DEFAULT_AI_MODELS.anthropic) || /claude.*(3-7|4-5|4-6|haiku-4-5)/.test(normalized);
 }
 
 export function joinTextParts(parts: Array<{ text?: string }> | undefined): string {

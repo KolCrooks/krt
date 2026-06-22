@@ -1,7 +1,9 @@
 // @vitest-environment node
 import { describe, expect, it } from "vitest";
 import { getProviderAdapter, modelLikelyLacksToolSupport } from "../../../src/main/services/ai/adapters.js";
+import { modelSupportsThinking } from "../../../src/main/services/ai/providerHttp.js";
 import type { AgentMessage, ProviderAdapter, ToolDef } from "../../../src/main/services/ai/types.js";
+import { DEFAULT_AI_MODELS } from "../../../src/shared/aiModels.js";
 import { defaultAppSettings, type AiProvider, type AppSettings } from "../../../src/shared/schemas.js";
 
 const TOOL: ToolDef = {
@@ -33,8 +35,64 @@ describe("provider adapters", () => {
   it("flags models that cannot do tool calling", () => {
     expect(modelLikelyLacksToolSupport("ollama", "gemma:7b")).toBe(true);
     expect(modelLikelyLacksToolSupport("openai", "gpt-3.5-turbo-instruct")).toBe(true);
-    expect(modelLikelyLacksToolSupport("anthropic", "claude-sonnet-4-5")).toBe(false);
-    expect(modelLikelyLacksToolSupport("openai", "gpt-5-mini")).toBe(false);
+    expect(modelLikelyLacksToolSupport("anthropic", DEFAULT_AI_MODELS.anthropic)).toBe(false);
+    expect(modelLikelyLacksToolSupport("openai", DEFAULT_AI_MODELS.openai)).toBe(false);
+  });
+
+  it("uses current fallback model ids when settings has no model", () => {
+    const anthropic = getProviderAdapter("anthropic")!.buildRequest({
+      settings: settingsFor("anthropic", { model: "" }),
+      system: "",
+      messages: [],
+      tools: [TOOL],
+      apiKey: "k"
+    })!;
+    expect(JSON.parse(String(anthropic.init.body)).model).toBe(DEFAULT_AI_MODELS.anthropic);
+
+    const openai = getProviderAdapter("openai")!.buildRequest({
+      settings: settingsFor("openai", { model: "" }),
+      system: "",
+      messages: [],
+      tools: [TOOL],
+      apiKey: "k"
+    })!;
+    expect(JSON.parse(String(openai.init.body)).model).toBe(DEFAULT_AI_MODELS.openai);
+
+    const google = getProviderAdapter("google")!.buildRequest({
+      settings: settingsFor("google", { model: "" }),
+      system: "",
+      messages: [],
+      tools: [TOOL],
+      apiKey: "k"
+    })!;
+    expect(google.url).toContain(`/models/${DEFAULT_AI_MODELS.google}:generateContent`);
+
+    const ollama = getProviderAdapter("ollama")!.buildRequest({
+      settings: settingsFor("ollama", { model: "" }),
+      system: "",
+      messages: [],
+      tools: [TOOL],
+      apiKey: null
+    })!;
+    expect(JSON.parse(String(ollama.init.body)).model).toBe(DEFAULT_AI_MODELS.ollama);
+
+    const creds = JSON.stringify({ accessKeyId: "AKIAIOSFODNN7EXAMPLE", secretAccessKey: "secret", region: "us-east-1" });
+    const bedrock = getProviderAdapter("bedrock")!.buildRequest({
+      settings: settingsFor("bedrock", { model: "" }),
+      system: "",
+      messages: [],
+      tools: [TOOL],
+      apiKey: creds
+    })!;
+    expect(decodeURIComponent(bedrock.url)).toContain(`/model/${DEFAULT_AI_MODELS.bedrock}/converse`);
+  });
+
+  it("only sends Claude extended thinking to models that support that request shape", () => {
+    expect(modelSupportsThinking(DEFAULT_AI_MODELS.anthropic)).toBe(true);
+    expect(modelSupportsThinking("claude-haiku-4-5-20251001")).toBe(true);
+    expect(modelSupportsThinking("claude-opus-4-8")).toBe(false);
+    expect(modelSupportsThinking("anthropic.claude-opus-4-8")).toBe(false);
+    expect(modelSupportsThinking("claude-fable-5")).toBe(false);
   });
 
   it("Anthropic: parses tool_use and replays tool_result", () => {

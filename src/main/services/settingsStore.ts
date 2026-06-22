@@ -1,3 +1,4 @@
+import { DEFAULT_AI_MODELS, STALE_DEFAULT_AI_MODELS } from "../../shared/aiModels.js";
 import { appSettingsSchema, defaultAppSettings, type AppSettings } from "../../shared/schemas.js";
 import type { SqliteDatabase } from "./database.js";
 
@@ -22,10 +23,10 @@ export class SettingsStore {
       return defaultAppSettings;
     }
 
-    return appSettingsSchema.parse({
+    return migrateSettings(appSettingsSchema.parse({
       ...defaultAppSettings,
       ...JSON.parse(row.value)
-    });
+    }));
   }
 
   update(partial: SettingsUpdate): AppSettings {
@@ -52,4 +53,19 @@ export class SettingsStore {
 
     return merged;
   }
+}
+
+function migrateSettings(settings: AppSettings): AppSettings {
+  const staleModels = STALE_DEFAULT_AI_MODELS[settings.ai.provider] ?? [];
+  if (!staleModels.includes(settings.ai.model)) {
+    return settings;
+  }
+
+  return {
+    ...settings,
+    ai: {
+      ...settings.ai,
+      model: DEFAULT_AI_MODELS[settings.ai.provider]
+    }
+  };
 }

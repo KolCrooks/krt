@@ -30,7 +30,11 @@ export class ProviderRegistry {
         return this.keychain.getGhAuthToken();
       case "keychain":
       default:
-        return (await this.keychain.getSecret("GITHUB_TOKEN")) ?? process.env.GITHUB_TOKEN ?? null;
+        return (
+          (await this.keychain.getSecret("GITHUB_TOKEN")) ??
+          process.env.GITHUB_TOKEN ??
+          (await this.keychain.getGhAuthToken())
+        );
     }
   }
 }

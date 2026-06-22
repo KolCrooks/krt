@@ -17,6 +17,7 @@ import {
 import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { krtClient } from "../api/client.js";
 import { ModalBackdrop } from "./ExtensionsView.js";
+import { MODEL_SUGGESTIONS, type ModelSuggestion } from "../../shared/aiModels.js";
 import type { IpcInput, IpcOutput } from "../../shared/ipc.js";
 import type {
   AiProvider,
@@ -53,44 +54,6 @@ const SECTIONS: SettingsSection[] = [
   { id: "updates", label: "Updates", Icon: RefreshCw },
   { id: "about", label: "About", Icon: Info },
 ];
-
-interface ModelSuggestion {
-  value: string;
-  label: string;
-}
-
-const MODEL_SUGGESTIONS: Record<AiProvider, ModelSuggestion[]> = {
-  disabled: [],
-  anthropic: [
-    { value: "claude-sonnet-4-5", label: "Default, tool-capable" },
-    { value: "claude-3-7-sonnet-latest", label: "Tool-capable, thinking-capable" },
-    { value: "claude-3-5-sonnet-20241022", label: "Tool-capable" }
-  ],
-  openai: [
-    { value: "gpt-5-mini", label: "Default, tool-capable" },
-    { value: "gpt-5", label: "Tool-capable" },
-    { value: "gpt-4.1", label: "Tool-capable" },
-    { value: "gpt-4.1-mini", label: "Tool-capable" }
-  ],
-  google: [
-    { value: "gemini-2.5-flash", label: "Default, tool-capable" },
-    { value: "gemini-2.5-pro", label: "Tool-capable" }
-  ],
-  "azure-openai": [
-    { value: "gpt-5-mini", label: "Use your Azure deployment name" },
-    { value: "gpt-5", label: "Use your Azure deployment name" },
-    { value: "gpt-4.1", label: "Use your Azure deployment name" }
-  ],
-  bedrock: [
-    { value: "anthropic.claude-3-5-sonnet-20241022-v2:0", label: "Default, tool-capable" },
-    { value: "anthropic.claude-3-7-sonnet-20250219-v1:0", label: "Tool-capable" }
-  ],
-  ollama: [
-    { value: "llama3.1", label: "Requires tool support in local runtime" },
-    { value: "qwen2.5-coder", label: "Requires tool support in local runtime" },
-    { value: "mistral-nemo", label: "Requires tool support in local runtime" }
-  ]
-};
 
 interface ModelOption {
   /** Model id written into settings.ai.model. */

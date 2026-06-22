@@ -32,11 +32,25 @@ describe("ProviderRegistry", () => {
     expect(getGhAuthToken).toHaveBeenCalledOnce();
   });
 
+  it("falls back to gh CLI when keychain and environment tokens are unavailable", async () => {
+    const getSecret = vi.fn(async () => null);
+    const getGhAuthToken = vi.fn(async () => "gh-cli-token");
+    const registry = new ProviderRegistry(
+      { getSecret, getGhAuthToken } as unknown as Keychain,
+      {} as ProviderResponseCache
+    );
+
+    await expect(registry.getGitHubToken()).resolves.toBe("gh-cli-token");
+    expect(getSecret).toHaveBeenCalledWith("GITHUB_TOKEN");
+    expect(getGhAuthToken).toHaveBeenCalledOnce();
+  });
+
   it("loads GitHub tokens from the environment when selected", async () => {
     process.env.GITHUB_TOKEN = "env-token";
     const getSecret = vi.fn(async () => "keychain-token");
+    const getGhAuthToken = vi.fn(async () => "gh-cli-token");
     const registry = new ProviderRegistry(
-      { getSecret } as unknown as Keychain,
+      { getSecret, getGhAuthToken } as unknown as Keychain,
       {} as ProviderResponseCache,
       () => ({
         ...defaultAppSettings,
@@ -46,5 +60,6 @@ describe("ProviderRegistry", () => {
 
     await expect(registry.getGitHubToken()).resolves.toBe("env-token");
     expect(getSecret).not.toHaveBeenCalled();
+    expect(getGhAuthToken).not.toHaveBeenCalled();
   });
 });

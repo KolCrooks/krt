@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { openDatabase } from "../../src/main/services/database.js";
 import { AiService } from "../../src/main/services/aiService.js";
 import { Keychain } from "../../src/main/services/keychain.js";
+import { DEFAULT_AI_MODELS } from "../../src/shared/aiModels.js";
 import { defaultAppSettings, type AiProvider, type PullRequestDetail } from "../../src/shared/schemas.js";
 import { AppError } from "../../src/main/errors.js";
 import type { ReviewRepoAccess } from "../../src/main/services/ai/reviewTools.js";
@@ -104,7 +105,7 @@ describe("AiService", () => {
 
     const tour = await service.generateTour(aiInput());
 
-    expect(tour.model).toBe("claude-sonnet-4-5");
+    expect(tour.model).toBe(DEFAULT_AI_MODELS.anthropic);
     expect(tour.chapters.map((chapter) => chapter.title)).toEqual(["Foundation", "Consumer"]);
     expect(tour.graph.edges).toEqual([
       expect.objectContaining({ from: "chapter-1", to: "chapter-2", relation: "dependency", source: "ai" })
@@ -227,7 +228,7 @@ describe("AiService", () => {
 
 function makeService(opts: { provider?: AiProvider; model?: string; repos?: ReviewRepoAccess; keychain?: Keychain } = {}): AiService {
   const provider = opts.provider ?? "anthropic";
-  const model = opts.model ?? "claude-sonnet-4-5";
+  const model = opts.model ?? DEFAULT_AI_MODELS.anthropic;
   const keychain =
     opts.keychain ??
     (provider === "bedrock"
