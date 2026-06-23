@@ -1,11 +1,10 @@
-import { spawn, type ChildProcessWithoutNullStreams, execFile } from "node:child_process";
-import { constants } from "node:fs";
-import { promisify } from "node:util";
+import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { randomUUID } from "node:crypto";
-import { access, readdir } from "node:fs/promises";
-import { delimiter, dirname, isAbsolute, join, relative, sep } from "node:path";
+import { readdir } from "node:fs/promises";
+import { isAbsolute, join, relative, sep } from "node:path";
 import { AppError } from "../errors.js";
+import { resolveCommand } from "./commandResolver.js";
 import type {
   LspDefinition,
   LspDiagnostic,
@@ -21,8 +20,6 @@ import type {
 } from "../../shared/schemas.js";
 import type { RepoService } from "./repoService.js";
 import type { ExtensionService } from "./extensionService.js";
-
-const execFileAsync = promisify(execFile);
 
 // find-references can be slow on a freshly-opened workspace; cap it so blast-
 // radius computation degrades to "unknown" rather than hanging the agent.
@@ -1009,155 +1006,6 @@ function addCapabilities(session: LspSession, extension: ExtensionDescriptor): v
 
 function normalizeActivationPaths(paths: string[] | undefined): string[] {
   return [...new Set((paths ?? []).map((path) => path.trim()).filter(Boolean))];
-}
-
-interface ResolvedCommand {
-  program: string;
-  env: NodeJS.ProcessEnv;
-}
-
-async function resolveCommand(command: string): Promise<ResolvedCommand | null> {
-  if (isPathCommand(command)) {
-    return (await isExecutable(command))
-      ? { program: command, env: processEnv(prependPath(process.env.PATH, dirname(command))) }
-      : null;
-  }
-
-  const inheritedPath = process.env.PATH;
-  const inheritedProgram = await resolveCommandFromPath(command, inheritedPath);
-  if (inheritedProgram) {
-    return {
-      program: inheritedProgram,
-      env: processEnv(prependPath(inheritedPath, dirname(inheritedProgram)))
-    };
-  }
-
-  const commonPath = appendPaths(inheritedPath, commonExecutableDirs());
-  if (commonPath !== inheritedPath) {
-    const commonProgram = await resolveCommandFromPath(command, commonPath);
-    if (commonProgram) {
-      return {
-        program: commonProgram,
-        env: processEnv(prependPath(commonPath, dirname(commonProgram)))
-      };
-    }
-  }
-
-  const shellResolved = await resolveCommandFromLoginShell(command);
-  if (!shellResolved) {
-    return null;
-  }
-
-  return {
-    program: shellResolved.program,
-    env: processEnv(prependPath(shellResolved.path, dirname(shellResolved.program)))
-  };
-}
-
-function isPathCommand(command: string): boolean {
-  return isAbsolute(command) || command.includes("/") || (sep !== "/" && command.includes(sep));
-}
-
-async function isExecutable(path: string): Promise<boolean> {
-  try {
-    await access(path, constants.X_OK);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-async function resolveCommandFromPath(command: string, path: string | undefined): Promise<string | null> {
-  try {
-    const { stdout } = await execFileAsync("which", [command], {
-      env: processEnv(path),
-      timeout: 2_000
-    });
-    return firstLine(String(stdout));
-  } catch {
-    return null;
-  }
-}
-
-async function resolveCommandFromLoginShell(command: string): Promise<{ program: string; path: string } | null> {
-  const shell = process.env.SHELL || "/bin/zsh";
-  try {
-    const { stdout } = await execFileAsync(
-      shell,
-      [
-        "-lc",
-        'resolved=$(command -v -- "$1" 2>/dev/null || true); printf "%s\\n%s" "$resolved" "$PATH"',
-        "krt-resolve-command",
-        command
-      ],
-      { timeout: 3_000 }
-    );
-    const [programLine, ...pathLines] = String(stdout).split("\n");
-    const program = programLine.trim();
-    if (!program) {
-      return null;
-    }
-    return {
-      program,
-      path: pathLines.join("\n").trim()
-    };
-  } catch {
-    return null;
-  }
-}
-
-function firstLine(value: string): string | null {
-  return value
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .find(Boolean) ?? null;
-}
-
-function prependPath(path: string | undefined, entry: string): string {
-  return appendPaths(path, [entry], true);
-}
-
-function appendPaths(path: string | undefined, entries: string[], prepend = false): string {
-  const parts = (path ?? "").split(delimiter).filter(Boolean);
-  for (const entry of entries) {
-    if (parts.includes(entry)) {
-      continue;
-    }
-    if (prepend) {
-      parts.unshift(entry);
-    } else {
-      parts.push(entry);
-    }
-  }
-  return parts.join(delimiter);
-}
-
-function commonExecutableDirs(): string[] {
-  const home = process.env.HOME;
-  return [
-    ...appExecutableDirs(),
-    home ? join(home, ".cargo", "bin") : null,
-    home ? join(home, ".pyenv", "shims") : null,
-    home ? join(home, ".local", "bin") : null,
-    "/opt/homebrew/bin",
-    "/usr/local/bin",
-    "/usr/bin",
-    "/bin"
-  ].filter((entry): entry is string => Boolean(entry));
-}
-
-function appExecutableDirs(): string[] {
-  const dirs = new Set<string>([join(process.cwd(), "node_modules", ".bin")]);
-  try {
-    dirs.add(fileURLToPath(new URL("../../../node_modules/.bin/", import.meta.url)));
-  } catch {
-    // import.meta.url can be non-file in tests or future bundling modes.
-  }
-  if (process.resourcesPath) {
-    dirs.add(join(process.resourcesPath, "app.asar.unpacked", "node_modules", ".bin"));
-    dirs.add(join(process.resourcesPath, "app", "node_modules", ".bin"));
-  }
-  return [...dirs];
 }
 
 function trimLogLine(text: string, maxLength = 1_000): string {

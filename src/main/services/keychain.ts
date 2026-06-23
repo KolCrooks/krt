@@ -1,12 +1,16 @@
 import { exec, execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { AppError } from "../errors.js";
+import { resolveCommand, type ResolvedCommand } from "./commandResolver.js";
 
 const execAsync = promisify(exec);
 const execFileAsync = promisify(execFile);
 
 export class Keychain {
-  constructor(private readonly serviceName = "KolReviewTool") {}
+  constructor(
+    private readonly serviceName = "KolReviewTool",
+    private readonly resolveExecutable: (command: string) => Promise<ResolvedCommand | null> = resolveCommand
+  ) {}
 
   async getSecret(account: string): Promise<string | null> {
     if (process.platform !== "darwin") {
@@ -67,7 +71,13 @@ export class Keychain {
 
   async getGhAuthToken(): Promise<string | null> {
     try {
-      const result = await execFileAsync("gh", ["auth", "token"], {
+      const gh = await this.resolveExecutable("gh");
+      if (!gh) {
+        return null;
+      }
+
+      const result = await execFileAsync(gh.program, ["auth", "token"], {
+        env: gh.env,
         timeout: 5_000,
         maxBuffer: 64 * 1024
       });
