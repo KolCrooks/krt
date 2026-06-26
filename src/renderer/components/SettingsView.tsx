@@ -419,15 +419,17 @@ interface ToggleProps {
   on: boolean;
   onChange: (next: boolean) => void;
   disabled?: boolean;
+  ariaLabel?: string;
 }
 
-function Toggle({ on, onChange, disabled }: ToggleProps): React.JSX.Element {
+function Toggle({ on, onChange, disabled, ariaLabel }: ToggleProps): React.JSX.Element {
   return (
     <button
       type="button"
       className={on ? "settings-toggle is-on" : "settings-toggle"}
       role="switch"
       aria-checked={on}
+      aria-label={ariaLabel}
       disabled={disabled}
       onClick={() => onChange(!on)}
     >
@@ -1001,12 +1003,28 @@ function GeneralSection({
 }
 
 function AppearanceSection({
-
   settings,
   updateSettings,
 }: SettingsSectionProps): React.JSX.Element {
   return (
     <>
+      <SettingsGroup title="Theme">
+        <SettingsRow
+          last
+          label="Dark mode"
+          hint="Use a dark color palette throughout the app."
+        >
+          <Toggle
+            on={settings.appearance.darkMode}
+            ariaLabel="Dark mode"
+            onChange={(darkMode) =>
+              updateSettings({
+                appearance: { ...settings.appearance, darkMode },
+              })
+            }
+          />
+        </SettingsRow>
+      </SettingsGroup>
       <SettingsGroup title="Density">
         <SettingsRow
           last

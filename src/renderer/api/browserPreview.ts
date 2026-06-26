@@ -208,7 +208,7 @@ const tour: ReviewTour = {
 
 export function createBrowserPreviewApi(): KrtApi {
   const settings: AppSettings = {
-    appearance: { accentColor: "#4f46e5", density: "compact" },
+    appearance: { accentColor: "#8b5cf6", density: "compact", darkMode: false },
     data: { preferredMode: "auto", managedRepoStorage: null, worktreeCacheSizeGb: 20, localRepos: [] },
     ai: {
       enabled: false,

@@ -17,7 +17,7 @@ export function useAppAppearance(): void {
     }
 
     const root = document.documentElement;
-    root.dataset.theme = "light";
+    root.dataset.theme = appearance.darkMode ? "dark" : "light";
     root.dataset.density = appearance.density;
     root.style.setProperty("--accent", appearance.accentColor);
     return undefined;

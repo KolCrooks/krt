@@ -24,6 +24,8 @@ const originalStartLsp = window.krt.lsp.startForWorktree;
 const originalStopLsp = window.krt.lsp.stopForWorktree;
 const originalOnCloseSubTab = window.krt.app.onCloseSubTab;
 const originalOnOpenPreferences = window.krt.app.onOpenPreferences;
+const originalGetSettings = window.krt.settings.get;
+const originalUpdateSettings = window.krt.settings.update;
 const originalGetUpdateStatus = window.krt.updates.getStatus;
 const originalCheckUpdates = window.krt.updates.check;
 const originalInstallDownloaded = window.krt.updates.installDownloaded;
@@ -32,6 +34,8 @@ const originalScrollTo = HTMLElement.prototype.scrollTo;
 afterEach(() => {
   window.krt.app.onCloseSubTab = originalOnCloseSubTab;
   window.krt.app.onOpenPreferences = originalOnOpenPreferences;
+  window.krt.settings.get = originalGetSettings;
+  window.krt.settings.update = originalUpdateSettings;
   window.krt.repos.listManagedWorktrees = originalListManagedWorktrees;
   window.krt.pullRequests.open = originalOpenPullRequest;
   window.krt.pullRequests.filePatch = originalFilePatch;
@@ -72,8 +76,50 @@ describe("AppShell", () => {
       );
     });
     expect(document.documentElement.style.getPropertyValue("--accent")).toBe(
-      "#4f46e5",
+      "#8b5cf6",
     );
+  });
+
+  it("applies persisted dark appearance settings to the document root", async () => {
+    const baseSettings = await originalGetSettings();
+    window.krt.settings.get = vi.fn(async () => ({
+      ...baseSettings,
+      appearance: { ...baseSettings.appearance, darkMode: true },
+    }));
+
+    render(<AppShell />);
+
+    await waitFor(() => {
+      expect(document.documentElement).toHaveAttribute("data-theme", "dark");
+      expect(document.documentElement).toHaveAttribute(
+        "data-density",
+        "compact",
+      );
+    });
+  });
+
+  it("updates dark mode from the appearance settings", async () => {
+    const baseSettings = await originalGetSettings();
+    const updateSettings = vi.fn(
+      async (input: Parameters<typeof originalUpdateSettings>[0]) => ({
+        ...baseSettings,
+        appearance: { ...baseSettings.appearance, ...input.appearance },
+      }),
+    );
+    window.krt.settings.update = updateSettings;
+
+    render(<AppShell />);
+
+    fireEvent.keyDown(window, { key: ",", metaKey: true });
+    fireEvent.click(await screen.findByRole("button", { name: "Appearance" }));
+    fireEvent.click(screen.getByRole("switch", { name: "Dark mode" }));
+
+    await waitFor(() => {
+      expect(updateSettings).toHaveBeenCalled();
+    });
+    expect(updateSettings.mock.calls[0]?.[0]).toEqual({
+      appearance: { ...baseSettings.appearance, darkMode: true },
+    });
   });
 
   it("opens tabs for checked out branches on startup", async () => {

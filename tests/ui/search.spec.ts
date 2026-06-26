@@ -3,7 +3,7 @@ import { expect, test } from "@playwright/test";
 test.beforeEach(async ({ page }) => {
   await page.addInitScript(() => {
     const settings = {
-      appearance: { accentColor: "#4f46e5", density: "compact" },
+      appearance: { accentColor: "#8b5cf6", density: "compact", darkMode: false },
       data: { preferredMode: "auto", managedRepoStorage: null, worktreeCacheSizeGb: 20 },
       ai: { enabled: false, provider: "disabled", model: "", keyProvider: "keychain", keyCommand: "" },
       github: { configured: true, login: "octo" as string | null, tokenProvider: "keychain" },

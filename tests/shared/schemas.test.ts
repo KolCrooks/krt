@@ -17,6 +17,7 @@ describe("shared schemas", () => {
     expect(settings.ai.keyProvider).toBe("keychain");
     expect(settings.github.tokenProvider).toBe("keychain");
     expect(settings.appearance.density).toBe("compact");
+    expect(settings.appearance.darkMode).toBe(false);
     expect(settings.updates).toEqual({ enabled: false, channel: "stable", feedUrl: null });
   });
 

@@ -536,8 +536,9 @@ export type UpdateStatus = z.infer<typeof updateStatusSchema>;
 
 export const appSettingsSchema = z.object({
   appearance: z.object({
-    accentColor: z.string().default("#4f46e5"),
-    density: z.enum(["compact", "comfortable"]).default("compact")
+    accentColor: z.string().default("#8b5cf6"),
+    density: z.enum(["compact", "comfortable"]).default("compact"),
+    darkMode: z.boolean().default(false)
   }),
   data: z.object({
     preferredMode: preferredDataModeSchema.default("auto"),
