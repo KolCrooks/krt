@@ -19,6 +19,7 @@ describe("SettingsStore", () => {
     expect(updated.data.worktreeCacheSizeGb).toBe(20);
     expect(updated.updates.channel).toBe("stable");
     expect(store.get().appearance.density).toBe("comfortable");
+    expect(store.get().appearance.darkMode).toBe(false);
   });
 
   it("migrates stale bundled AI model defaults without overwriting custom models", () => {

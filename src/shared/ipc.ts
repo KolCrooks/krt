@@ -69,7 +69,8 @@ const settingsUpdateInput = z.object({
   appearance: z
     .object({
       accentColor: z.string(),
-      density: z.enum(["compact", "comfortable"])
+      density: z.enum(["compact", "comfortable"]),
+      darkMode: z.boolean()
     })
     .partial()
     .optional(),

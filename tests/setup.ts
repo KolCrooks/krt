@@ -20,7 +20,7 @@ if (typeof window !== "undefined") {
     },
     settings: {
       get: async () => ({
-        appearance: { accentColor: "#4f46e5", density: "compact" },
+        appearance: { accentColor: "#8b5cf6", density: "compact", darkMode: false },
         data: { preferredMode: "auto", managedRepoStorage: null, worktreeCacheSizeGb: 20 },
         ai: { enabled: false, provider: "disabled", model: "", keyProvider: "keychain", keyCommand: "" },
         github: { configured: false, login: null, tokenProvider: "keychain" },
@@ -83,7 +83,7 @@ if (typeof window !== "undefined") {
         platform: "test",
         paths: { root: "/test", cache: "/test/cache", logs: "/test/logs", indexes: "/test/indexes" },
         settings: {
-          appearance: { accentColor: "#4f46e5", density: "compact" },
+          appearance: { accentColor: "#8b5cf6", density: "compact", darkMode: false },
           data: { preferredMode: "auto", managedRepoStorage: null, worktreeCacheSizeGb: 20 },
           ai: { enabled: false, provider: "disabled", model: "", baseUrlConfigured: false, keyProvider: "keychain", keyCommandConfigured: false },
           github: { configured: false, login: null, tokenProvider: "keychain" },
