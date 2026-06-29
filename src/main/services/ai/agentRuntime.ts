@@ -1,7 +1,7 @@
 import type { AppSettings } from "../../../shared/schemas.js";
 import { AppError } from "../../errors.js";
 import type { AgentMessage, ProviderAdapter, ToolResult } from "./types.js";
-import { describeToolCall, type ReviewToolset } from "./reviewTools.js";
+import { describeToolCall, type ExploreToolset } from "./reviewTools.js";
 
 // Generation runs without a turn cap so the agent can fully cover, comment, and
 // connect a PR of any size rather than being cut off mid-tour. It stops when it
@@ -16,7 +16,7 @@ export interface RunReviewAgentArgs {
   apiKey: string | null;
   system: string;
   userMessage: string;
-  toolset: ReviewToolset;
+  toolset: ExploreToolset;
   signal?: AbortSignal;
   /** Fires for each step the agent takes — its thinking, narration, every tool
    *  call, and tool errors — so the UI can show a live chat feed of the work. */
@@ -30,6 +30,9 @@ export interface AgentRunResult {
   outputTokens: number;
   finished: boolean;
   stoppedReason: "finished" | "no_tool_calls" | "max_turns" | "token_budget";
+  /** The last non-empty prose the agent emitted. For chat-style runs (no emit
+   *  tools) this is the agent's answer; generation ignores it. */
+  finalText: string;
 }
 
 export function assertNotAborted(signal?: AbortSignal): void {
@@ -45,6 +48,7 @@ export async function runReviewAgent(args: RunReviewAgentArgs): Promise<AgentRun
   const messages: AgentMessage[] = [{ role: "user", content: userMessage }];
   let outputTokens = 0;
   let stoppedReason: AgentRunResult["stoppedReason"] = "max_turns";
+  let finalText = "";
   let turn = 0;
 
   for (turn = 1; turn <= maxTurns; turn += 1) {
@@ -79,7 +83,8 @@ export async function runReviewAgent(args: RunReviewAgentArgs): Promise<AgentRun
       args.onActivity?.({ turn, kind: "think", text: assistantTurn.thinkingText.trim() });
     }
     if (assistantTurn.text.trim()) {
-      args.onActivity?.({ turn, kind: "say", text: assistantTurn.text.trim() });
+      finalText = assistantTurn.text.trim();
+      args.onActivity?.({ turn, kind: "say", text: finalText });
     }
 
     if (assistantTurn.toolCalls.length === 0) {
@@ -109,7 +114,7 @@ export async function runReviewAgent(args: RunReviewAgentArgs): Promise<AgentRun
     }
   }
 
-  return { turns: Math.min(turn, maxTurns), outputTokens, finished: toolset.finishRequested, stoppedReason };
+  return { turns: Math.min(turn, maxTurns), outputTokens, finished: toolset.finishRequested, stoppedReason, finalText };
 }
 
 async function mapHttpError(provider: string, response: Response): Promise<AppError> {

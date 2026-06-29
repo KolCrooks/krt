@@ -4268,6 +4268,174 @@ button:focus-visible {
   color: var(--warning);
 }
 
+/* --- Tour chat ---------------------------------------------------------- */
+/* The closed launcher and the open panel both float over the bottom-right of
+   the active review pane. Inactive workspace panes are visibility:hidden, so
+   these stay hidden there even though they are position:fixed. */
+.tour-chat-fab {
+  align-items: center;
+  background: var(--accent);
+  border: none;
+  border-radius: 999px;
+  bottom: 18px;
+  box-shadow: 0 6px 20px oklch(0 0 0 / 0.18);
+  color: white;
+  cursor: pointer;
+  display: inline-flex;
+  font-size: 12.5px;
+  font-weight: 600;
+  gap: 7px;
+  padding: 9px 15px;
+  position: fixed;
+  right: 22px;
+  z-index: 40;
+}
+
+.tour-chat-fab:hover {
+  background: var(--accent-2, var(--accent));
+}
+
+.tour-chat-fab-count {
+  background: oklch(1 0 0 / 0.25);
+  border-radius: 999px;
+  font-size: 11px;
+  min-width: 18px;
+  padding: 1px 6px;
+  text-align: center;
+}
+
+.tour-chat-panel {
+  background: var(--bg-elev, var(--surface-strong));
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  bottom: 18px;
+  box-shadow: 0 10px 32px oklch(0 0 0 / 0.22);
+  display: flex;
+  flex-direction: column;
+  max-height: min(620px, 80vh);
+  position: fixed;
+  right: 22px;
+  width: 420px;
+  z-index: 40;
+}
+
+.tour-chat-panel-header {
+  align-items: center;
+  border-bottom: 1px solid var(--line);
+  display: flex;
+  gap: 8px;
+  justify-content: space-between;
+  padding: 10px 12px;
+}
+
+.tour-chat-panel-title {
+  align-items: center;
+  color: var(--ink-2, var(--ink));
+  display: flex;
+  font-size: 13px;
+  font-weight: 600;
+  gap: 7px;
+}
+
+.tour-chat-thread {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 10px;
+  overflow-y: auto;
+  padding: 12px;
+}
+
+.tour-chat-empty {
+  color: var(--ink-3);
+  font-size: 12px;
+  line-height: 1.5;
+  margin: 0;
+}
+
+.tour-chat-message {
+  border-radius: 10px;
+  font-size: 12.5px;
+  line-height: 1.55;
+  max-width: 88%;
+  padding: 8px 11px;
+}
+
+.tour-chat-user {
+  align-self: flex-end;
+  background: var(--accent);
+  border-bottom-right-radius: 4px;
+  color: white;
+}
+
+.tour-chat-user .tour-chat-text {
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.tour-chat-assistant {
+  align-self: flex-start;
+  background: var(--bg-soft, var(--surface-muted));
+  border: 1px solid var(--line);
+  border-bottom-left-radius: 4px;
+  color: var(--ink-2, var(--ink));
+}
+
+.tour-chat-assistant .markdown {
+  font-size: 12.5px;
+}
+
+.tour-chat-error {
+  color: var(--warning);
+  font-size: 12px;
+  margin: 0;
+}
+
+/* The live agent transcript is built for the wide generation view (an 80%-wide
+   bordered, internally-scrolling box). In the narrow chat thread that reads as a
+   cramped box-in-a-box, so let it flow full-width and scroll with the thread. */
+.tour-chat-thread .agent-chat {
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  margin: 0;
+  max-height: none;
+  max-width: none;
+  overflow-y: visible;
+  padding: 0;
+  width: 100%;
+}
+
+.tour-chat-composer {
+  align-items: flex-end;
+  border-top: 1px solid var(--line);
+  display: flex;
+  gap: 8px;
+  padding: 10px 12px;
+}
+
+.tour-chat-input {
+  background: var(--bg-soft, var(--surface-muted));
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--ink-2, var(--ink));
+  flex: 1 1 auto;
+  font-family: inherit;
+  font-size: 12.5px;
+  line-height: 1.5;
+  padding: 7px 9px;
+  resize: none;
+}
+
+.tour-chat-input:focus {
+  border-color: var(--accent);
+  outline: none;
+}
+
+.tour-chat-send {
+  flex: none;
+}
+
 /* Typing indicator while the agent keeps working. */
 .agent-chat-typing .agent-chat-dots {
   display: inline-flex;

@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import type {
   AgentActivity,
+  ChatMessage,
   DataMode,
   OperationProgress,
   PullRequestBundle,
@@ -65,6 +66,13 @@ export interface PrTab {
   // calls), shown as a live chat feed while the tour generates. Reset on a new run.
   tourActivity?: AgentActivity[];
   reviewedTourChapterIds?: string[];
+  // Ephemeral conversation with the agent about the generated tour. Committed
+  // turns live in chatMessages; the in-flight answer streams into chatActivity
+  // and is appended to chatMessages once the operation completes.
+  chatMessages?: ChatMessage[];
+  chatOperationId?: string | null;
+  chatActivity?: AgentActivity[];
+  chatError?: string | null;
   viewMode: TabViewMode;
   reviewSubMode: ReviewSubMode;
   checkout: TabCheckout;
@@ -109,6 +117,11 @@ interface UiState {
   setTourOperation: (tabKey: string, operationId: string | null) => void;
   setTourProgress: (tabKey: string, progress: OperationProgress | null) => void;
   appendTourActivity: (tabKey: string, entry: AgentActivity) => void;
+  appendChatMessage: (tabKey: string, message: ChatMessage) => void;
+  setChatOperation: (tabKey: string, operationId: string | null) => void;
+  appendChatActivity: (tabKey: string, entry: AgentActivity) => void;
+  resetChatActivity: (tabKey: string) => void;
+  setChatError: (tabKey: string, error: string | null) => void;
   updateReviewThread: (tabKey: string, thread: ReviewThread) => void;
   appendReviewThreadComment: (tabKey: string, threadId: string, comment: ReviewComment) => void;
   updateReviewThreadComment: (tabKey: string, threadId: string, comment: ReviewComment) => void;
@@ -155,6 +168,10 @@ export const useUiStore = create<UiState>((set) => ({
         tourStartedAt: null,
         tourActivity: [],
         reviewedTourChapterIds: [],
+        chatMessages: [],
+        chatOperationId: null,
+        chatActivity: [],
+        chatError: null,
         viewMode: "overview",
         reviewSubMode: "diff",
         checkout: { ...defaultCheckout },
@@ -166,7 +183,7 @@ export const useUiStore = create<UiState>((set) => ({
         tabs: existing
           ? state.tabs.map((candidate) =>
               candidate.key === key
-                ? { ...candidate, ...tab, tour: candidate.tour, tourOperationId: candidate.tourOperationId, tourProgress: candidate.tourProgress, tourStartedAt: candidate.tourStartedAt, tourActivity: candidate.tourActivity, reviewedTourChapterIds: candidate.reviewedTourChapterIds ?? [], viewMode: candidate.viewMode, reviewSubMode: candidate.reviewSubMode, checkout: candidate.checkout, finish: candidate.finish, editorNavigationTarget: candidate.editorNavigationTarget ?? null }
+                ? { ...candidate, ...tab, tour: candidate.tour, tourOperationId: candidate.tourOperationId, tourProgress: candidate.tourProgress, tourStartedAt: candidate.tourStartedAt, tourActivity: candidate.tourActivity, reviewedTourChapterIds: candidate.reviewedTourChapterIds ?? [], chatMessages: candidate.chatMessages ?? [], chatOperationId: candidate.chatOperationId ?? null, chatActivity: candidate.chatActivity ?? [], chatError: candidate.chatError ?? null, viewMode: candidate.viewMode, reviewSubMode: candidate.reviewSubMode, checkout: candidate.checkout, finish: candidate.finish, editorNavigationTarget: candidate.editorNavigationTarget ?? null }
                 : candidate
             )
           : [...state.tabs, tab],
@@ -249,6 +266,10 @@ export const useUiStore = create<UiState>((set) => ({
             tourStartedAt: headShaChanged ? null : tab.tourStartedAt,
             tourActivity: headShaChanged ? [] : tab.tourActivity,
             reviewedTourChapterIds: headShaChanged ? [] : tab.reviewedTourChapterIds,
+            chatMessages: headShaChanged ? [] : tab.chatMessages,
+            chatOperationId: headShaChanged ? null : tab.chatOperationId,
+            chatActivity: headShaChanged ? [] : tab.chatActivity,
+            chatError: headShaChanged ? null : tab.chatError,
             editorNavigationTarget: headShaChanged ? null : tab.editorNavigationTarget
           };
         })
@@ -374,6 +395,38 @@ export const useUiStore = create<UiState>((set) => ({
         }
         return { ...tab, tourActivity: [...feed, entry].slice(-80) };
       })
+    })),
+  appendChatMessage: (tabKeyToUpdate, message) =>
+    set((state) => ({
+      tabs: state.tabs.map((tab) =>
+        tab.key === tabKeyToUpdate ? { ...tab, chatMessages: [...(tab.chatMessages ?? []), message] } : tab
+      )
+    })),
+  setChatOperation: (tabKeyToUpdate, operationId) =>
+    set((state) => ({
+      tabs: state.tabs.map((tab) => (tab.key === tabKeyToUpdate ? { ...tab, chatOperationId: operationId } : tab))
+    })),
+  appendChatActivity: (tabKeyToUpdate, entry) =>
+    set((state) => ({
+      tabs: state.tabs.map((tab) => {
+        if (tab.key !== tabKeyToUpdate) {
+          return tab;
+        }
+        const feed = tab.chatActivity ?? [];
+        const last = feed[feed.length - 1];
+        if (!entry.text.trim() || (last && last.kind === entry.kind && last.text === entry.text)) {
+          return tab;
+        }
+        return { ...tab, chatActivity: [...feed, entry].slice(-60) };
+      })
+    })),
+  resetChatActivity: (tabKeyToUpdate) =>
+    set((state) => ({
+      tabs: state.tabs.map((tab) => (tab.key === tabKeyToUpdate ? { ...tab, chatActivity: [] } : tab))
+    })),
+  setChatError: (tabKeyToUpdate, error) =>
+    set((state) => ({
+      tabs: state.tabs.map((tab) => (tab.key === tabKeyToUpdate ? { ...tab, chatError: error } : tab))
     })),
   updateReviewThread: (tabKeyToUpdate, thread) =>
     set((state) => ({

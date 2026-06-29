@@ -222,6 +222,73 @@ describe("AiService", () => {
     expect(body.tools).toBeInstanceOf(Array);
     expect(body.response_format).toBeUndefined(); // JSON mode must be dropped when tools are active
   });
+
+  it("answers a question about the tour with the agent's final prose", async () => {
+    queueFetch([anthropicText("The `StreamPermit` chapter introduces the backpressure primitive.")]);
+    const service = makeService();
+
+    const answer = await service.chatAboutTour(chatInput("What does the first chapter do?"));
+
+    expect(answer).toBe("The `StreamPermit` chapter introduces the backpressure primitive.");
+  });
+
+  it("lets the chat agent explore with read-only tools before answering", async () => {
+    const fetchMock = queueFetch([
+      anthropicTurn([toolUse("t1", "read_file", { path: "src/App.tsx" })]),
+      anthropicText("It reads `src/App.tsx` and wires the shell entry point.")
+    ]);
+    const service = makeService();
+
+    const answer = await service.chatAboutTour(chatInput("How does it wire things in?"));
+
+    expect(answer).toContain("wires the shell entry point");
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    // The chat agent must not be offered the emit/finish tools.
+    const toolNames = JSON.parse(String((fetchMock.mock.calls[0] as unknown as [unknown, RequestInit])[1]?.body)).tools.map(
+      (tool: { name: string }) => tool.name
+    );
+    expect(toolNames).toContain("read_file");
+    expect(toolNames).not.toContain("add_chapter");
+    expect(toolNames).not.toContain("finish");
+  });
+
+  it("includes the prior conversation when answering a follow-up", async () => {
+    const fetchMock = queueFetch([anthropicText("Yes, the tests cover the new primitive.")]);
+    const service = makeService();
+
+    await service.chatAboutTour({
+      ...chatInput("Are there tests?"),
+      messages: [
+        { role: "user", content: "What is the first chapter?" },
+        { role: "assistant", content: "It is the StreamPermit primitive." },
+        { role: "user", content: "Are there tests?" }
+      ]
+    });
+
+    const body = String((fetchMock.mock.calls[0] as unknown as [unknown, RequestInit])[1]?.body);
+    expect(body).toContain("Conversation so far");
+    expect(body).toContain("It is the StreamPermit primitive.");
+    expect(body).toContain("Are there tests?");
+  });
+
+  it("rejects an empty chat answer as retryable", async () => {
+    queueFetch([anthropicText("   ")]);
+    const service = makeService();
+
+    await expect(service.chatAboutTour(chatInput("anything?"))).rejects.toMatchObject({ code: "ai_empty_answer" });
+  });
+
+  it("requires a managed worktree to chat about the tour", async () => {
+    const service = makeService({ repos: { ...stubRepos(), getWorktreePath: () => null } });
+
+    await expect(service.chatAboutTour(chatInput("hi"))).rejects.toMatchObject({ code: "ai_requires_worktree" });
+  });
+
+  it("reports an error when AI is disabled for chat", async () => {
+    const service = new AiService(openDatabase(":memory:"), new Keychain("test"), () => defaultAppSettings, stubRepos());
+
+    await expect(service.chatAboutTour(chatInput("hi"))).rejects.toMatchObject({ code: "ai_disabled" });
+  });
 });
 
 // --- helpers ----------------------------------------------------------------
@@ -262,6 +329,51 @@ function aiInput() {
     timeline: [],
     reviewThreads: [],
     checks: []
+  };
+}
+
+function chatInput(question: string) {
+  const base = aiInput();
+  return {
+    pullRequest,
+    changedFiles: base.changedFiles,
+    tour: sampleTour(),
+    messages: [{ role: "user" as const, content: question }]
+  };
+}
+
+function sampleTour() {
+  const generatedAt = "2026-05-22T00:00:00.000Z";
+  return {
+    id: "tour-1",
+    provider: "github" as const,
+    repository,
+    pullNumber: 42,
+    headSha: "abcdef123",
+    generatedAt,
+    model: DEFAULT_AI_MODELS.anthropic,
+    chapters: [
+      {
+        id: "chapter-1",
+        title: "StreamPermit — the new backpressure primitive",
+        summary: "Introduces the primitive.",
+        files: ["src/App.tsx"],
+        diffAnchors: [{ path: "src/App.tsx", side: "right" as const }],
+        changeStats: { additions: 10, deletions: 2, files: 1 },
+        riskLevel: "low" as const,
+        riskReasons: [],
+        reviewChecklist: [],
+        dependencies: [],
+        generatedAt,
+        model: DEFAULT_AI_MODELS.anthropic,
+        headSha: "abcdef123"
+      }
+    ],
+    graph: {
+      nodes: [{ id: "chapter-1", label: "StreamPermit", riskLevel: "low" as const, files: ["src/App.tsx"] }],
+      edges: []
+    },
+    riskSignals: []
   };
 }
 
@@ -332,6 +444,15 @@ function anthropicResponse(blocks: AnthropicBlock[]): Response {
 
 function anthropicTurn(blocks: AnthropicBlock[]): Response {
   return anthropicResponse(blocks);
+}
+
+// A turn with prose and no tool calls — the shape that ends an agent loop and,
+// for chat, carries the answer.
+function anthropicText(text: string): Response {
+  return {
+    ok: true,
+    json: async () => ({ content: [{ type: "text", text }], stop_reason: "end_turn", usage: { output_tokens: 20 } })
+  } as unknown as Response;
 }
 
 function openAiTurn(toolCalls: Array<{ id: string; function: { name: string; arguments: string } }>): Response {

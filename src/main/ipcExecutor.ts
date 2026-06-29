@@ -668,6 +668,73 @@ function createIpcHandlers(context: IpcHandlerContext): HandlerMap {
 
       return { operationId, cachedTour: null };
     },
+    "ai:startTourChat": (input) => {
+      const operationId = context.operations.create("ai-chat", "Thinking about your question");
+      const hydratedChangedFiles = context.prCache.hydrateChangedFilePatches(
+        input.pullRequest.repository,
+        input.pullRequest.number,
+        input.pullRequest.headSha,
+        input.changedFiles
+      );
+
+      const startedAt = performance.now();
+      void (async () => {
+        try {
+          const answer = await context.ai.chatAboutTour(
+            { ...input, changedFiles: hydratedChangedFiles },
+            {
+              signal: context.operations.signal(operationId),
+              onActivity: (activity) =>
+                context.operations.update({
+                  operationId,
+                  phase: "activity",
+                  message: activity.text.length > 160 ? `${activity.text.slice(0, 160)}…` : activity.text,
+                  percent: null,
+                  done: false,
+                  cancelled: context.operations.get(operationId)?.cancelled ?? false,
+                  activity
+                })
+            }
+          );
+          if (context.operations.get(operationId)?.cancelled) {
+            context.operations.markFailed(operationId, "Chat was cancelled");
+            return;
+          }
+          context.operations.update({
+            operationId,
+            phase: "complete",
+            message: "Answer ready",
+            percent: 100,
+            done: true,
+            cancelled: false,
+            answer
+          });
+          recordPerformance(context, "ai.chatAboutTour", startedAt, {
+            repository: repositoryKey(input.pullRequest.repository),
+            number: input.pullRequest.number,
+            headSha: input.pullRequest.headSha,
+            messageCount: input.messages.length
+          });
+        } catch (error) {
+          const cancelled = context.operations.get(operationId)?.cancelled ?? false;
+          context.operations.markFailed(
+            operationId,
+            cancelled ? "Chat was cancelled" : error instanceof AppError ? error.message : "Chat failed",
+            error instanceof Error ? error.message : String(error)
+          );
+          recordPerformance(context, "ai.chatAboutTour", startedAt, {
+            repository: repositoryKey(input.pullRequest.repository),
+            number: input.pullRequest.number,
+            headSha: input.pullRequest.headSha,
+            messageCount: input.messages.length,
+            failed: true,
+            error: error instanceof Error ? error.message : String(error)
+          });
+        }
+      })();
+
+      return { operationId };
+    },
 
     "extensions:list": () => context.extensions.list(),
     "extensions:logs": (input) => context.extensions.getLogs(input?.extensionId),

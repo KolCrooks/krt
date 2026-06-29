@@ -7,6 +7,7 @@ import { renderMarkdown, renderInlineMarkdown } from "../../lib/markdown.js";
 import { AgentActivityFeed } from "./AgentActivityFeed.js";
 import { AgentWorkingOverlay } from "./AgentWorkingOverlay.js";
 import { RiskLevelPill } from "./RiskLevelPill.js";
+import { TourChatPanel } from "./TourChatPanel.js";
 import { chapterFocusRanges, computeFocusedChangeStats, resolveChapterFiles } from "./chapterFiles.js";
 import { formatThinkingTime, useThinkingSeconds } from "../../hooks/useThinkingTime.js";
 import type { PrTab } from "../../store/uiStore.js";
@@ -321,6 +322,7 @@ export function TourBody({ tab, layout, active = true }: TourBodyProps): React.J
           ))}
         </section>
       </section>
+      <TourChatPanel tab={tab} />
     </section>
   );
 }

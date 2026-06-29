@@ -591,6 +591,15 @@ export const agentActivitySchema = z.object({
 });
 export type AgentActivity = z.infer<typeof agentActivitySchema>;
 
+// One turn in a conversation with the review agent about a generated tour. The
+// agent answers questions about the stories/tour and can dig into the code with
+// read-only tools; the exchange is kept on the tab (not persisted).
+export const chatMessageSchema = z.object({
+  role: z.enum(["user", "assistant"]),
+  content: z.string()
+});
+export type ChatMessage = z.infer<typeof chatMessageSchema>;
+
 export const operationProgressSchema = z.object({
   operationId: z.string(),
   phase: z.string(),
@@ -604,7 +613,11 @@ export const operationProgressSchema = z.object({
   // the story as it is written, before the operation completes.
   tour: reviewTourSchema.optional(),
   // One step of the agent's transcript, surfaced as a live chat feed.
-  activity: agentActivitySchema.optional()
+  activity: agentActivitySchema.optional(),
+  // The final assistant answer for a tour-chat operation. Set only on the
+  // terminal "complete" update so the renderer can append it as a chat message
+  // (chat history is ephemeral, so unlike tours there is nothing to re-fetch).
+  answer: z.string().optional()
 });
 export type OperationProgress = z.infer<typeof operationProgressSchema>;
 

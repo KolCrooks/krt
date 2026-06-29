@@ -38,18 +38,23 @@ export interface ReviewRepoAccess {
   loadWorkspaceTree(repository: RepositoryRef, headSha: string): Promise<WorkspaceTree>;
 }
 
-export interface ReviewToolContext {
+// The context the read-only exploration tools need. Shared by tour generation
+// and the tour-chat agent, which both let the model dig into the diff and code.
+export interface ExploreToolContext {
   repos: ReviewRepoAccess;
   repository: RepositoryRef;
-  pullProvider: ProviderId;
   pullNumber: number;
   headSha: string;
-  model: string;
-  generatedAt: string;
   changedFiles: ChangedFile[];
   changeMap?: ChangeMap;
-  onUpdate: (tour: ReviewTour) => void;
   signal?: AbortSignal;
+}
+
+export interface ReviewToolContext extends ExploreToolContext {
+  pullProvider: ProviderId;
+  model: string;
+  generatedAt: string;
+  onUpdate: (tour: ReviewTour) => void;
 }
 
 export interface ToolOutcome {
@@ -63,6 +68,46 @@ export interface ReviewToolset {
   build(): ReviewTour;
   finishRequested: boolean;
   chapterCount: number;
+}
+
+// A read-only toolset shaped for runReviewAgent. It exposes only the exploration
+// tools (no emit/finish tools), so the chat agent answers in free-form text and
+// the agent loop stops when it stops calling tools.
+export interface ExploreToolset {
+  tools: ToolDef[];
+  execute(call: ToolCall): Promise<ToolOutcome>;
+  finishRequested: boolean;
+}
+
+export function createExploreToolset(ctx: ExploreToolContext): ExploreToolset {
+  return {
+    tools: EXPLORE_TOOLS,
+    execute: (call) => executeExploreTool(ctx, call),
+    finishRequested: false
+  };
+}
+
+async function executeExploreTool(ctx: ExploreToolContext, call: ToolCall): Promise<ToolOutcome> {
+  if (ctx.signal?.aborted) {
+    return { content: "The request was cancelled.", isError: true };
+  }
+  const args = (call.arguments && typeof call.arguments === "object" ? call.arguments : {}) as Record<string, unknown>;
+  switch (call.name) {
+    case "list_changed_files":
+      return listChangedFiles(ctx.changedFiles);
+    case "get_file_diff":
+      return getFileDiff(ctx, args);
+    case "read_file":
+      return readFile(ctx, args);
+    case "search_text":
+      return searchText(ctx, args);
+    case "list_files":
+      return listFiles(ctx, args);
+    case "get_blast_radius":
+      return getBlastRadius(ctx, args);
+    default:
+      return { content: `Unknown tool "${call.name}".`, isError: true };
+  }
 }
 
 interface WorkingChapter {
@@ -373,7 +418,7 @@ function listChangedFiles(changedFiles: ChangedFile[]): ToolOutcome {
   return { content: `Changed files (${changedFiles.length}):\n${lines.join("\n")}` };
 }
 
-async function getFileDiff(ctx: ReviewToolContext, args: Record<string, unknown>): Promise<ToolOutcome> {
+async function getFileDiff(ctx: ExploreToolContext, args: Record<string, unknown>): Promise<ToolOutcome> {
   const path = asString(args.path);
   if (!path) {
     return { content: "get_file_diff requires a `path`.", isError: true };
@@ -386,7 +431,7 @@ async function getFileDiff(ctx: ReviewToolContext, args: Record<string, unknown>
   return { content: truncate(redacted, MAX_DIFF_CHARS, `diff for ${path}`) };
 }
 
-async function readFile(ctx: ReviewToolContext, args: Record<string, unknown>): Promise<ToolOutcome> {
+async function readFile(ctx: ExploreToolContext, args: Record<string, unknown>): Promise<ToolOutcome> {
   const path = asString(args.path);
   if (!path) {
     return { content: "read_file requires a `path`.", isError: true };
@@ -413,7 +458,7 @@ async function readFile(ctx: ReviewToolContext, args: Record<string, unknown>): 
   return { content: truncate(redacted, MAX_FILE_CHARS, path) };
 }
 
-async function searchText(ctx: ReviewToolContext, args: Record<string, unknown>): Promise<ToolOutcome> {
+async function searchText(ctx: ExploreToolContext, args: Record<string, unknown>): Promise<ToolOutcome> {
   const query = asString(args.query);
   if (!query) {
     return { content: "search_text requires a `query`.", isError: true };
@@ -433,7 +478,7 @@ async function searchText(ctx: ReviewToolContext, args: Record<string, unknown>)
   return { content: `Matches for "${query}"${result.truncated ? " (truncated)" : ""}:\n${truncate(body, MAX_FILE_CHARS, "search results")}` };
 }
 
-async function listFiles(ctx: ReviewToolContext, args: Record<string, unknown>): Promise<ToolOutcome> {
+async function listFiles(ctx: ExploreToolContext, args: Record<string, unknown>): Promise<ToolOutcome> {
   const directory = asString(args.directory);
   const tree = await ctx.repos.loadWorkspaceTree(ctx.repository, ctx.headSha);
   const prefix = directory ? `${directory.replace(/\/+$/, "")}/` : "";
@@ -445,7 +490,7 @@ async function listFiles(ctx: ReviewToolContext, args: Record<string, unknown>):
   return { content: `${matched.join("\n")}${truncatedNote}` };
 }
 
-function getBlastRadius(ctx: ReviewToolContext, args: Record<string, unknown>): ToolOutcome {
+function getBlastRadius(ctx: ExploreToolContext, args: Record<string, unknown>): ToolOutcome {
   const path = asString(args.path);
   if (!path) {
     return { content: "get_blast_radius requires a `path`.", isError: true };
@@ -475,7 +520,8 @@ const KIND_ENUM = ["concept", "replacement", "behavior", "plumbing", "config", "
 const SEVERITY_ENUM = ["info", "nit", "warning", "blocker"];
 const CATEGORY_ENUM = ["correctness", "security", "performance", "style", "testing", "design", "docs"];
 
-export const REVIEW_TOOLS: ToolDef[] = [
+// The read-only exploration tools, shared by tour generation and tour chat.
+const EXPLORE_TOOLS: ToolDef[] = [
   {
     name: "list_changed_files",
     description: "List every file changed in this pull request with its status and added/removed line counts. Call this first to orient yourself.",
@@ -520,7 +566,13 @@ export const REVIEW_TOOLS: ToolDef[] = [
     description:
       "Look up the static-analysis blast radius for a changed file: which symbols it defines in the changed regions and which other files reference them. Use this to judge risk and to connect chapters. Falls back to suggesting search_text when analysis is unavailable.",
     parameters: { type: "object", properties: { path: { type: "string", description: "Repository-relative path of a changed file." } }, required: ["path"], additionalProperties: false }
-  },
+  }
+];
+
+// The full generation toolset: the read-only explore tools plus the emit/finish
+// tools that record the tour.
+export const REVIEW_TOOLS: ToolDef[] = [
+  ...EXPLORE_TOOLS,
   {
     name: "add_chapter",
     description:

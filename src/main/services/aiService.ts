@@ -4,6 +4,7 @@ import type {
   AiProvider,
   AppSettings,
   ChangedFile,
+  ChatMessage,
   CheckRun,
   PullRequestDetail,
   RepositoryRef,
@@ -16,9 +17,10 @@ import type { Keychain } from "./keychain.js";
 import { AppError } from "../errors.js";
 import { getProviderAdapter, modelLikelyLacksToolSupport } from "./ai/adapters.js";
 import { discoverModels, type DiscoveredModel } from "./ai/modelCatalog.js";
-import { createReviewToolset, type ReviewRepoAccess } from "./ai/reviewTools.js";
+import { createExploreToolset, createReviewToolset, type ReviewRepoAccess } from "./ai/reviewTools.js";
 import { assertNotAborted, runReviewAgent } from "./ai/agentRuntime.js";
 import { buildReviewSystemPrompt, buildReviewUserMessage } from "./ai/reviewPrompt.js";
+import { buildChatSystemPrompt } from "./ai/chatPrompt.js";
 import { summarizeChangeMap, type ChangeMap } from "./ai/changeMap.js";
 import type { ChangeMapService } from "./changeMapService.js";
 
@@ -33,6 +35,10 @@ import type { ChangeMapService } from "./changeMapService.js";
 const AGENT_VERSION = "agent-3";
 
 const GENERATION_ATTEMPTS = 2;
+
+// Turn cap for a single tour-chat question: enough turns to explore a few files
+// before answering, bounded so a tool-looping model can't burn the token budget.
+const CHAT_MAX_TURNS = 12;
 
 interface GenerateTourInput {
   pullRequest: PullRequestDetail;
@@ -53,6 +59,20 @@ export interface AiGenerationOptions {
     activity?: { kind: "think" | "say" | "tool" | "result"; text: string };
   }) => void;
   onStats?: (stats: { turns: number; outputTokens: number; stoppedReason: string }) => void;
+}
+
+export interface ChatAboutTourInput {
+  pullRequest: PullRequestDetail;
+  changedFiles: ChangedFile[];
+  tour: ReviewTour;
+  // The full conversation so far, oldest first, ending with the reviewer's new
+  // question. Chat history is ephemeral, so the renderer replays it each turn.
+  messages: ChatMessage[];
+}
+
+export interface AiChatOptions {
+  signal?: AbortSignal;
+  onActivity?: (activity: { kind: "think" | "say" | "tool" | "result"; text: string }) => void;
 }
 
 export class AiService {
@@ -97,37 +117,10 @@ export class AiService {
       return cached;
     }
 
-    if (!settings.ai.enabled || settings.ai.provider === "disabled") {
-      throw new AppError(
-        "ai_disabled",
-        "AI review is turned off. Enable a provider in Settings → AI Review to generate a tour."
-      );
-    }
-
-    const adapter = getProviderAdapter(settings.ai.provider);
-    if (!adapter || !adapter.supportsTools) {
-      throw new AppError(
-        "ai_tools_unsupported",
-        `The ${settings.ai.provider} provider cannot run AI review because it does not support tool calling.`
-      );
-    }
-    if (modelLikelyLacksToolSupport(settings.ai.provider, settings.ai.model)) {
-      throw new AppError(
-        "ai_tools_unsupported",
-        `The model "${settings.ai.model}" does not support tool calling, which AI review requires. Choose a tool-capable model in Settings → AI Review.`
-      );
-    }
+    const { adapter, apiKey } = await this.resolveAgentConfig(settings);
 
     options.onProgress?.({ phase: "prepare", message: "Preparing the review agent", percent: 12 });
     assertNotAborted(options.signal);
-
-    const apiKey = await this.resolveApiKey(settings);
-    if (settings.ai.provider !== "ollama" && settings.ai.provider !== "bedrock" && !apiKey) {
-      throw new AppError(
-        "ai_no_key",
-        `No API key is configured for ${settings.ai.provider}. Add one in Settings → AI Review before generating a tour.`
-      );
-    }
 
     const repository = input.pullRequest.repository;
     const headSha = input.pullRequest.headSha;
@@ -157,6 +150,99 @@ export class AiService {
     options.onProgress?.({ phase: "persist", message: "Persisting AI tour", percent: 94 });
     this.persistTour(tour, settings);
     return tour;
+  }
+
+  // Shared preflight for any agent run (generation or chat): confirm AI is on,
+  // the provider/model can call tools, and a key is available. Throws AppError
+  // with a specific code on any failure.
+  private async resolveAgentConfig(
+    settings: AppSettings
+  ): Promise<{ adapter: NonNullable<ReturnType<typeof getProviderAdapter>>; apiKey: string | null }> {
+    if (!settings.ai.enabled || settings.ai.provider === "disabled") {
+      throw new AppError(
+        "ai_disabled",
+        "AI review is turned off. Enable a provider in Settings → AI Review to generate a tour."
+      );
+    }
+
+    const adapter = getProviderAdapter(settings.ai.provider);
+    if (!adapter || !adapter.supportsTools) {
+      throw new AppError(
+        "ai_tools_unsupported",
+        `The ${settings.ai.provider} provider cannot run AI review because it does not support tool calling.`
+      );
+    }
+    if (modelLikelyLacksToolSupport(settings.ai.provider, settings.ai.model)) {
+      throw new AppError(
+        "ai_tools_unsupported",
+        `The model "${settings.ai.model}" does not support tool calling, which AI review requires. Choose a tool-capable model in Settings → AI Review.`
+      );
+    }
+
+    const apiKey = await this.resolveApiKey(settings);
+    if (settings.ai.provider !== "ollama" && settings.ai.provider !== "bedrock" && !apiKey) {
+      throw new AppError(
+        "ai_no_key",
+        `No API key is configured for ${settings.ai.provider}. Add one in Settings → AI Review before generating a tour.`
+      );
+    }
+
+    return { adapter, apiKey };
+  }
+
+  // Answer a reviewer's question about an already-generated tour. The agent is
+  // grounded in the tour and can dig into the checked-out code with the read-only
+  // exploration tools; it replies in prose rather than emitting tour tools.
+  async chatAboutTour(input: ChatAboutTourInput, options: AiChatOptions = {}): Promise<string> {
+    assertNotAborted(options.signal);
+    const question = input.messages.at(-1);
+    if (!question || question.role !== "user" || !question.content.trim()) {
+      throw new AppError("ai_invalid_chat", "Ask a question to chat about the tour.");
+    }
+
+    const settings = this.getSettings();
+    const { adapter, apiKey } = await this.resolveAgentConfig(settings);
+
+    const repository = input.pullRequest.repository;
+    const headSha = input.pullRequest.headSha;
+    if (!this.repos.getWorktreePath(repository, headSha)) {
+      throw new AppError(
+        "ai_requires_worktree",
+        "Chatting about the tour reads the checked-out code, so it needs this pull request checked out in managed mode."
+      );
+    }
+
+    const toolset = createExploreToolset({
+      repos: this.repos,
+      repository,
+      pullNumber: input.pullRequest.number,
+      headSha,
+      changedFiles: input.changedFiles,
+      signal: options.signal
+    });
+
+    const result = await runReviewAgent({
+      adapter,
+      settings,
+      apiKey,
+      system: buildChatSystemPrompt(input.pullRequest, input.tour),
+      userMessage: buildChatUserMessage(input.messages),
+      toolset,
+      signal: options.signal,
+      // A question is a bounded task; cap turns so a model that loops on tools
+      // instead of answering can't run the full token budget down.
+      maxTurns: CHAT_MAX_TURNS,
+      onActivity: ({ kind, text }) => options.onActivity?.({ kind, text })
+    });
+    assertNotAborted(options.signal);
+
+    const answer = result.finalText.trim();
+    if (!answer) {
+      throw new AppError("ai_empty_answer", "The agent finished without an answer. Try rephrasing your question.", {
+        retryable: true
+      });
+    }
+    return answer;
   }
 
   private async runAgentWithRetries(
@@ -324,4 +410,21 @@ export class AiService {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// Flatten the conversation into a single user message for the agent. Prior turns
+// are replayed as a transcript so the agent has context; the latest question is
+// called out last. (History is kept ephemeral, so it is replayed each turn
+// rather than round-tripped as provider-native assistant messages.)
+function buildChatUserMessage(messages: ChatMessage[]): string {
+  const latest = messages.at(-1);
+  const question = latest?.content.trim() ?? "";
+  const history = messages.slice(0, -1);
+  if (history.length === 0) {
+    return question;
+  }
+  const transcript = history
+    .map((message) => `${message.role === "user" ? "Reviewer" : "You"}: ${message.content.trim()}`)
+    .join("\n\n");
+  return `Conversation so far:\n${transcript}\n\nReviewer's new question:\n${question}`;
 }

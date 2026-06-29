@@ -8,6 +8,7 @@ import {
   cacheCleanupResultSchema,
   cacheStatsSchema,
   changedFileSchema,
+  chatMessageSchema,
   checkRunSchema,
   dataModeSchema,
   diagnosticsSnapshotSchema,
@@ -54,6 +55,12 @@ const aiGenerateTourInput = z.object({
   reviewThreads: z.array(reviewThreadSchema).default([]),
   checks: z.array(checkRunSchema).default([]),
   force: z.boolean().default(false)
+});
+const aiChatInput = z.object({
+  pullRequest: pullRequestDetailSchema,
+  changedFiles: z.array(changedFileSchema),
+  tour: reviewTourSchema,
+  messages: z.array(chatMessageSchema).min(1)
 });
 const pullRequestOpenInput = z.object({
   repository: repositoryRefSchema,
@@ -474,6 +481,10 @@ export const ipcContract = {
       operationId: z.string(),
       cachedTour: reviewTourSchema.nullable()
     })
+  },
+  "ai:startTourChat": {
+    input: aiChatInput,
+    output: z.object({ operationId: z.string() })
   },
   "ai:listModels": {
     input: z.object({ provider: aiProviderSchema.optional() }).optional(),

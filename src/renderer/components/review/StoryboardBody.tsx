@@ -14,6 +14,7 @@ import { AgentActivityFeed } from "./AgentActivityFeed.js";
 import { AgentWorkingOverlay } from "./AgentWorkingOverlay.js";
 import { chapterFocusRanges, computeFocusedChangeStats, resolveChapterFiles } from "./chapterFiles.js";
 import { RiskLevelPill } from "./RiskLevelPill.js";
+import { TourChatPanel } from "./TourChatPanel.js";
 
 type Relation = TourGraph["edges"][number]["relation"];
 
@@ -494,6 +495,7 @@ export function StoryboardBody({ tab, layout, active = true }: StoryboardBodyPro
           </div>
         </section>
       ) : null}
+      <TourChatPanel tab={tab} />
     </section>
   );
 }
