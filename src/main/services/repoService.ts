@@ -318,6 +318,10 @@ export class RepoService {
         cancelled: false
       });
       this.watchWorktree(input.repository, input.headSha);
+      // Reclaim space from older inactive worktrees once a fresh one lands, so
+      // the on-disk set stays within the configured budget. Best-effort: the
+      // just-created worktree is active and so is never evicted.
+      await this.enforceWorktreeCacheBudget();
     } catch (error) {
       const signal = this.operations.signal(operationId);
       const cancelled = signal?.aborted || (error instanceof AppError && error.code === "operation_cancelled");
@@ -624,6 +628,23 @@ export class RepoService {
           .all() as WorktreeRow[]);
 
     return Promise.all(rows.map((row) => this.mapWorktreeRow(row)));
+  }
+
+  // Enforce the user's configured disk budget across all managed worktrees by
+  // LRU-evicting inactive ones until the total fits. Best-effort: a missing or
+  // non-positive budget is a no-op, and failures never propagate (this runs on
+  // startup and after checkout, neither of which should fail over cleanup).
+  async enforceWorktreeCacheBudget(): Promise<void> {
+    const gigabytes = this.getSettings?.().data.worktreeCacheSizeGb;
+    if (!gigabytes || gigabytes <= 0) {
+      return;
+    }
+    const maxBytes = Math.round(gigabytes * 1024 * 1024 * 1024);
+    try {
+      await this.cleanupWorktrees({ maxBytes });
+    } catch {
+      // Cleanup is opportunistic; leave the worktrees in place on failure.
+    }
   }
 
   async cleanupWorktrees(input: {

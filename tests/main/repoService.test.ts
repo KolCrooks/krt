@@ -351,6 +351,44 @@ describe("RepoService managed worktree reads", () => {
     expect(existsSync(active)).toBe(true);
   });
 
+  it("enforces the configured cache budget, evicting inactive worktrees but keeping active ones", async () => {
+    const root = await mkdtemp(join(tmpdir(), "krt2-repo-service-"));
+    const paths = createAppPaths(root);
+    const db = openDatabase(":memory:");
+    // A near-zero budget forces eviction of everything that is eligible.
+    const service = new RepoService(paths, db, new OperationService(), {
+      getSettings: () => ({ ...defaultAppSettings, data: { ...defaultAppSettings.data, worktreeCacheSizeGb: 1e-9 } })
+    });
+    const inactive = join(paths.worktrees, "github", "kol", "repo", "12-old");
+    const active = join(paths.worktrees, "github", "kol", "repo", "12-active");
+    await mkdir(inactive, { recursive: true });
+    await mkdir(active, { recursive: true });
+    await writeFile(join(inactive, "f.txt"), "data");
+    await writeFile(join(active, "f.txt"), "data");
+    insertWorktree(db, "old", inactive, "2026-05-20T00:00:00.000Z", 0);
+    insertWorktree(db, "active", active, "2026-05-21T00:00:00.000Z", 1);
+
+    await service.enforceWorktreeCacheBudget();
+
+    expect(existsSync(inactive)).toBe(false); // over budget and inactive → evicted
+    expect(existsSync(active)).toBe(true); // active worktrees are never evicted
+  });
+
+  it("does not enforce a cache budget when no settings are available", async () => {
+    const root = await mkdtemp(join(tmpdir(), "krt2-repo-service-"));
+    const paths = createAppPaths(root);
+    const db = openDatabase(":memory:");
+    const service = new RepoService(paths, db, new OperationService());
+    const inactive = join(paths.worktrees, "github", "kol", "repo", "12-old");
+    await mkdir(inactive, { recursive: true });
+    await writeFile(join(inactive, "f.txt"), "data");
+    insertWorktree(db, "old", inactive, "2026-05-20T00:00:00.000Z", 0);
+
+    await service.enforceWorktreeCacheBudget();
+
+    expect(existsSync(inactive)).toBe(true); // no budget configured → no-op
+  });
+
   it("lists checked out worktrees with cached branch metadata", async () => {
     const root = await mkdtemp(join(tmpdir(), "krt2-repo-service-"));
     const paths = createAppPaths(root);
