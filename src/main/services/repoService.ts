@@ -41,8 +41,6 @@ const SEARCH_IGNORED_DIRECTORIES = new Set([
 ]);
 const DEFAULT_WORKSPACE_TREE_MAX_FILES = 50_000;
 const DEFAULT_TEXT_SEARCH_MAX_RESULTS = 25;
-const DEFAULT_TEXT_SEARCH_MAX_FILES = 2_000;
-const DEFAULT_TEXT_SEARCH_MAX_FILE_BYTES = 200_000;
 const TEXT_SEARCH_MAX_SNIPPET_LENGTH = 180;
 const DEFAULT_GIT_TIMEOUT_MS = 120_000;
 const GIT_NETWORK_TIMEOUT_MS = 10 * 60_000;
@@ -421,62 +419,73 @@ export class RepoService {
 
     const terms = normalizeSearchTerms(query);
     const maxResults = Math.max(1, options.maxResults ?? DEFAULT_TEXT_SEARCH_MAX_RESULTS);
-    const maxFiles = Math.max(1, options.maxFiles ?? DEFAULT_TEXT_SEARCH_MAX_FILES);
-    const maxFileBytes = Math.max(1, options.maxFileBytes ?? DEFAULT_TEXT_SEARCH_MAX_FILE_BYTES);
-    const workspaceFiles = await this.listWorkspaceFilesForSearch(worktreePath, maxFiles);
-    const results: WorkspaceTextSearchResult["results"] = [];
-    let searchedFiles = 0;
-    let skippedFiles = workspaceFiles.skippedFiles;
-    let truncated = workspaceFiles.truncated;
 
     if (terms.length === 0) {
-      return {
-        repository,
-        headSha,
-        query,
-        searchedFiles: 0,
-        skippedFiles,
-        truncated,
-        results: []
-      };
+      return { repository, headSha, query, searchedFiles: 0, skippedFiles: 0, truncated: false, results: [] };
     }
 
-    for (const path of workspaceFiles.paths) {
-      if (results.length >= maxResults) {
-        truncated = true;
-        break;
+    // Use `git grep` over the whole worktree rather than a bounded manual walk.
+    // The previous JS walk read files itself and capped scanning at a few
+    // thousand files, so in a large monorepo it silently missed code that was
+    // checked out but never reached. git grep scans every tracked file fast and
+    // naturally skips ignored/untracked junk (node_modules, build output, etc.).
+    // -n line numbers, -I skip binaries, -i case-insensitive, -F literal terms
+    // (so identifiers like `context.WithoutCancel` aren't treated as regex), and
+    // --all-match requires every term to appear in a file (mirrors the prior
+    // file-level AND).
+    const grepArgs = ["-C", worktreePath, "grep", "-n", "-I", "-i", "-F", "--no-color"];
+    if (terms.length > 1) {
+      grepArgs.push("--all-match");
+    }
+    for (const term of terms) {
+      grepArgs.push("-e", term);
+    }
+    // allowFailure: git grep exits non-zero when there are no matches (1) or when
+    // the worktree is not a git repo (128); both surface here as empty output.
+    const output = await this.runGitForOutput(grepArgs, { allowFailure: true });
+
+    const byPath = new Map<string, Array<{ lineNumber: number; lineText: string }>>();
+    let truncated = false;
+    for (const rawLine of output.split("\n")) {
+      if (!rawLine) {
+        continue;
       }
-
-      try {
-        const filePath = this.safeWorktreePath(worktreePath, path);
-        const fileStat = await stat(filePath);
-        if (!fileStat.isFile() || fileStat.size > maxFileBytes) {
-          skippedFiles += 1;
-          continue;
+      // Format: <path>:<lineNumber>:<lineText>. Split on the first two colons so
+      // colons inside the matched line are preserved.
+      const firstColon = rawLine.indexOf(":");
+      const secondColon = firstColon < 0 ? -1 : rawLine.indexOf(":", firstColon + 1);
+      if (firstColon < 0 || secondColon < 0) {
+        continue;
+      }
+      const path = rawLine.slice(0, firstColon);
+      const lineNumber = Number(rawLine.slice(firstColon + 1, secondColon));
+      if (!Number.isInteger(lineNumber)) {
+        continue;
+      }
+      let matches = byPath.get(path);
+      if (!matches) {
+        if (byPath.size >= maxResults) {
+          truncated = true;
+          break;
         }
-
-        const contents = await readFile(filePath, "utf8");
-        if (contents.includes("\0")) {
-          skippedFiles += 1;
-          continue;
-        }
-        searchedFiles += 1;
-
-        const matches = findTextMatches(contents, terms);
-        if (matches.length > 0) {
-          results.push({ path, matches });
-        }
-      } catch {
-        skippedFiles += 1;
+        matches = [];
+        byPath.set(path, matches);
+      }
+      // Keep a few representative lines per file, as the prior implementation did.
+      if (matches.length < 3) {
+        matches.push({ lineNumber, lineText: truncateSearchSnippet(rawLine.slice(secondColon + 1).trim()) });
       }
     }
 
+    const results: WorkspaceTextSearchResult["results"] = [...byPath.entries()].map(([path, matches]) => ({ path, matches }));
     return {
       repository,
       headSha,
       query,
-      searchedFiles,
-      skippedFiles,
+      // searchedFiles now reports files with matches; git grep scans the whole
+      // tree, so a per-file "scanned" count is no longer meaningful.
+      searchedFiles: results.length,
+      skippedFiles: 0,
       truncated,
       results
     };
@@ -1073,28 +1082,6 @@ function normalizeSearchTerms(query: string): string[] {
     .toLowerCase()
     .split(/\s+/)
     .filter(Boolean);
-}
-
-function findTextMatches(contents: string, terms: readonly string[]): Array<{ lineNumber: number; lineText: string }> {
-  if (terms.length === 0 || !terms.every((term) => contents.toLowerCase().includes(term))) {
-    return [];
-  }
-
-  const matches: Array<{ lineNumber: number; lineText: string }> = [];
-  const lines = contents.split(/\r?\n/);
-  for (let index = 0; index < lines.length && matches.length < 3; index += 1) {
-    const line = lines[index] ?? "";
-    const searchableLine = line.toLowerCase();
-    if (!terms.some((term) => searchableLine.includes(term))) {
-      continue;
-    }
-    matches.push({
-      lineNumber: index + 1,
-      lineText: truncateSearchSnippet(line.trim())
-    });
-  }
-
-  return matches;
 }
 
 function truncateSearchSnippet(value: string): string {

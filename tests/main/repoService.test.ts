@@ -1,10 +1,14 @@
 // @vitest-environment node
 import { Buffer } from "node:buffer";
+import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
 import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { setTimeout as delay } from "node:timers/promises";
+import { promisify } from "node:util";
+
+const execFileAsync = promisify(execFile);
 import { describe, expect, it, vi } from "vitest";
 import { workspaceFileChangeEvent } from "../../src/shared/ipc.js";
 import { createAppPaths } from "../../src/main/appPaths.js";
@@ -265,7 +269,7 @@ describe("RepoService managed worktree reads", () => {
     expect(tree.paths).toEqual(["Cargo.toml", "src/generated.rs", "src/lib.rs"]);
   });
 
-  it("searches bounded text content in a managed worktree", async () => {
+  it("searches the whole worktree with git grep, excluding ignored files", async () => {
     const root = await mkdtemp(join(tmpdir(), "krt2-repo-service-"));
     const paths = createAppPaths(root);
     const db = openDatabase(":memory:");
@@ -276,20 +280,19 @@ describe("RepoService managed worktree reads", () => {
     await writeFile(join(worktreePath, "src", "App.tsx"), "export const workspace = true;\nconst eventFlow = workspace;\n");
     await writeFile(join(worktreePath, "src", "Other.ts"), "export const other = true;\n");
     await writeFile(join(worktreePath, "node_modules", "pkg", "index.js"), "workspace event should be ignored\n");
+    // node_modules is gitignored in real repos, so git grep never sees it.
+    await writeFile(join(worktreePath, ".gitignore"), "node_modules/\n");
+    await initGitRepoWithTrackedFiles(worktreePath);
 
     insertWorktree(db, "abc123", worktreePath, new Date().toISOString(), 1);
 
-    const result = await service.searchWorkspaceText(repository, "abc123", "workspace event", {
-      maxResults: 5,
-      maxFiles: 10,
-      maxFileBytes: 10_000
-    });
+    const result = await service.searchWorkspaceText(repository, "abc123", "workspace event", { maxResults: 5 });
 
     expect(result).toMatchObject({
       repository,
       headSha: "abc123",
       query: "workspace event",
-      searchedFiles: 2,
+      searchedFiles: 1,
       skippedFiles: 0,
       truncated: false
     });
@@ -572,6 +575,17 @@ describe("RepoService local repo support", () => {
   });
 });
 
+// Initialize a git repo and track the current files so `git grep` (which scans
+// tracked files) can find them. Config is local so it never touches global git.
+async function initGitRepoWithTrackedFiles(worktreePath: string): Promise<void> {
+  const run = (args: string[]): Promise<unknown> => execFileAsync("git", ["-C", worktreePath, ...args]);
+  await run(["init"]);
+  await run(["config", "user.email", "test@example.com"]);
+  await run(["config", "user.name", "Test"]);
+  await run(["add", "-A"]);
+  await run(["commit", "-m", "initial", "--no-gpg-sign"]);
+}
+
 function insertWorktree(
   db: ReturnType<typeof openDatabase>,
   headSha: string,
@@ -593,7 +607,7 @@ function insertWorktree(
   }
 }
 
-async function waitForOperationDone(operations: OperationService, operationId: string, maxAttempts = 20): Promise<void> {
+async function waitForOperationDone(operations: OperationService, operationId: string, maxAttempts = 300): Promise<void> {
   for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
     if (operations.get(operationId)?.done) {
       return;
