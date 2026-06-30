@@ -18,12 +18,17 @@ import type {
   WorkspaceTree,
   WorktreeCleanupResult
 } from "../../shared/schemas.js";
+import { rgPath } from "@vscode/ripgrep";
 import type { AppPaths } from "../appPaths.js";
 import type { OperationService } from "./operationService.js";
 import type { SqliteDatabase } from "./database.js";
 import { AppError } from "../errors.js";
 
 const execFileAsync = promisify(execFile);
+// Bundled ripgrep binary. In a packaged app the binary is unpacked from the asar
+// (see asarUnpack in electron-builder.yml), so rewrite the path accordingly; in
+// dev the path points straight at node_modules and the replace is a no-op.
+const RIPGREP_PATH = rgPath.replace("app.asar", "app.asar.unpacked");
 const SEARCH_IGNORED_DIRECTORIES = new Set([
   ".git",
   ".jj",
@@ -41,8 +46,6 @@ const SEARCH_IGNORED_DIRECTORIES = new Set([
 ]);
 const DEFAULT_WORKSPACE_TREE_MAX_FILES = 50_000;
 const DEFAULT_TEXT_SEARCH_MAX_RESULTS = 25;
-const DEFAULT_TEXT_SEARCH_MAX_FILES = 2_000;
-const DEFAULT_TEXT_SEARCH_MAX_FILE_BYTES = 200_000;
 const TEXT_SEARCH_MAX_SNIPPET_LENGTH = 180;
 const DEFAULT_GIT_TIMEOUT_MS = 120_000;
 const GIT_NETWORK_TIMEOUT_MS = 10 * 60_000;
@@ -421,65 +424,109 @@ export class RepoService {
 
     const terms = normalizeSearchTerms(query);
     const maxResults = Math.max(1, options.maxResults ?? DEFAULT_TEXT_SEARCH_MAX_RESULTS);
-    const maxFiles = Math.max(1, options.maxFiles ?? DEFAULT_TEXT_SEARCH_MAX_FILES);
-    const maxFileBytes = Math.max(1, options.maxFileBytes ?? DEFAULT_TEXT_SEARCH_MAX_FILE_BYTES);
-    const workspaceFiles = await this.listWorkspaceFilesForSearch(worktreePath, maxFiles);
-    const results: WorkspaceTextSearchResult["results"] = [];
-    let searchedFiles = 0;
-    let skippedFiles = workspaceFiles.skippedFiles;
-    let truncated = workspaceFiles.truncated;
 
     if (terms.length === 0) {
-      return {
-        repository,
-        headSha,
-        query,
-        searchedFiles: 0,
-        skippedFiles,
-        truncated,
-        results: []
-      };
+      return { repository, headSha, query, searchedFiles: 0, skippedFiles: 0, truncated: false, results: [] };
     }
 
-    for (const path of workspaceFiles.paths) {
+    // Search the whole worktree with the bundled ripgrep rather than a bounded
+    // manual walk. The previous JS walk read files itself and capped scanning at
+    // a few thousand files, so in a large monorepo it silently missed code that
+    // was checked out but never reached. ripgrep scans the entire tree fast and
+    // respects .gitignore (skipping node_modules, build output, etc.) on its own.
+    const output = await this.runWorkspaceSearch(worktreePath, terms);
+
+    // ripgrep prints `path:lineNumber:lineText` (paths relative to the worktree,
+    // since we run it with that cwd). Collect every matched line per file first so
+    // we can apply file-level AND across terms below.
+    const linesByFile = new Map<string, Array<{ lineNumber: number; lineText: string }>>();
+    const fileOrder: string[] = [];
+    for (const rawLine of output.split("\n")) {
+      if (!rawLine) {
+        continue;
+      }
+      // Split on the first two colons so colons inside the matched line survive.
+      const firstColon = rawLine.indexOf(":");
+      const secondColon = firstColon < 0 ? -1 : rawLine.indexOf(":", firstColon + 1);
+      if (firstColon < 0 || secondColon < 0) {
+        continue;
+      }
+      // ripgrep prints paths relative to the search dir prefixed with "./".
+      const path = rawLine.slice(0, firstColon).replace(/^\.\//, "");
+      const lineNumber = Number(rawLine.slice(firstColon + 1, secondColon));
+      if (!Number.isInteger(lineNumber)) {
+        continue;
+      }
+      let lines = linesByFile.get(path);
+      if (!lines) {
+        lines = [];
+        linesByFile.set(path, lines);
+        fileOrder.push(path);
+      }
+      lines.push({ lineNumber, lineText: rawLine.slice(secondColon + 1) });
+    }
+
+    // ripgrep ORs the terms; keep only files where every term appears (the prior
+    // file-level AND), cap files at maxResults, and a few representative lines each.
+    const results: WorkspaceTextSearchResult["results"] = [];
+    let truncated = false;
+    for (const path of fileOrder) {
+      const lines = linesByFile.get(path)!;
+      const haystack = lines.map((line) => line.lineText.toLowerCase()).join("\n");
+      if (!terms.every((term) => haystack.includes(term))) {
+        continue;
+      }
       if (results.length >= maxResults) {
         truncated = true;
         break;
       }
-
-      try {
-        const filePath = this.safeWorktreePath(worktreePath, path);
-        const fileStat = await stat(filePath);
-        if (!fileStat.isFile() || fileStat.size > maxFileBytes) {
-          skippedFiles += 1;
-          continue;
-        }
-
-        const contents = await readFile(filePath, "utf8");
-        if (contents.includes("\0")) {
-          skippedFiles += 1;
-          continue;
-        }
-        searchedFiles += 1;
-
-        const matches = findTextMatches(contents, terms);
-        if (matches.length > 0) {
-          results.push({ path, matches });
-        }
-      } catch {
-        skippedFiles += 1;
-      }
+      results.push({
+        path,
+        matches: lines.slice(0, 3).map((line) => ({ lineNumber: line.lineNumber, lineText: truncateSearchSnippet(line.lineText.trim()) }))
+      });
     }
 
     return {
       repository,
       headSha,
       query,
-      searchedFiles,
-      skippedFiles,
+      // searchedFiles reports files with matches; ripgrep scans the whole tree,
+      // so a per-file "scanned" count is no longer meaningful.
+      searchedFiles: results.length,
+      skippedFiles: 0,
       truncated,
       results
     };
+  }
+
+  // Run the bundled ripgrep over the worktree for the given literal terms (ORed).
+  // Returns `path:line:text` lines, or "" when there are no matches. ripgrep is
+  // bundled (see RIPGREP_PATH), so a launch failure is a real error, not a miss.
+  private async runWorkspaceSearch(worktreePath: string, terms: string[]): Promise<string> {
+    const args = ["--no-heading", "--line-number", "--color", "never", "--no-messages", "-i", "-F"];
+    for (const term of terms) {
+      args.push("-e", term);
+    }
+    // Explicit search path: without one, ripgrep reads stdin (which never closes
+    // for a spawned process) and hangs. "." with cwd searches the worktree.
+    args.push(".");
+    try {
+      const { stdout } = await execFileAsync(RIPGREP_PATH, args, {
+        cwd: worktreePath,
+        timeout: DEFAULT_GIT_TIMEOUT_MS,
+        maxBuffer: 1024 * 1024 * 20
+      });
+      return stdout;
+    } catch (error) {
+      // ripgrep exits 1 when there are simply no matches — not a failure.
+      if (error && typeof error === "object" && "code" in error && (error as { code: unknown }).code === 1) {
+        return "";
+      }
+      throw new AppError(
+        "text_search_failed",
+        `Workspace search failed: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
   }
 
   getWorktreePath(repository: RepositoryRef, headSha: string): string | null {
@@ -1073,28 +1120,6 @@ function normalizeSearchTerms(query: string): string[] {
     .toLowerCase()
     .split(/\s+/)
     .filter(Boolean);
-}
-
-function findTextMatches(contents: string, terms: readonly string[]): Array<{ lineNumber: number; lineText: string }> {
-  if (terms.length === 0 || !terms.every((term) => contents.toLowerCase().includes(term))) {
-    return [];
-  }
-
-  const matches: Array<{ lineNumber: number; lineText: string }> = [];
-  const lines = contents.split(/\r?\n/);
-  for (let index = 0; index < lines.length && matches.length < 3; index += 1) {
-    const line = lines[index] ?? "";
-    const searchableLine = line.toLowerCase();
-    if (!terms.some((term) => searchableLine.includes(term))) {
-      continue;
-    }
-    matches.push({
-      lineNumber: index + 1,
-      lineText: truncateSearchSnippet(line.trim())
-    });
-  }
-
-  return matches;
 }
 
 function truncateSearchSnippet(value: string): string {

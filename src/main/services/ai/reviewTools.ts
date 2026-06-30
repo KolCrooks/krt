@@ -421,7 +421,9 @@ async function searchText(ctx: ReviewToolContext, args: Record<string, unknown>)
   const maxResults = Math.min(MAX_SEARCH_RESULTS, asPositiveInt(args.maxResults) ?? MAX_SEARCH_RESULTS);
   const result = await ctx.repos.searchWorkspaceText(ctx.repository, ctx.headSha, query, { maxResults });
   if (result.results.length === 0) {
-    return { content: `No matches for "${query}".` };
+    // Be explicit that the whole checked-out repository was searched, so a miss
+    // is not misread as "this code does not exist".
+    return { content: `No matches for "${query}" in the checked-out repository.` };
   }
   const lines: string[] = [];
   for (const match of result.results) {

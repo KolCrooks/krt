@@ -13,6 +13,10 @@ files:
   - package.json
 
 asar: true
+# The bundled ripgrep binary must live outside the asar archive so it stays
+# executable at runtime. Covers every @vscode/ripgrep platform sub-package.
+asarUnpack:
+  - node_modules/@vscode/ripgrep-*/bin/**
 
 mac:
   icon: build/icon.icns
