@@ -62,6 +62,9 @@ async function createMainWindow(): Promise<void> {
       // Startup should continue even if the updater cannot reach the release service.
     });
   }
+  // Reclaim worktree disk that exceeds the configured budget, evicting only
+  // inactive worktrees. Fire-and-forget so it never delays the window.
+  void repos.enforceWorktreeCacheBudget();
 
   registerIpcHandlers({
     providers,
