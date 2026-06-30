@@ -269,7 +269,7 @@ describe("RepoService managed worktree reads", () => {
     expect(tree.paths).toEqual(["Cargo.toml", "src/generated.rs", "src/lib.rs"]);
   });
 
-  it("searches the whole worktree with git grep, excluding ignored files", async () => {
+  it("searches the whole worktree with ripgrep, excluding ignored files", async () => {
     const root = await mkdtemp(join(tmpdir(), "krt2-repo-service-"));
     const paths = createAppPaths(root);
     const db = openDatabase(":memory:");
@@ -575,8 +575,9 @@ describe("RepoService local repo support", () => {
   });
 });
 
-// Initialize a git repo and track the current files so `git grep` (which scans
-// tracked files) can find them. Config is local so it never touches global git.
+// Make the worktree a real git repo (as managed checkouts are) so ripgrep honors
+// its .gitignore — rg only applies .gitignore rules inside a git repository.
+// Config is local so it never touches global git.
 async function initGitRepoWithTrackedFiles(worktreePath: string): Promise<void> {
   const run = (args: string[]): Promise<unknown> => execFileAsync("git", ["-C", worktreePath, ...args]);
   await run(["init"]);

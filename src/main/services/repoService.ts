@@ -18,12 +18,17 @@ import type {
   WorkspaceTree,
   WorktreeCleanupResult
 } from "../../shared/schemas.js";
+import { rgPath } from "@vscode/ripgrep";
 import type { AppPaths } from "../appPaths.js";
 import type { OperationService } from "./operationService.js";
 import type { SqliteDatabase } from "./database.js";
 import { AppError } from "../errors.js";
 
 const execFileAsync = promisify(execFile);
+// Bundled ripgrep binary. In a packaged app the binary is unpacked from the asar
+// (see asarUnpack in electron-builder.yml), so rewrite the path accordingly; in
+// dev the path points straight at node_modules and the replace is a no-op.
+const RIPGREP_PATH = rgPath.replace("app.asar", "app.asar.unpacked");
 const SEARCH_IGNORED_DIRECTORIES = new Set([
   ".git",
   ".jj",
@@ -424,71 +429,104 @@ export class RepoService {
       return { repository, headSha, query, searchedFiles: 0, skippedFiles: 0, truncated: false, results: [] };
     }
 
-    // Use `git grep` over the whole worktree rather than a bounded manual walk.
-    // The previous JS walk read files itself and capped scanning at a few
-    // thousand files, so in a large monorepo it silently missed code that was
-    // checked out but never reached. git grep scans every tracked file fast and
-    // naturally skips ignored/untracked junk (node_modules, build output, etc.).
-    // -n line numbers, -I skip binaries, -i case-insensitive, -F literal terms
-    // (so identifiers like `context.WithoutCancel` aren't treated as regex), and
-    // --all-match requires every term to appear in a file (mirrors the prior
-    // file-level AND).
-    const grepArgs = ["-C", worktreePath, "grep", "-n", "-I", "-i", "-F", "--no-color"];
-    if (terms.length > 1) {
-      grepArgs.push("--all-match");
-    }
-    for (const term of terms) {
-      grepArgs.push("-e", term);
-    }
-    // allowFailure: git grep exits non-zero when there are no matches (1) or when
-    // the worktree is not a git repo (128); both surface here as empty output.
-    const output = await this.runGitForOutput(grepArgs, { allowFailure: true });
+    // Search the whole worktree with the bundled ripgrep rather than a bounded
+    // manual walk. The previous JS walk read files itself and capped scanning at
+    // a few thousand files, so in a large monorepo it silently missed code that
+    // was checked out but never reached. ripgrep scans the entire tree fast and
+    // respects .gitignore (skipping node_modules, build output, etc.) on its own.
+    const output = await this.runWorkspaceSearch(worktreePath, terms);
 
-    const byPath = new Map<string, Array<{ lineNumber: number; lineText: string }>>();
-    let truncated = false;
+    // ripgrep prints `path:lineNumber:lineText` (paths relative to the worktree,
+    // since we run it with that cwd). Collect every matched line per file first so
+    // we can apply file-level AND across terms below.
+    const linesByFile = new Map<string, Array<{ lineNumber: number; lineText: string }>>();
+    const fileOrder: string[] = [];
     for (const rawLine of output.split("\n")) {
       if (!rawLine) {
         continue;
       }
-      // Format: <path>:<lineNumber>:<lineText>. Split on the first two colons so
-      // colons inside the matched line are preserved.
+      // Split on the first two colons so colons inside the matched line survive.
       const firstColon = rawLine.indexOf(":");
       const secondColon = firstColon < 0 ? -1 : rawLine.indexOf(":", firstColon + 1);
       if (firstColon < 0 || secondColon < 0) {
         continue;
       }
-      const path = rawLine.slice(0, firstColon);
+      // ripgrep prints paths relative to the search dir prefixed with "./".
+      const path = rawLine.slice(0, firstColon).replace(/^\.\//, "");
       const lineNumber = Number(rawLine.slice(firstColon + 1, secondColon));
       if (!Number.isInteger(lineNumber)) {
         continue;
       }
-      let matches = byPath.get(path);
-      if (!matches) {
-        if (byPath.size >= maxResults) {
-          truncated = true;
-          break;
-        }
-        matches = [];
-        byPath.set(path, matches);
+      let lines = linesByFile.get(path);
+      if (!lines) {
+        lines = [];
+        linesByFile.set(path, lines);
+        fileOrder.push(path);
       }
-      // Keep a few representative lines per file, as the prior implementation did.
-      if (matches.length < 3) {
-        matches.push({ lineNumber, lineText: truncateSearchSnippet(rawLine.slice(secondColon + 1).trim()) });
-      }
+      lines.push({ lineNumber, lineText: rawLine.slice(secondColon + 1) });
     }
 
-    const results: WorkspaceTextSearchResult["results"] = [...byPath.entries()].map(([path, matches]) => ({ path, matches }));
+    // ripgrep ORs the terms; keep only files where every term appears (the prior
+    // file-level AND), cap files at maxResults, and a few representative lines each.
+    const results: WorkspaceTextSearchResult["results"] = [];
+    let truncated = false;
+    for (const path of fileOrder) {
+      const lines = linesByFile.get(path)!;
+      const haystack = lines.map((line) => line.lineText.toLowerCase()).join("\n");
+      if (!terms.every((term) => haystack.includes(term))) {
+        continue;
+      }
+      if (results.length >= maxResults) {
+        truncated = true;
+        break;
+      }
+      results.push({
+        path,
+        matches: lines.slice(0, 3).map((line) => ({ lineNumber: line.lineNumber, lineText: truncateSearchSnippet(line.lineText.trim()) }))
+      });
+    }
+
     return {
       repository,
       headSha,
       query,
-      // searchedFiles now reports files with matches; git grep scans the whole
-      // tree, so a per-file "scanned" count is no longer meaningful.
+      // searchedFiles reports files with matches; ripgrep scans the whole tree,
+      // so a per-file "scanned" count is no longer meaningful.
       searchedFiles: results.length,
       skippedFiles: 0,
       truncated,
       results
     };
+  }
+
+  // Run the bundled ripgrep over the worktree for the given literal terms (ORed).
+  // Returns `path:line:text` lines, or "" when there are no matches. ripgrep is
+  // bundled (see RIPGREP_PATH), so a launch failure is a real error, not a miss.
+  private async runWorkspaceSearch(worktreePath: string, terms: string[]): Promise<string> {
+    const args = ["--no-heading", "--line-number", "--color", "never", "--no-messages", "-i", "-F"];
+    for (const term of terms) {
+      args.push("-e", term);
+    }
+    // Explicit search path: without one, ripgrep reads stdin (which never closes
+    // for a spawned process) and hangs. "." with cwd searches the worktree.
+    args.push(".");
+    try {
+      const { stdout } = await execFileAsync(RIPGREP_PATH, args, {
+        cwd: worktreePath,
+        timeout: DEFAULT_GIT_TIMEOUT_MS,
+        maxBuffer: 1024 * 1024 * 20
+      });
+      return stdout;
+    } catch (error) {
+      // ripgrep exits 1 when there are simply no matches — not a failure.
+      if (error && typeof error === "object" && "code" in error && (error as { code: unknown }).code === 1) {
+        return "";
+      }
+      throw new AppError(
+        "text_search_failed",
+        `Workspace search failed: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
   }
 
   getWorktreePath(repository: RepositoryRef, headSha: string): string | null {
